@@ -1,0 +1,76 @@
+[project]
+name = "fimserve"
+version = "0.1.98"
+description = "Framework which is developed with the purpose of quickly generating Flood Inundation Maps (FIM) for emergency response and risk assessment. It is developed under Surface Dynamics Modeling Lab (SDML)."
+authors = [{ name = "Supath Dhital", email = "sdhital@crimson.ua.edu" }]
+maintainers = [{ name = "Supath Dhital", email = "sdhital@crimson.ua.edu" }]
+license = { text = "GPL-3.0" }
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+  #    "teehr==0.5.0",
+  #    "geemap>=0.35.1",
+  #    "pyarrow>=15.0.2",
+    "numpy>=2.0.0",
+    "netcdf4>=1.7.2",
+    "fiona>=1.10.1",
+    "utils>=1.0.2",
+    "matplotlib>=3.9.2",
+    "awscli>=1.42.0",
+    "boto3>=1.40.0",
+    "numba==0.60.0",
+    "bottleneck>=1.3.6",
+    "localtileserver>=0.10.5",
+    "tqdm>=4.67.0",
+    "scipy>=1.14.1",
+    "aiohttp>=3.12.14",
+  #    "scikit-learn>=1.5.2",
+    "tabulate>=0.9.0",
+    "nodejs-bin>=18.4.0a4",
+    "ipykernel>=6.17.1",
+    "beautifulsoup4>=4.12.3",
+    "python-dotenv>=1.0.1",
+    "jupyter>=1.1.1",
+    "notebook>=6.5.7",
+  #    "geocube<=0.7.1",
+    "geopandas>=0.14.3",
+  #   "fimeval>=0.1.59",
+    "setuptools>=82.0.0",
+    "xarray",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3,<8.4",
+    "sphinx<7.0",
+    "sphinx-autobuild>=2024.10.3",
+    "black"
+]
+
+# Install with: pip install "fimserve[sm]"
+# This pulls in PyTorch and SM-enhancement runtime dependencies.
+sm = [
+    "pytorch-lightning>=2.2,<3",
+    "torchmetrics>=1.3,<2",
+]
+
+[project.urls]
+Homepage = "https://github.com/sdmlua/FIMserv"
+Repository = "https://github.com/sdmlua/FIMserv"
+Issues = "https://github.com/sdmlua/FIMserv/issues"
+
+[build-system]
+requires = ["setuptools>=69.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+exclude = ["tests*"]
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "-ra -q"
+testpaths = ["tests"]

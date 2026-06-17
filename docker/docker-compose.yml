@@ -1,0 +1,10 @@
+services:
+  fimbox:
+    platform: linux/amd64
+    image: cuahsi/handfim:latest
+    build:
+      context: handfim/
+      dockerfile: Dockerfile
+    working_dir: /home
+    ulimits:
+      stack: 67108864

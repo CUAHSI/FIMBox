@@ -20,6 +20,11 @@ ENV CPLUS_INCLUDE_PATH=/usr/include/gdal
 ENV C_INCLUDE_PATH=/usr/include/gdal
 ENV GDAL_VERSION=3.7.0
 
+# Force Python stdout/stderr to be unbuffered so log output (including from
+# subprocesses that inherit this env) streams to the console in real time
+# instead of only appearing after the process exits.
+ENV PYTHONUNBUFFERED=1
+
 USER $MAMBA_USER
 
 # Install Python dependencies

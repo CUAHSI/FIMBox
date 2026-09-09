@@ -179,7 +179,8 @@ def __clean_fim_geotiff(
 
 def __compute_fim_scenario(i, huc_id, reach_id, flow_rate_filepath, label):
     print(
-        f"Computing FIM for {huc_id}:{reach_id} - input:{flow_rate_filepath}  - label: {label} \t [{i+1}]"
+        f"Computing FIM for {huc_id}:{reach_id} - input:{flow_rate_filepath}  - label: {label} \t [{i+1}]",
+        flush=True,
     )
     __generate_fim(huc_id, flow_rate_filepath, label)
 

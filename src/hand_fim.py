@@ -194,9 +194,7 @@ def run() -> None:
     args = collect_args()
 
     base_dir = Path.cwd()
-    import pdb
 
-    pdb.set_trace()
     console.print("\n[bold]Preparing mount directories …[/bold]")
     input_dir, output_dir = prepare_volumes(base_dir)
 

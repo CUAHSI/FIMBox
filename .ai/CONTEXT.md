@@ -24,17 +24,16 @@ actual FIM computation using NOAA/OWP's `inundation-mapping` tooling and the
 - **`src/hand_fim.py`** — Implements the HAND-FIM mode end-to-end on the host:
   - Ensures the `cuahsi/handfim:latest` Docker image exists locally, offering to
     `docker pull` it if missing (`image_exists`, `pull_image`, `ensure_image`).
-  - Presents a sub-command menu: `reachfim` (specific reach IDs + flow rates) vs
-    `reachfim_interval` (stage increments derived from rating curves), and
+  - Only supports the `reachfim` sub-command (specific reach IDs + flow rates);
     interactively collects parameters via `typer.prompt` (`collect_args`).
+    The `reachfim_interval` sub-command has been removed.
   - Validates business-logic constraints Typer can't enforce (e.g., matching
     counts of reach IDs/flow rates) in `validate_args`.
   - Creates `input/`/`output/` mount directories (`prepare_volumes`) and runs
     `docker run` with those volumes mounted into `/home/data/inputs` and
     `/home/output`, forwarding args to the container's `entry.py` command.
-  - **Note:** `run()` currently contains a leftover `import pdb; pdb.set_trace()`
-    debug breakpoint before "Preparing mount directories" — likely unintentional
-    and should be removed before this is considered production-ready.
+  - **Note:** `run()` previously contained a leftover `import pdb; pdb.set_trace()`
+    debug breakpoint; it has since been removed.
 
 ## Schema (`schema/`)
 
@@ -61,10 +60,6 @@ actual FIM computation using NOAA/OWP's `inundation-mapping` tooling and the
     generation in parallel via `ProcessPoolExecutor` (`__compute_fim_scenario`
     → `runFIM.runfim`), reorganizes outputs per reach, cleans rasters, and
     converts to Cloud-Optimized GeoTIFF (COG).
-  - `reachfim_interval` — Same pipeline but derives a range of flow scenarios
-    from a single reach's rating curve at fixed stage increments (via
-    `compute_rating_increments.compute_rating_increments`), running one FIM
-    scenario per stage/flow pair.
   - `clean` — Standalone command to clean previously generated FIM GeoTIFFs.
   - Helper internals: `__crop_data` (crop raster to nonzero bounding box),
     `__clean_fim_geotiff` (binarize FIM raster: >0 → 1, else NaN, then crop),
@@ -93,16 +88,17 @@ actual FIM computation using NOAA/OWP's `inundation-mapping` tooling and the
     columns (returns `-9999` if `x_value` is out of range).
   - `__load_rating_curve` — loads `hydroTable_0.csv` for a HUC/reach from the
     expected FIM output directory structure (`output/flood_<huc>/<huc>/branches/0`).
-  - `get_stage` (CLI: `get_stage`) — flow (cms) → stage (m) via rating curve.
+  - `get_stage` (CLI: `get_stage`) — flow (cms) → stage (m) via rating curve;
+    used by `entry.py`'s `reachfim` command to derive output labels.
   - `get_flow` (CLI: `get_flow`) — stage (m) → flow (cms) via rating curve.
   - `compute_rating_increments` (CLI: `get_rating_increments`) — generates a
     list of (stage, flow) pairs at fixed stage increments across a reach's
-    rating-curve range; used by `entry.py`'s `reachfim_interval` command to
-    build multiple FIM scenarios from a single reach.
+    rating-curve range. No longer used by `entry.py` since the
+    `reachfim_interval` command was removed; still available as a standalone
+    CLI command.
 
 ## Known gaps / things to watch
 
-- `src/hand_fim.py` has a stray `pdb.set_trace()` — should be removed.
 - `schema/hand_fim_schema.py` doesn't appear to be consumed elsewhere yet (no
   references found in `src/` or `docker/`) — likely scaffolding for a
   future API/service wrapper around the CLI workflow.

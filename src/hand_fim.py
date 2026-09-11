@@ -1,12 +1,22 @@
 """HAND-FIM mode: image management, argument collection, validation, and container execution."""
 
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import typer
 from rich.console import Console
 from rich.panel import Panel
-from rich.prompt import Confirm
+from rich.prompt import Confirm, Prompt
+
+# The Pydantic schema models live in a sibling `schema/` directory rather
+# than as an installed package, so it must be added to sys.path explicitly.
+SCHEMA_DIR = Path(__file__).resolve().parent.parent / "schema"
+if str(SCHEMA_DIR) not in sys.path:
+    sys.path.insert(0, str(SCHEMA_DIR))
+
+from hand_fim_schema import ScenarioList  # noqa: E402
 
 console = Console()
 
@@ -65,13 +75,51 @@ def prepare_volumes(base_dir: Path) -> tuple[Path, Path]:
     return input_dir, output_dir
 
 
-def collect_args() -> dict:
+INPUT_MODES = {
+    "1": "manual",
+    "2": "json",
+}
+
+INPUT_MODE_MENU = "\n".join(
+    [
+        "  [bold cyan][1][/bold cyan] Enter parameters manually",
+        "  [bold cyan][2][/bold cyan] Load scenarios from a JSON file",
+    ]
+)
+
+
+def select_input_mode() -> str:
+    """Prompt the user to choose how HAND-FIM inputs will be provided."""
+    console.print(
+        Panel(INPUT_MODE_MENU, title="[bold]Select an input method[/bold]", expand=False)
+    )
+    choice = Prompt.ask("Enter choice", choices=list(INPUT_MODES.keys()), default="1")
+    return INPUT_MODES[choice]
+
+
+def load_scenarios(json_path: Path) -> ScenarioList:
+    """Load and validate a scenario JSON file against the HAND-FIM schema."""
+    if not json_path.exists():
+        console.print(f"[bold red]✗ Scenario file not found: {json_path}[/bold red]")
+        raise typer.Exit(1)
+
+    try:
+        scenarios = ScenarioList.model_validate_json(json_path.read_text())
+    except Exception as e:
+        console.print(f"[bold red]✗ Invalid scenario file {json_path}:[/bold red]\n{e}")
+        raise typer.Exit(1)
+
+    console.print(
+        f"[bold green]✓ Loaded {len(scenarios.root)} scenario(s) from {json_path}.[/bold green]"
+    )
+    return scenarios
+
+
+def collect_args_manual() -> dict:
     """
     Interactively collect HAND-FIM run parameters from the user.
     Typer handles type coercion and re-prompts on invalid input automatically.
     """
-    command = "reachfim"
-
     console.print(
         Panel(
             f"[bold]HAND-FIM · Parameters[/bold]\n"
@@ -97,7 +145,7 @@ def collect_args() -> dict:
         "  Output subdirectory (leave blank for none)", default=""
     )
     return {
-        "command": command,
+        "command": "reachfim",
         "huc_id": huc_id,
         "reach_ids": reach_ids,
         "flow_rates": flow_rates,
@@ -107,11 +155,55 @@ def collect_args() -> dict:
     }
 
 
+def collect_args_from_json() -> dict:
+    """
+    Interactively collect a scenario JSON file (see schema/schema.md /
+    schema/schema.json), validate it, and gather the remaining run
+    parameters shared across all scenarios in the file.
+    """
+    console.print(
+        Panel(
+            "[bold]HAND-FIM · Scenario file[/bold]\n"
+            "[dim]Provide a JSON file matching schema/schema.json. Each scenario "
+            "produces one combined output GeoTIFF.[/dim]",
+            expand=False,
+        )
+    )
+
+    json_path = Path(typer.prompt("  Path to scenario JSON file"))
+    load_scenarios(json_path)
+
+    max_procs: int = typer.prompt("  Max concurrent processes", default=1)
+    subdir: str = typer.prompt(
+        "  Output subdirectory (leave blank for none)", default=""
+    )
+    return {
+        "command": "scenario",
+        "json_path": json_path,
+        "max_procs": max_procs,
+        "subdir": subdir or None,
+    }
+
+
+def collect_args() -> dict:
+    """Dispatch to the manual or JSON-file argument collection flow."""
+    mode = select_input_mode()
+    if mode == "json":
+        return collect_args_from_json()
+    return collect_args_manual()
+
+
 def validate_args(args: dict) -> None:
     """
     Validate business logic that Typer cannot enforce at prompt time.
     Type validation (int, float) is handled automatically by typer.prompt().
+    The JSON-file flow is already validated against the schema when loaded
+    in collect_args_from_json(), so there's nothing further to check here.
     """
+    if args["command"] != "reachfim":
+        console.print("[bold green]✓ Input validation passed.[/bold green]")
+        return
+
     errors = []
 
     if not args.get("huc_id", "").strip():
@@ -156,13 +248,21 @@ def run() -> None:
 
     # Build the docker run command, mapping collected args to container positional arguments.
     # entry.py uses typer.Argument (positional), so args are passed in order.
-    container_cmd = [args["command"], args["huc_id"]]
-
-    container_cmd += [args["reach_ids"], args["flow_rates"], str(args["max_procs"])]
-    if args.get("output_labels"):
-        container_cmd.append(args["output_labels"])
-    if args.get("subdir"):
-        container_cmd.append(args["subdir"])
+    if args["command"] == "scenario":
+        # copy the scenario file into the mounted input directory so the
+        # container can read it at /home/data/inputs/<filename>
+        dest = input_dir / args["json_path"].name
+        shutil.copy(args["json_path"], dest)
+        container_cmd = ["scenario", dest.name, str(args["max_procs"])]
+        if args.get("subdir"):
+            container_cmd.append(args["subdir"])
+    else:
+        container_cmd = [args["command"], args["huc_id"]]
+        container_cmd += [args["reach_ids"], args["flow_rates"], str(args["max_procs"])]
+        if args.get("output_labels"):
+            container_cmd.append(args["output_labels"])
+        if args.get("subdir"):
+            container_cmd.append(args["subdir"])
 
     docker_cmd = [
         "docker",

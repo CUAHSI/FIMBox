@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 
+import json
 import os
 import typer
 import numpy
 import shutil
 from pathlib import Path
-from typing import List, Union
+from typing import Dict, List, Union
 
 import rasterio
 from rasterio import Affine
+from rasterio.merge import merge as rasterio_merge
 
 from typing_extensions import Annotated
 
@@ -105,7 +107,15 @@ def __generate_fim(huc_id, flow_rate_filepath, label="") -> None:
 
     code_dir = "/home/code/inundation-mapping"
     output_dir = "/home/output"
-    runFIM.runfim(code_dir, output_dir, huc_id, flow_rate_filepath, label)
+    # Pass `label` as a keyword argument: the installed FIMServ `runfim`
+    # (from CUAHSI/FIMserv@mods-for-docker-execution) has `depth` as its 5th
+    # positional parameter and `label` as its 6th, so passing `label`
+    # positionally here silently bound it to `depth` instead - a non-empty
+    # label string is truthy, so this was unintentionally generating a depth
+    # raster on every run and leaving `label` defaulted to "" (which placed
+    # output directly under `{HUC_code}_inundation/` instead of its own
+    # `{label}/` subdirectory).
+    runFIM.runfim(code_dir, output_dir, huc_id, flow_rate_filepath, label=label)
 
 
 def __crop_data(array, geotiff_profile):
@@ -183,6 +193,68 @@ def __compute_fim_scenario(i, huc_id, reach_id, flow_rate_filepath, label):
         flush=True,
     )
     __generate_fim(huc_id, flow_rate_filepath, label)
+
+
+def __load_scenarios(json_path: Path) -> List[dict]:
+    """
+    Loads and validates a scenario list JSON file (see schema/schema.json
+    and schema/schema.md at the repo root). Performs light-weight
+    structural validation without requiring the pydantic models used on the
+    host side, to avoid adding pydantic as a dependency of this image.
+
+    Arguments:
+        json_path - Path: Path to the scenario JSON file.
+    Returns:
+        List[dict]: The parsed list of scenario dictionaries.
+    """
+
+    if not json_path.exists():
+        print(f"Scenario file not found: {json_path}")
+        raise typer.Exit(1)
+
+    try:
+        data = json.loads(json_path.read_text())
+    except json.JSONDecodeError as e:
+        print(f"Invalid JSON in scenario file {json_path}: {e}")
+        raise typer.Exit(1)
+
+    if not isinstance(data, list) or len(data) == 0:
+        print("Scenario file must contain a non-empty list of scenarios.")
+        raise typer.Exit(1)
+
+    errors = []
+    for i, scenario in enumerate(data):
+        scenario_id = scenario.get("ScenarioID") if isinstance(scenario, dict) else None
+        if not scenario_id or not isinstance(scenario_id, str):
+            errors.append(f"Scenario #{i}: missing or invalid 'ScenarioID'.")
+            continue
+
+        reaches = scenario.get("Reaches") if isinstance(scenario, dict) else None
+        if not isinstance(reaches, list) or len(reaches) == 0:
+            errors.append(f"Scenario '{scenario_id}': 'Reaches' must be a non-empty list.")
+            continue
+
+        for j, reach in enumerate(reaches):
+            if not isinstance(reach, dict):
+                errors.append(f"Scenario '{scenario_id}' reach #{j}: must be an object.")
+                continue
+            huc = reach.get("HUC")
+            reach_id = reach.get("ReachID")
+            streamflow = reach.get("Streamflow")
+            if not isinstance(huc, str) or not huc.isdigit():
+                errors.append(f"Scenario '{scenario_id}' reach #{j}: 'HUC' must be a numeric string.")
+            if not isinstance(reach_id, str) or not reach_id.isdigit():
+                errors.append(f"Scenario '{scenario_id}' reach #{j}: 'ReachID' must be a numeric string.")
+            if not isinstance(streamflow, (int, float)) or streamflow < 0:
+                errors.append(f"Scenario '{scenario_id}' reach #{j}: 'Streamflow' must be a number >= 0.")
+
+    if errors:
+        print("Scenario file failed validation:")
+        for err in errors:
+            print(f"  - {err}")
+        raise typer.Exit(1)
+
+    return data
 
 
 def __clean_fims(
@@ -462,6 +534,190 @@ def generate_reach_fim(
     # if log_contents:
     #     with open(f'{target_path}/log.txt', "w") as out_log:
     #         out_log.write("\n".join(log_contents))
+
+
+@app.command(name="scenario")
+def generate_scenario_fim(
+    json_file: Annotated[
+        Path,
+        typer.Argument(
+            ...,
+            help="Path to a scenario JSON file (see schema/schema.json / schema/schema.md), relative to /home/data/inputs.",
+        ),
+    ],
+    max_procs: Annotated[
+        int,
+        typer.Argument(
+            ...,
+            help="The number of concurrent processes that we execute",
+        ),
+    ] = 1,
+    subdir: Annotated[
+        Union[str, None],
+        typer.Argument(
+            ...,
+            help="The subdirectory where the FIM maps will be saved.",
+        ),
+    ] = None,
+) -> None:
+    """
+    Generates one FIM GeoTIFF per scenario defined in a JSON scenario file.
+
+    All reaches belonging to a scenario are combined into a single output:
+    reaches that share a HUC are written into one flow-rate file and
+    processed together, since the underlying mosaic process already
+    produces a single combined raster for multiple reaches within a HUC.
+    Reaches spanning multiple HUCs are each processed against their own
+    HUC's hydrofabric, and the resulting per-HUC rasters are then merged
+    together into one final raster for the scenario.
+
+    Arguments:
+    ==========
+        json_file - Path: Path to the scenario JSON file, relative to
+            /home/data/inputs (the mounted input directory).
+        max_procs - int: Number of concurrent processes to run.
+        subdir - str: Optional output subdirectory.
+
+    Returns:
+    ========
+        None
+
+    """
+
+    input_path = Path("/home/data/inputs") / json_file
+    scenarios = __load_scenarios(input_path)
+    print(f"Loaded {len(scenarios)} scenario(s) from {input_path}")
+
+    # Group reaches by (ScenarioID, HUC) since FIM computation is scoped to
+    # a single HUC's hydrofabric at a time. Reaches sharing a HUC within a
+    # scenario are combined into one flow-rate file so the mosaic process
+    # produces a single output for them; scenarios spanning multiple HUCs
+    # get one output per HUC, which are merged together afterwards.
+    jobs = []  # list of (scenario_id, huc, reach_ids, flow_rates, label)
+    scenario_hucs: Dict[str, List[str]] = {}
+    for scenario in scenarios:
+        scenario_id = scenario["ScenarioID"]
+        by_huc: Dict[str, list] = {}
+        for reach in scenario["Reaches"]:
+            by_huc.setdefault(reach["HUC"], []).append(reach)
+
+        scenario_hucs[scenario_id] = list(by_huc.keys())
+        for huc, reaches in by_huc.items():
+            reach_ids = [r["ReachID"] for r in reaches]
+            flow_rates = [float(r["Streamflow"]) for r in reaches]
+            label = f"{scenario_id}__{huc}"
+            jobs.append((scenario_id, huc, reach_ids, flow_rates, label))
+
+    # download HUC data for every unique HUC referenced across all scenarios
+    for huc in sorted({huc for _, huc, _, _, _ in jobs}):
+        fim_data_dir = f"/home/output/flood_{huc}/{huc}"
+        print(f"FIM data directory: {fim_data_dir}")
+        __download_huc_fim(huc, Path(fim_data_dir), fim_data_version="4.5")
+
+    # write one flow-rate file per (scenario, HUC) job
+    print("Writing input flow files:")
+    flow_rate_filepaths = {}
+    for scenario_id, huc, reach_ids, flow_rates, label in jobs:
+        p = __write_flow_input_file(reach_ids, flow_rates, label)
+        flow_rate_filepaths[label] = p
+        print(f" - {p}")
+
+    with ProcessPoolExecutor(max_workers=max_procs) as executor:
+        futures = []
+        for i, (scenario_id, huc, reach_ids, flow_rates, label) in enumerate(jobs):
+            futures.append(
+                executor.submit(
+                    __compute_fim_scenario,
+                    i,
+                    huc,
+                    "+".join(reach_ids),
+                    flow_rate_filepaths[label],
+                    label,
+                )
+            )
+
+    print("----------------------------------")
+    print("COMPLETED GENERATING FIM SCENARIOS")
+    print("----------------------------------")
+
+    # assemble the final per-scenario output, merging across HUCs when a
+    # scenario's reaches spanned more than one.
+    scenario_root = Path("/home/output/scenarios")
+    if subdir:
+        scenario_root = scenario_root / subdir
+    scenario_root.mkdir(parents=True, exist_ok=True)
+
+    for scenario_id, hucs in scenario_hucs.items():
+
+        print(f"--- POST PROCESSING SCENARIO {scenario_id} ---")
+
+        raw_tifs = []
+        for huc in hucs:
+            label = f"{scenario_id}__{huc}"
+            # Search recursively rather than assuming a fixed nesting depth:
+            # runFIM places the output under {huc}_inundation/{label}/, but
+            # search broadly under {huc}_inundation/ in case that layout
+            # changes. Only match the inundation raster (not the depth
+            # raster, which shares the same {label} prefix).
+            huc_inundation_dir = Path(f"/home/output/flood_{huc}/{huc}_inundation")
+            candidates = sorted(huc_inundation_dir.glob(f"**/{label}*_inundation.tif"))
+            if not candidates:
+                print(f"  ! No output raster found for {label}, skipping.")
+                continue
+            raw_tifs.append((label, candidates[0]))
+
+        if not raw_tifs:
+            print(f"  ! Scenario {scenario_id} produced no output rasters.")
+            continue
+
+        # clean (binarize + crop) each per-HUC raster individually before
+        # merging, since cleaning also crops each raster to its own extent.
+        for _, tif in raw_tifs:
+            print(f"  - Cleaning {tif}")
+            __clean_fim_geotiff(tif)
+
+        final_tif = scenario_root / f"{scenario_id}.tif"
+        if len(raw_tifs) == 1:
+            src_tif = raw_tifs[0][1]
+            print(f"  - Moving {src_tif} -> {final_tif}")
+            shutil.move(str(src_tif), str(final_tif))
+        else:
+            print(f"  - Merging {len(raw_tifs)} HUC outputs into {final_tif}")
+            datasets = [rasterio.open(tif) for _, tif in raw_tifs]
+            merged_data, merged_transform = rasterio_merge(datasets, method="first")
+            profile = datasets[0].profile
+            profile.update(
+                height=merged_data.shape[1],
+                width=merged_data.shape[2],
+                transform=merged_transform,
+            )
+            for ds in datasets:
+                ds.close()
+            with rasterio.open(final_tif, "w", **profile) as dst:
+                dst.write(merged_data)
+
+        # clean up the per-HUC intermediate output now that the final
+        # (possibly merged) result has been produced. If the raster lived
+        # in its own {label} subdirectory, remove that whole directory;
+        # otherwise (e.g. it was written directly into the shared
+        # {huc}_inundation/ dir) just remove the leftover file so we don't
+        # delete output belonging to other scenarios/HUCs.
+        for label, tif in raw_tifs:
+            if not tif.exists():
+                continue
+            if tif.parent.name == label:
+                try:
+                    shutil.rmtree(tif.parent)
+                except OSError as e:
+                    print(f"Failed to remove directory: {tif.parent} : {e}")
+            else:
+                try:
+                    tif.unlink()
+                except OSError as e:
+                    print(f"Failed to remove file: {tif} : {e}")
+
+    print("-- CREATING COGs ---")
+    __convert_to_cog(scenario_root)
 
 
 @app.command(name="clean")

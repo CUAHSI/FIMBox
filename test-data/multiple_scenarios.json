@@ -1,0 +1,20 @@
+[
+  {
+    "ScenarioID": "scenario1",
+    "Reaches": [
+      { "HUC": "03020201", "ReachID": "8780625", "Streamflow": 223 },
+      { "HUC": "03020201", "ReachID": "8780659", "Streamflow": 224 },
+      { "HUC": "03020201", "ReachID": "8780641", "Streamflow": 228 },
+      { "HUC": "03020201", "ReachID": "8780645", "Streamflow": 227 }
+    ]
+  },
+  {
+    "ScenarioID": "scenario2",
+    "Reaches": [
+      { "HUC": "03020201", "ReachID": "8780625", "Streamflow": 222 },
+      { "HUC": "03020201", "ReachID": "8780659", "Streamflow": 224 },
+      { "HUC": "03020201", "ReachID": "8780641", "Streamflow": 236 },
+      { "HUC": "03020201", "ReachID": "8780645", "Streamflow": 235 }
+    ]
+  }
+]

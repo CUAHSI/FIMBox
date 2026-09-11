@@ -32,14 +32,30 @@ def runfim(code_dir, output_dir, HUC_code, data_dir, label="", depth=False):
         discharge_basename = os.path.basename(data_dir).split(".")[0]
         inundation_dir = os.path.join(HUC_dir, f"{HUC_code}_inundation", label)
         temp_dir = os.path.join(inundation_dir, "temp")
-        print("Inundation directory:", inundation_dir)
-        print("TEMP directory:", temp_dir)
+        print("Inundation directory:", inundation_dir, flush=True)
+        print("TEMP directory:", temp_dir, flush=True)
 
         if not os.path.exists(temp_dir):
             os.makedirs(temp_dir)
 
         inundation_file = os.path.join(temp_dir, f"{discharge_basename}_inundation.tif")
+        # `stdbuf -oL -eL` forces line-buffering at the OS level for this
+        # process (and, best-effort, for non-Python tools it shells out to
+        # such as GDAL/TauDEM). PYTHONUNBUFFERED alone only affects Python's
+        # own stdio and has no effect on those compiled binaries, which
+        # otherwise fully-buffer their output whenever stdout is a pipe
+        # (which it always is here) instead of a real terminal.
+        #
+        # `-v`/`--verbose` is required for inundate_mosaic_wrapper.py to emit
+        # any progress at all: it defaults to False, and its internal
+        # fh.vprint() calls and tqdm progress bars are gated by that flag
+        # (see NOAA-OWP/inundation-mapping tools/inundate_gms.py). Without it,
+        # the script prints nothing until the whole run finishes, which looks
+        # like a hang even though output is being streamed correctly.
         Command = [
+            "stdbuf",
+            "-oL",
+            "-eL",
             sys.executable,
             "inundate_mosaic_wrapper.py",
             "-y",
@@ -50,6 +66,7 @@ def runfim(code_dir, output_dir, HUC_code, data_dir, label="", depth=False):
             csv_path,
             "-i",
             inundation_file,
+            "-v",
         ]
 
         if depth:
@@ -60,21 +77,41 @@ def runfim(code_dir, output_dir, HUC_code, data_dir, label="", depth=False):
 
         env = os.environ.copy()
         env["PYTHONPATH"] = f"{src_path}{os.pathsep}{code_dir}"
+        env["PYTHONUNBUFFERED"] = "1"
 
-        result = subprocess.run(
+        # Stream the subprocess output as it's produced instead of buffering
+        # it all and printing it after the process exits. This gives
+        # real-time feedback, especially when multiple HUCs/reaches are
+        # processed concurrently via ProcessPoolExecutor.
+        #
+        # Read one character at a time and flush on '\n' *or* '\r' rather
+        # than iterating the file object by line: tqdm progress bars (used
+        # when -v/--verbose is passed) redraw using '\r' without a trailing
+        # newline, so line-based iteration would silently swallow every
+        # progress update until a real '\n' finally showed up.
+        prefix = f"[{HUC_code}:{label}]" if label else f"[{HUC_code}]"
+        process = subprocess.Popen(
             Command,
             cwd=tools_path,
             env=env,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
         )
+        chunk = ""
+        for char in iter(lambda: process.stdout.read(1), ""):
+            chunk += char
+            if char in ("\n", "\r"):
+                print(f"{prefix} {chunk}", end="", flush=True)
+                chunk = ""
+        if chunk:
+            print(f"{prefix} {chunk}", flush=True)
+        process.stdout.close()
+        returncode = process.wait()
 
-        print(result.stdout.decode())
-        if result.stderr:
-            print(result.stderr.decode())
-
-        if result.returncode == 0:
-            print(f"Inundation mapping for {HUC_code} completed successfully.")
+        if returncode == 0:
+            print(f"Inundation mapping for {HUC_code} completed successfully.", flush=True)
 
             if os.path.exists(inundation_file):
                 shutil.move(inundation_file, inundation_dir)
@@ -85,7 +122,7 @@ def runfim(code_dir, output_dir, HUC_code, data_dir, label="", depth=False):
             if os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir)
         else:
-            print(f"Failed to complete inundation mapping for {HUC_code}.")
+            print(f"Failed to complete inundation mapping for {HUC_code}.", flush=True)
 
     finally:
         os.chdir(original_dir)

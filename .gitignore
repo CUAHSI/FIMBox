@@ -221,3 +221,11 @@ __marimo__/
 
 # MacOS 
 .DS_Store
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+
+# Local HAND-FIM data directories
+input/*
+output/*

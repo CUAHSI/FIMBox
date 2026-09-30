@@ -20,6 +20,11 @@ ENV CPLUS_INCLUDE_PATH=/usr/include/gdal
 ENV C_INCLUDE_PATH=/usr/include/gdal
 ENV GDAL_VERSION=3.7.0
 
+# Force Python stdout/stderr to be unbuffered so log output (including from
+# subprocesses that inherit this env) streams to the console in real time
+# instead of only appearing after the process exits.
+ENV PYTHONUNBUFFERED=1
+
 USER $MAMBA_USER
 
 # Install Python dependencies
@@ -52,13 +57,14 @@ RUN git clone -b $BRANCH $FIM_REPO /home/code/FIMServ
 # patch FIMServ to remove unnecessary code
 COPY patches/fimserve__init__.py /home/code/FIMServ/src/fimserve/__init__.py
 COPY patches/fimserve_pyproject.toml /home/code/FIMServ/pyproject.toml
+# patch runFIM.py to stream subprocess output in real time (instead of
+# dumping it all at once at the end), pass -v/--verbose to
+# inundate_mosaic_wrapper.py (required for it to emit any progress at all),
+# and force OS-level line-buffering via stdbuf for non-Python subprocesses.
+COPY patches/runFIM.py /home/code/FIMServ/src/fimserve/runFIM.py
 
 RUN cd /home/code/FIMServ \
  && uv pip install --system -e . 
-
-##RUN git clone https://github.com/sdmlua/FIMserv.git /home/code/FIMServ 
-### && /opt/conda/bin/pip install -e . 
-##COPY runFIM.py /home/code/FIMServ/src/fimserve/runFIM.py
 
 
 

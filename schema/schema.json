@@ -1,0 +1,331 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "HAND-FIM API",
+    "version": "0.1.0",
+    "description": "API for generating flood inundation maps using the OWP HAND-FIM method. See schema.md for the full description of scenarios and terminology."
+  },
+  "paths": {
+    "/hand-fim": {
+      "post": {
+        "summary": "HAND-FIM",
+        "operationId": "hand_fim",
+        "description": "Generate one flood inundation map (GeoTIFF) per scenario. Each scenario groups one or more river reach streamflow estimates that are combined into a single output map.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScenarioList"
+              },
+              "examples": {
+                "single_reach": {
+                  "summary": "Single known river reach",
+                  "value": [
+                    {
+                      "ScenarioID": "my-scenario",
+                      "Reaches": [
+                        {
+                          "HUC": "12345678",
+                          "ReachID": "9821264",
+                          "Streamflow": 300.1
+                        }
+                      ]
+                    }
+                  ]
+                },
+                "multiple_reaches_one_scenario": {
+                  "summary": "Multiple rivers flooding in a single scenario",
+                  "value": [
+                    {
+                      "ScenarioID": "My-scenario",
+                      "Reaches": [
+                        {
+                          "HUC": "12345678",
+                          "ReachID": "9821264",
+                          "Streamflow": 300.1
+                        },
+                        {
+                          "HUC": "12345678",
+                          "ReachID": "9821263",
+                          "Streamflow": 300.7
+                        },
+                        {
+                          "HUC": "12345678",
+                          "ReachID": "9821262",
+                          "Streamflow": 299.8
+                        },
+                        {
+                          "HUC": "12345678",
+                          "ReachID": "9821261",
+                          "Streamflow": 288.0
+                        },
+                        {
+                          "HUC": "12345678",
+                          "ReachID": "9821260",
+                          "Streamflow": 305.1
+                        }
+                      ]
+                    }
+                  ]
+                },
+                "multiple_scenarios_hydrograph": {
+                  "summary": "Multiple scenarios over the duration of a hydrograph",
+                  "value": [
+                    {
+                      "ScenarioID": "scenario1",
+                      "Reaches": [
+                        {
+                          "HUC": "12345678",
+                          "ReachID": "9821264",
+                          "Streamflow": 300.1
+                        },
+                        {
+                          "HUC": "12345678",
+                          "ReachID": "9821263",
+                          "Streamflow": 300.7
+                        },
+                        {
+                          "HUC": "12345678",
+                          "ReachID": "9821262",
+                          "Streamflow": 299.8
+                        },
+                        {
+                          "HUC": "12345678",
+                          "ReachID": "9821261",
+                          "Streamflow": 288.0
+                        },
+                        {
+                          "HUC": "12345678",
+                          "ReachID": "9821260",
+                          "Streamflow": 305.1
+                        }
+                      ]
+                    },
+                    {
+                      "ScenarioID": "scenario2",
+                      "Reaches": [
+                        {
+                          "HUC": "12345678",
+                          "ReachID": "9821264",
+                          "Streamflow": 310.1
+                        },
+                        {
+                          "HUC": "12345678",
+                          "ReachID": "9821263",
+                          "Streamflow": 301.7
+                        },
+                        {
+                          "HUC": "12345678",
+                          "ReachID": "9821262",
+                          "Streamflow": 297.8
+                        },
+                        {
+                          "HUC": "12345678",
+                          "ReachID": "9821261",
+                          "Streamflow": 298.0
+                        },
+                        {
+                          "HUC": "12345678",
+                          "ReachID": "9821260",
+                          "Streamflow": 315.1
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HandFimResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ScenarioList": {
+        "type": "array",
+        "title": "Scenario List",
+        "description": "Top-level input payload: a list of scenarios to process. Each scenario produces one output GeoTIFF.",
+        "minItems": 1,
+        "items": {
+          "$ref": "#/components/schemas/Scenario"
+        }
+      },
+      "Scenario": {
+        "type": "object",
+        "title": "Scenario",
+        "description": "A flood inundation mapping scenario, grouping one or more reach/streamflow entries that are combined into a single output GeoTIFF.",
+        "properties": {
+          "ScenarioID": {
+            "type": "string",
+            "title": "Scenario Id",
+            "description": "Unique identifier for the flood inundation mapping scenario. Also used to define the output file naming.",
+            "minLength": 1,
+            "examples": [
+              "my-scenario",
+              "scenario1",
+              "scenario2"
+            ]
+          },
+          "Reaches": {
+            "type": "array",
+            "title": "Reaches",
+            "description": "List of river reach streamflow entries belonging to this scenario.",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/Reach"
+            }
+          }
+        },
+        "required": [
+          "ScenarioID",
+          "Reaches"
+        ],
+        "additionalProperties": false
+      },
+      "Reach": {
+        "type": "object",
+        "title": "Reach",
+        "description": "A single streamflow estimate for a river reach within a watershed.",
+        "properties": {
+          "HUC": {
+            "type": "string",
+            "title": "Huc",
+            "description": "Hydrologic Unit Code identifying the primary watershed corresponding to the input data. Used to locate the necessary input HAND and rating curve datasets.",
+            "pattern": "^[0-9]+$",
+            "examples": [
+              "12345678"
+            ]
+          },
+          "ReachID": {
+            "type": "string",
+            "title": "Reach Id",
+            "description": "NWM identifier for the river reach corresponding to the input data. Used to process HAND-FIM for the location of interest.",
+            "pattern": "^[0-9]+$",
+            "examples": [
+              "9821264"
+            ]
+          },
+          "Streamflow": {
+            "type": "number",
+            "title": "Streamflow",
+            "description": "Streamflow value in cubic meters per second (cms) used as input for the HAND-FIM method. Determines the extent of flooding in the inundation mapping process.",
+            "minimum": 0,
+            "examples": [
+              300.1
+            ]
+          }
+        },
+        "required": [
+          "HUC",
+          "ReachID",
+          "Streamflow"
+        ],
+        "additionalProperties": false
+      },
+      "HandFimResult": {
+        "type": "object",
+        "title": "HandFimResult",
+        "description": "Result of a HAND-FIM request: one output GeoTIFF reference per scenario.",
+        "properties": {
+          "outputs": {
+            "type": "array",
+            "title": "Outputs",
+            "items": {
+              "type": "object",
+              "properties": {
+                "ScenarioID": {
+                  "type": "string",
+                  "title": "Scenario Id"
+                },
+                "geotiff_url": {
+                  "type": "string",
+                  "title": "Geotiff Url",
+                  "description": "Location of the generated GeoTIFF output for this scenario."
+                }
+              },
+              "required": [
+                "ScenarioID",
+                "geotiff_url"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "outputs"
+        ],
+        "additionalProperties": false
+      },
+      "HTTPValidationError": {
+        "type": "object",
+        "title": "HTTPValidationError",
+        "properties": {
+          "detail": {
+            "type": "array",
+            "title": "Detail",
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            }
+          }
+        }
+      },
+      "ValidationError": {
+        "type": "object",
+        "title": "ValidationError",
+        "properties": {
+          "loc": {
+            "type": "array",
+            "title": "Location",
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            }
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ]
+      }
+    }
+  }
+}

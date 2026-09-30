@@ -34,12 +34,12 @@ actual FIM computation using NOAA/OWP's `inundation-mapping` tooling and the
   - Validates business-logic constraints Typer can't enforce (e.g., matching
     counts of reach IDs/flow rates) in `validate_args` — a no-op for the JSON
     flow since that's already schema-validated when loaded.
-  - Creates `input/`/`output/` mount directories (`prepare_volumes`) and runs
-    `docker run` with those volumes mounted into `/home/data/inputs` and
-    `/home/output`. For the JSON flow, the scenario file is copied into the
-    mounted input directory and the container's `scenario` command is
-    invoked; otherwise the container's `reachfim` command is invoked with the
-    manually-entered arguments.
+  - Runs the `fimbox` Compose service with bind-mount sources set to
+    `./input` and `./output` in the CLI's current working directory. Compose
+    creates those host directories as needed. For the JSON flow, the scenario
+    file is mounted read-only at `/home/data/inputs/scenario.json`; otherwise
+    the container's `reachfim` command is invoked with the manually-entered
+    arguments.
   - **Note:** `run()` previously contained a leftover `import pdb; pdb.set_trace()`
     debug breakpoint; it has since been removed.
 
@@ -63,7 +63,7 @@ actual FIM computation using NOAA/OWP's `inundation-mapping` tooling and the
 
 - **`docker/handfim/entry.py`** — The Typer CLI that runs *inside* the
   `cuahsi/handfim` Docker container (invoked by `src/hand_fim.py` via
-  `docker run ... <command> <args>`). Commands:
+  `docker compose run ... <command> <args>`). Commands:
   - `reachfim` — Generates FIM for one or more explicit reach IDs + flow rates.
     Downloads HUC data if needed (`__download_huc_fim`), writes a
     `feature_id,discharge` CSV per reach (`__write_flow_input_file`), runs FIM

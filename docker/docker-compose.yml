@@ -6,5 +6,8 @@ services:
       context: handfim/
       dockerfile: Dockerfile
     working_dir: /home
+    volumes:
+      - "${FIMBOX_INPUT_DIR:-../input}:/home/data/inputs"
+      - "${FIMBOX_OUTPUT_DIR:-../output}:/home/output"
     ulimits:
       stack: 67108864

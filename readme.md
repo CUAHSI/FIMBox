@@ -16,8 +16,20 @@ pixi install
 pixi run python src/fimbox.py
 ```
 
-The CLI walks you through selecting a mode (currently `HAND-FIM`), then lets
-you choose between two ways of providing input:
+To skip the mode-selection menu, pass `--mode` (or `-m`):
+
+```
+pixi run python src/fimbox.py --mode handfim
+```
+
+Supported values are `handfim`, `derived-hand`, `hand-ml`, and
+`fim-evaluation`. Currently, only `handfim` is implemented; the other modes
+display a "coming soon" message. Selecting `handfim` skips only the mode menu:
+the CLI still prompts you to choose how to provide HAND-FIM inputs and collect
+the required parameters.
+
+Without `--mode`, the CLI walks you through selecting a mode, then lets you
+choose between two ways of providing HAND-FIM input:
 
 1. **Manual entry** — interactively type in a single HUC-8 code, one or more
    NWM reach IDs, and matching flow rates (cms).

@@ -9,7 +9,11 @@ docker-compose build
 ## Running the FIM Docker Container
 
 ```
-python src/fimbox.py
+pixi install
+```
+
+```
+pixi run python src/fimbox.py
 ```
 
 The CLI walks you through selecting a mode (currently `HAND-FIM`), then lets

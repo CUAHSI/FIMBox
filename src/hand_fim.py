@@ -1,6 +1,6 @@
 """HAND-FIM mode: image management, argument collection, validation, and container execution."""
 
-import shutil
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -21,6 +21,7 @@ from hand_fim_schema import ScenarioList  # noqa: E402
 console = Console()
 
 DOCKER_IMAGE = "cuahsi/handfim:latest"
+COMPOSE_FILE = Path(__file__).resolve().parent.parent / "docker" / "docker-compose.yml"
 
 
 def image_exists(image: str) -> bool:
@@ -57,22 +58,6 @@ def ensure_image(image: str) -> None:
         raise typer.Exit(0)
 
     pull_image(image)
-
-
-def prepare_volumes(base_dir: Path) -> tuple[Path, Path]:
-    """
-    Create input/output mount directories and return their paths.
-    Input and output paths are relative to the directory in which
-    the CLI is executed. Paths are only created if they don't
-    already exist.
-    """
-    input_dir = base_dir / "input"
-    output_dir = base_dir / "output"
-    input_dir.mkdir(parents=True, exist_ok=True)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    console.print(f"  [dim]input  → {input_dir}[/dim]")
-    console.print(f"  [dim]output → {output_dir}[/dim]")
-    return input_dir, output_dir
 
 
 INPUT_MODES = {
@@ -234,26 +219,20 @@ def validate_args(args: dict) -> None:
 
 def run() -> None:
     """Entry point for the HAND-FIM mode."""
-    ensure_image(DOCKER_IMAGE)
-
     args = collect_args()
-
-    base_dir = Path.cwd()
-
-    console.print("\n[bold]Preparing mount directories …[/bold]")
-    input_dir, output_dir = prepare_volumes(base_dir)
-
-    console.print("\n[bold]Validating inputs …[/bold]")
     validate_args(args)
 
-    # Build the docker run command, mapping collected args to container positional arguments.
+    ensure_image(DOCKER_IMAGE)
+
+    base_dir = Path.cwd()
+    input_dir = base_dir / "input"
+    output_dir = base_dir / "output"
+
+    # Compose creates the bind-mount directories and maps them into the container.
     # entry.py uses typer.Argument (positional), so args are passed in order.
     if args["command"] == "scenario":
-        # copy the scenario file into the mounted input directory so the
-        # container can read it at /home/data/inputs/<filename>
-        dest = input_dir / args["json_path"].name
-        shutil.copy(args["json_path"], dest)
-        container_cmd = ["scenario", dest.name, str(args["max_procs"])]
+        scenario_path = args["json_path"].resolve()
+        container_cmd = ["scenario", "scenario.json", str(args["max_procs"])]
         if args.get("subdir"):
             container_cmd.append(args["subdir"])
     else:
@@ -264,21 +243,29 @@ def run() -> None:
         if args.get("subdir"):
             container_cmd.append(args["subdir"])
 
+    compose_env = os.environ.copy()
+    compose_env["FIMBOX_INPUT_DIR"] = str(input_dir)
+    compose_env["FIMBOX_OUTPUT_DIR"] = str(output_dir)
+
     docker_cmd = [
         "docker",
+        "compose",
+        "-f",
+        str(COMPOSE_FILE),
         "run",
         "--rm",
-        "-v",
-        f"{input_dir}:/home/data/inputs",
-        "-v",
-        f"{output_dir}:/home/output",
-        DOCKER_IMAGE,
-    ] + container_cmd
+    ]
+    if args["command"] == "scenario":
+        docker_cmd += [
+            "--volume",
+            f"{scenario_path}:/home/data/inputs/scenario.json:ro",
+        ]
+    docker_cmd += ["fimbox"] + container_cmd
 
     console.print("\n[bold]Running container …[/bold]")
     console.print(f"[dim]{' '.join(docker_cmd)}[/dim]\n")
 
-    result = subprocess.run(docker_cmd)
+    result = subprocess.run(docker_cmd, env=compose_env)
     if result.returncode != 0:
         console.print("[bold red]✗ Container exited with an error.[/bold red]")
         raise typer.Exit(result.returncode)

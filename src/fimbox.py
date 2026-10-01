@@ -43,6 +43,12 @@ def check_docker() -> None:
                       "Please start Docker and try again.")
         raise typer.Exit(1)
 
+    result = subprocess.run(["docker", "compose", "version"], capture_output=True)
+    if result.returncode != 0:
+        console.print("[bold red]✗ Docker Compose is not available.[/bold red] "
+                      "Please install the Docker Compose plugin and try again.")
+        raise typer.Exit(1)
+
     console.print("[bold green]✓ Docker is installed and running.[/bold green]")
 
 

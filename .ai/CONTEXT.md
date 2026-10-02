@@ -21,6 +21,15 @@ actual FIM computation using NOAA/OWP's `inundation-mapping` tooling and the
   dispatches to `hand_fim.run()` for the HAND-FIM mode. Other modes currently
   print a "coming soon" panel (`run_coming_soon`).
 
+- **`src/compose_runner.py`** — Shared `run_compose()` helper for launching
+  one-off Docker Compose service commands. Accepts the service, container
+  command, environment overrides, and optional bind mounts; intended for reuse
+  by host-side workflow modes.
+
+- **`src/prompt_runner.py`** — Shared `prompt_model_fields()` helper that
+  builds Typer prompts from Pydantic field descriptions, annotations, and
+  defaults, with include/exclude filters for staged input flows.
+
 - **`src/hand_fim.py`** — Implements the HAND-FIM mode end-to-end on the host:
   - Ensures the `cuahsi/handfim:latest` Docker image exists locally, offering to
     `docker pull` it if missing (`image_exists`, `pull_image`, `ensure_image`).
@@ -31,15 +40,18 @@ actual FIM computation using NOAA/OWP's `inundation-mapping` tooling and the
     the Pydantic `ScenarioList` model from `schema/hand_fim_schema.py`
     (imported by adding `schema/` to `sys.path`) before ever starting Docker.
     The `reachfim_interval` sub-command has been removed.
-  - Validates business-logic constraints Typer can't enforce (e.g., matching
-    counts of reach IDs/flow rates) in `validate_args` — a no-op for the JSON
-    flow since that's already schema-validated when loaded.
-  - Runs the `fimbox` Compose service with bind-mount sources set to
-    `./input` and `./output` in the CLI's current working directory. Compose
-    creates those host directories as needed. For the JSON flow, the scenario
-    file is mounted read-only at `/home/data/inputs/scenario.json`; otherwise
-    the container's `reachfim` command is invoked with the manually-entered
-    arguments.
+  - Collects manual and scenario inputs into Pydantic `ReachFimArgs` and
+    `ScenarioArgs` models, using `prompt_runner.prompt_model_fields()` to drive
+    Typer prompts from their field descriptions, types, and defaults. The
+    manual model validates nonblank fields and matching reach/flow counts;
+    scenario-file contents are validated against the existing `ScenarioList`
+    schema model.
+  - Uses `compose_runner.run_compose()` to run the `fimbox` Compose service with
+    prompted input and output bind mounts (defaults `./input` and `./output`)
+    relative to the CLI's current working directory. Compose creates those host
+    directories as needed. For the JSON flow, the scenario file is mounted read-only at
+    `/home/data/inputs/scenario.json`; otherwise the container's `reachfim`
+    command is invoked with the manually-entered arguments.
   - **Note:** `run()` previously contained a leftover `import pdb; pdb.set_trace()`
     debug breakpoint; it has since been removed.
 

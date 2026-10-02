@@ -2,8 +2,7 @@
 ## Building Docker Images
 
 ```
-cd docker
-docker-compose build
+docker compose -f docker/docker-compose.yml build
 ```
 
 ## Running the FIM Docker Container
@@ -39,11 +38,12 @@ choose between two ways of providing HAND-FIM input:
    scenario is validated against the schema, then produces a single combined
    output GeoTIFF, even if it spans multiple reaches or multiple HUCs.
 
-In both cases, the tool creates `./input` and `./output` directories in your
-current working directory, mounts them into the container, and streams the
-FIM computation progress to the terminal in real time. Final results are
-written to `./output/scenarios/<ScenarioID>.tif` (JSON mode) or
-`./output/flood_<HUC>/...` (manual mode).
+In both cases, the tool prompts for an input directory (default: `./input/`)
+and output directory (default: `./output/`) relative to your current working
+directory. It mounts them into the container and streams FIM computation
+progress to the terminal in real time. Final results are written under the
+selected output directory:
+`scenarios/<ScenarioID>.tif` (JSON mode) or `flood_<HUC>/...` (manual mode).
 
 ### Example: scenario JSON files
 

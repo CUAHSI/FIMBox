@@ -229,3 +229,4 @@ __marimo__/
 # Local HAND-FIM data directories
 input/*
 output/*
+data/*

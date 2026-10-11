@@ -6,12 +6,11 @@ from pathlib import Path
 from typing import Literal, TypeVar
 
 import typer
-from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationError
 from rich.console import Console
 from rich.panel import Panel
-from rich.prompt import Confirm, Prompt
+from rich.prompt import Prompt
 from compose_runner import run_compose
-from prompt_runner import prompt_model_fields
 
 # The Pydantic schema models live in a sibling `schema/` directory rather
 # than as an installed package, so it must be added to sys.path explicitly.
@@ -19,63 +18,14 @@ SCHEMA_DIR = Path(__file__).resolve().parent.parent / "schema"
 if str(SCHEMA_DIR) not in sys.path:
     sys.path.insert(0, str(SCHEMA_DIR))
 
-from schemas.hand_fim_schema import ScenarioList  # noqa: E402
+from schemas.hand_fim_schema import Reach, ScenarioList  # noqa: E402
 
 console = Console()
 
-DOCKER_IMAGE = "cuahsi/handfim:latest"
 ArgsModelType = TypeVar("ArgsModelType", bound=BaseModel)
 
 
-class ReachFimArgs(BaseModel):
-    command: Literal["reachfim"] = "reachfim"
-    huc_id: str = Field(default="03020202", description="HUC-8 watershed identifier")
-    reach_ids: str = Field(
-        default="11239409", description="NWM reach ID(s) — comma-separated"
-    )
-    flow_rates: str = Field(
-        default="200.23",
-        description="Flow rate(s) in m³/s — comma-separated, one per reach ID",
-    )
-    max_procs: int = Field(default=1, description="Max concurrent processes")
-    output_labels: str | None = Field(
-        default=None,
-        description=(
-            "Output labels — comma-separated to use when saving FIM outputs "
-            "(leave blank to auto-generate)"
-        ),
-    )
-    input_dir: Path = Field(
-        default=Path("input/"), description="Input directory on the host"
-    )
-    output_dir: Path = Field(
-        default=Path("output/"), description="Output directory on the host"
-    )
-
-    model_config = {"extra": "forbid"}
-
-    @field_validator("huc_id", "reach_ids", "flow_rates")
-    @classmethod
-    def require_nonblank(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("Value must not be blank.")
-        return value
-
-    @model_validator(mode="after")
-    def validate_reach_flow_counts(self) -> "ReachFimArgs":
-        reach_count = len(self.reach_ids.split(","))
-        flow_count = len(self.flow_rates.split(","))
-        if reach_count != flow_count:
-            raise ValueError(
-                f"Number of reach IDs ({reach_count}) must match "
-                f"number of flow rates ({flow_count})."
-            )
-        return self
-
-
-class ScenarioArgs(BaseModel):
-    command: Literal["scenario"] = "scenario"
-    json_path: Path = Field(description="Path to scenario JSON file")
+class BaseArgs(BaseModel):
     max_procs: int = Field(default=1, description="Max concurrent processes")
     input_dir: Path = Field(
         default=Path("data/input/"), description="Input directory on the host"
@@ -87,43 +37,23 @@ class ScenarioArgs(BaseModel):
     model_config = {"extra": "forbid"}
 
 
+class ReachFimArgs(BaseArgs):
+    command: Literal["reachfim"] = "reachfim"
+    reaches: list[Reach] = Field(
+        min_length=1, description="Reach/streamflow inputs for this run"
+    )
+    output_labels: str | None = None
+
+    model_config = {"extra": "forbid"}
+
+class ScenarioArgs(BaseArgs):
+    command: Literal["scenario"] = "scenario"
+    json_path: Path = Field(description="Path to scenario JSON file")
+
+    model_config = {"extra": "forbid"}
+
+
 HandFimArgs = ReachFimArgs | ScenarioArgs
-
-
-def image_exists(image: str) -> bool:
-    result = subprocess.run(
-        ["docker", "image", "inspect", image],
-        capture_output=True,
-    )
-    return result.returncode == 0
-
-
-def pull_image(image: str) -> None:
-    """Pull a Docker image, streaming progress to the terminal."""
-    console.print(f"\n[cyan]Pulling [bold]{image}[/bold] …[/cyan]")
-    result = subprocess.run(["docker", "pull", image])
-    if result.returncode != 0:
-        console.print(f"[bold red]✗ Failed to pull image {image}.[/bold red]")
-        raise typer.Exit(1)
-    console.print(f"[bold green]✓ Image {image} is ready.[/bold green]")
-
-
-def ensure_image(image: str) -> None:
-    """Check that the required image is present; offer to pull it if not."""
-    if image_exists(image):
-        console.print(
-            f"[bold green]✓ Image [italic]{image}[/italic] found locally.[/bold green]"
-        )
-        return
-
-    console.print(
-        f"\n[yellow]Image [bold]{image}[/bold] was not found on this machine.[/yellow]"
-    )
-    if not Confirm.ask("Would you like to download it now?"):
-        console.print("[red]Image download declined. Exiting.[/red]")
-        raise typer.Exit(0)
-
-    pull_image(image)
 
 
 INPUT_MODES = {
@@ -190,10 +120,43 @@ def collect_args_manual() -> ReachFimArgs:
         )
     )
 
-    return __parse_args(
-        ReachFimArgs,
-        prompt_model_fields(ReachFimArgs, exclude={"command"}, prefix="  "),
+    values = {
+        "max_procs": typer.prompt("  Max concurrent processes", default=1),
+        "input_dir": Path(
+            typer.prompt("  Input directory", default="data/input/")
+        ),
+        "output_dir": Path(
+            typer.prompt("  Output directory", default="data/output/")
+        ),
+    }
+    huc_id = typer.prompt("  HUC-8 watershed identifier", default="03020202")
+    reach_ids = typer.prompt(
+        "  NWM reach ID(s) — comma-separated", default="11239409"
     )
+    flow_rates = typer.prompt(
+        "  Flow rate(s) in m³/s — comma-separated, one per reach ID",
+        default="200.23",
+    )
+    output_labels = typer.prompt(
+        "  Output labels — comma-separated to use when saving FIM outputs "
+        "(leave blank to auto-generate)",
+        default="",
+    )
+
+    reach_ids = [reach_id.strip() for reach_id in reach_ids.split(",")]
+    flow_rates = [flow_rate.strip() for flow_rate in flow_rates.split(",")]
+    if len(reach_ids) != len(flow_rates):
+        console.print(
+            "[bold red]✗ Number of reach IDs must match number of flow rates.[/bold red]"
+        )
+        raise typer.Exit(1)
+
+    values["reaches"] = [
+        {"HUC": huc_id.strip(), "ReachID": reach_id, "Streamflow": flow_rate}
+        for reach_id, flow_rate in zip(reach_ids, flow_rates)
+    ]
+    values["output_labels"] = output_labels or None
+    return __parse_args(ReachFimArgs, values)
 
 
 def collect_args_from_json() -> ScenarioArgs:
@@ -211,18 +174,18 @@ def collect_args_from_json() -> ScenarioArgs:
         )
     )
 
-    values = prompt_model_fields(
-        ScenarioArgs, include={"json_path"}, prefix="  "
-    )
-    json_path = values["json_path"]
+    json_path = Path(typer.prompt("  Path to scenario JSON file"))
     load_scenarios(json_path)
-    values.update(
-        prompt_model_fields(
-            ScenarioArgs,
-            include={"max_procs", "input_dir", "output_dir"},
-            prefix="  ",
-        )
-    )
+    values = {
+        "json_path": json_path,
+        "max_procs": typer.prompt("  Max concurrent processes", default=1),
+        "input_dir": Path(
+            typer.prompt("  Input directory", default="data/input/")
+        ),
+        "output_dir": Path(
+            typer.prompt("  Output directory", default="data/output/")
+        ),
+    }
     return __parse_args(ScenarioArgs, values)
 
 
@@ -238,8 +201,6 @@ def run() -> None:
     """Entry point for the HAND-FIM mode."""
     args = collect_args()
 
-    ensure_image(DOCKER_IMAGE)
-
     base_dir = Path.cwd()
     input_dir = (base_dir / args.input_dir).resolve()
     output_dir = (base_dir / args.output_dir).resolve()
@@ -254,8 +215,10 @@ def run() -> None:
             f"{scenario_path}:/home/data/inputs/scenario.json:ro",
         )
     else:
-        container_cmd = [args.command, args.huc_id]
-        container_cmd += [args.reach_ids, args.flow_rates, str(args.max_procs)]
+        container_cmd = [args.command, args.reaches[0].HUC]
+        reach_ids = ",".join(reach.ReachID for reach in args.reaches)
+        flow_rates = ",".join(format(reach.Streamflow, "g") for reach in args.reaches)
+        container_cmd += [reach_ids, flow_rates, str(args.max_procs)]
         if args.output_labels:
             container_cmd.append(args.output_labels)
 

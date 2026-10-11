@@ -26,10 +26,6 @@ actual FIM computation using NOAA/OWP's `inundation-mapping` tooling and the
   command, environment overrides, and optional bind mounts; intended for reuse
   by host-side workflow modes.
 
-- **`src/prompt_runner.py`** — Shared `prompt_model_fields()` helper that
-  builds Typer prompts from Pydantic field descriptions, annotations, and
-  defaults, with include/exclude filters for staged input flows.
-
 - **`src/hand_fim.py`** — Implements the HAND-FIM mode end-to-end on the host:
   - Ensures the `cuahsi/handfim:latest` Docker image exists locally, offering to
     `docker pull` it if missing (`image_exists`, `pull_image`, `ensure_image`).
@@ -37,15 +33,14 @@ actual FIM computation using NOAA/OWP's `inundation-mapping` tooling and the
     manually for the `reachfim` container command (`collect_args_manual`), or
     (2) load one or more scenarios from a JSON file matching
     `schema/schema.json` (`collect_args_from_json`), validated on the host via
-    the Pydantic `ScenarioList` model from `schema/hand_fim_schema.py`
-    (imported by adding `schema/` to `sys.path`) before ever starting Docker.
+    the Pydantic `ScenarioList` model from
+    `src/schemas/hand_fim_schema.py` before ever starting Docker.
     The `reachfim_interval` sub-command has been removed.
-  - Collects manual and scenario inputs into Pydantic `ReachFimArgs` and
-    `ScenarioArgs` models, using `prompt_runner.prompt_model_fields()` to drive
-    Typer prompts from their field descriptions, types, and defaults. The
-    manual model validates nonblank fields and matching reach/flow counts;
-    scenario-file contents are validated against the existing `ScenarioList`
-    schema model.
+  - Collects manual and scenario inputs with explicit Typer prompts, then
+    validates them with Pydantic `ReachFimArgs` and `ScenarioArgs` models.
+    Manual comma-separated reach/flow inputs are converted to shared schema
+    `Reach` objects before validation; scenario-file contents are validated
+    against `ScenarioList`.
   - Uses `compose_runner.run_compose()` to run the `fimbox` Compose service with
     prompted input and output bind mounts (defaults `./input` and `./output`)
     relative to the CLI's current working directory. Compose creates those host
@@ -55,9 +50,9 @@ actual FIM computation using NOAA/OWP's `inundation-mapping` tooling and the
   - **Note:** `run()` previously contained a leftover `import pdb; pdb.set_trace()`
     debug breakpoint; it has since been removed.
 
-## Schema (`schema/`)
+## Schema (`src/schemas/`)
 
-- **`schema/hand_fim_schema.py`** — Pydantic v2 models defining the HAND-FIM
+- **`src/schemas/hand_fim_schema.py`** — Pydantic v2 models defining the HAND-FIM
   request/response contract (mirrors `schema/schema.md` / `schema/schema.json`):
   - `Reach`: one streamflow estimate for a river reach (`HUC`, `ReachID`,
     `Streamflow` in cms).
@@ -66,10 +61,85 @@ actual FIM computation using NOAA/OWP's `inundation-mapping` tooling and the
   - `ScenarioList`: top-level input payload — a list of `Scenario` objects.
   - `HandFimOutput` / `HandFimResult`: output payload mapping each `ScenarioID`
     to a `geotiff_url`.
-  All models use `extra = "forbid"` for strict validation. **Now actively used**
-  by `src/hand_fim.py`'s JSON-file input flow to validate scenario files before
+  All models use `extra = "forbid"` for strict validation.
+  Swagger reach examples use the sample HUC/reach pair `03020201` / `8780625`,
+  not the former placeholder HUC `12345678`.
+  Actively used by `src/hand_fim.py`'s JSON-file input flow to validate scenario files before
   invoking Docker (see `load_scenarios`). `pydantic` was added as a host
   dependency in `pixi.toml` specifically for this.
+
+## API and worker (`src/fimbox_api/`)
+
+Adapted from the application in `CUAHSI/fimbox-api` at commit
+`b6ddd220bd72c950cfa16a6f76bf3de3a54acd11`; the template's Terraform deployment
+is not copied. OAuth/session/job-ownership behavior is adapted from the
+`authentication` branch at `5da02c2171aca24ab69a0687be64b730e4d0272c`.
+
+- **`src/fimbox_api/__init__.py`** — Package marker and template attribution.
+- **`src/fimbox_api/config.py`** — Environment-based API/worker settings,
+  Redis URLs, metadata TTL, visibility timeout, HAND-FIM runtime paths,
+  S3-compatible endpoint/signing settings, and HydroShare OAuth configuration.
+  OAuth credentials accept `API_CLIENT_ID` / `API_CLIENT_SECRET` aliases;
+  `HYDROSHARE_CLIENT_*` takes precedence. Swagger publishes only the client ID;
+  the secret is used by the server-side authorization-code exchange.
+  The API Compose service loads root `.env` in raw mode to preserve literal
+  credential characters; Compose 2.30+ is required.
+- **`src/fimbox_api/celery_app.py`** — JSON-only Celery configuration and
+  task discovery, started-state tracking, late acknowledgement, and a
+  single-process worker.
+- **`src/fimbox_api/models.py`** — Job response models and request models
+  reusing `src/schemas/hand_fim_schema.py`. Adds API-specific unique
+  scenario ID, HUC-8, finite streamflow validation, per-job output bucket/prefix,
+  stored destination metadata, and presigned-URL responses.
+- **`src/fimbox_api/main.py`** — FastAPI app: `POST /jobs` accepts the
+  template's typed `payload` envelope; `POST /jobs/hand-fim` accepts the
+  scenario array directly with destination query parameters. All job routes
+  require a session and enforce user ownership. Also provides user job listing,
+  polling, fresh S3 presigned URL responses (not local file streaming),
+  queued-job cancellation, public health, and explicit storage/queue errors.
+- **`src/fimbox_api/tasks.py`** — Real HAND-FIM Celery task. Revalidates input,
+  substitutes safe job-specific internal scenario names, writes the scenario
+  JSON, invokes the existing container `scenario` CLI in a subprocess, verifies
+  every COG exists, recursively uploads all files from the job-specific
+  `/home/output/scenarios/<job_id>/` directory with unchanged relative filenames
+  under `<prefix>/<job_id>/`, and returns a file manifest plus scenario URLs.
+  Shared watershed caches and other jobs are excluded. Redelivery clears
+  local job files first. `/jobs/<job_id>/files/<index>` signs any manifest file;
+  scenario endpoints sign the preserved COG key, with legacy-key compatibility
+  for old results without manifests.
+- **`src/fimbox_api/storage.py`** — Shared S3 client configuration, safe
+  job-specific object-key construction, object existence checks, and SigV4
+  presigned GET URLs using job-specific temporary credentials. Submissions
+  exchange the user's HydroShare access token through
+  `/hsapi/user/service/accounts/s3/` (`{"expiry": <days>}`), store the returned
+  access/secret/expiry only in Redis, and use them for uploads and signing at
+  `https://s3.hydroshare.org`. No static AWS credential fallback. Signed-URL
+  lifetime is capped by credential expiry. Credential failure prevents enqueue.
+- **`src/fimbox_api/auth.py`** — HydroShare authorization-code exchange,
+  verified user-info identity, Redis-backed opaque sessions with expiry,
+  single-use browser-bound OAuth state, and per-user job ownership/tracking.
+  Provider tokens stay in Redis. No prototype mock-token or client-supplied
+  identity fallback; bearer authentication uses the real supplied token.
+  OAuth failures report the token-exchange/user-info stage, HTTP status, and
+  allowlisted OAuth error codes without exposing provider bodies or tokens.
+- **`src/fimbox_api/auth_routes.py`** — Browser login/callback, PKCE form-token
+  exchange for Swagger, authenticated session info, and local session logout.
+- **`tests/test_fimbox_api.py`** — Focused `unittest` coverage for API
+  validation/queueing, status/downloads, cancellation, worker command
+  construction, identifier isolation, missing/stale outputs, and failures.
+  The FIM computation subprocess is mocked; these tests do not download data.
+- **`tests/test_fimbox_auth.py`** — OAuth/state/replay, provider failure,
+  session expiry/logout, route authentication, PKCE, and ownership tests.
+- **`tests/test_container_scenario.py`** — Container-only regression tests
+  that load the real `entry.py` and mock computation/downloads to prove that
+  future failures and missing HUC rasters propagate. Skipped on the host.
+
+Deployment assets live in `docker/api/`: a slim API Dockerfile, a worker
+Dockerfile extending `cuahsi/handfim:latest`, a role-based entrypoint, pinned
+requirements, and an independent Compose stack. Only the worker mounts the
+output volume; the API signs uploaded S3 objects. Redis is not exposed to the host.
+The worker runs `/home/entry.py` directly without a Docker socket. Keep a
+single worker per shared watershed cache. `pixi run api` runs FastAPI only.
 
 ## Container-side code (`docker/handfim/`)
 
@@ -94,7 +164,10 @@ actual FIM computation using NOAA/OWP's `inundation-mapping` tooling and the
     per-HUC rasters are cleaned (`__clean_fim_geotiff`) and then combined into
     one final raster per scenario via `rasterio.merge.merge`. Outputs are
     written to `/home/output/scenarios/[<subdir>/]<ScenarioID>.tif` and
-    converted to COG. Per-HUC output rasters are located with a recursive
+    converted to COG. Scenario computation futures are explicitly resolved so
+    errors propagate; missing per-HUC rasters fail the command rather than
+    silently returning partial success. Per-HUC output rasters are located
+    with a recursive
     glob (`{huc}_inundation/**/{label}*_inundation.tif`) rather than assuming
     a fixed nesting depth, and explicitly exclude the sibling `*_depth.tif`
     file (both share the `{label}` prefix) — this avoids picking the wrong
@@ -113,8 +186,10 @@ actual FIM computation using NOAA/OWP's `inundation-mapping` tooling and the
   `inundate_mosaic_wrapper.py` (from the `inundation-mapping` repo) for a given
   HUC + discharge CSV, optionally producing a depth raster, then moves outputs
   into a per-run `label` subdirectory (added to support parallel runs of the
-  same HUC without mosaic outputs colliding — see inline comment dated
-  06/21/25). `runOWPHANDFIM()` is a simpler wrapper that globs discharge CSVs
+  same HUC without mosaic outputs colliding — see inline comment dated 06/21/25).
+  Nonzero mapping subprocess exits raise `CalledProcessError` so the original
+  computation failure propagates through scenario futures.
+  `runOWPHANDFIM()` is a simpler wrapper that globs discharge CSVs
   for a HUC and calls `runfim` for each. This patched file is applied via
   `COPY patches/runFIM.py /home/code/FIMServ/src/fimserve/runFIM.py` in the
   Dockerfile (this `COPY` line was previously commented out, silently
@@ -159,9 +234,15 @@ actual FIM computation using NOAA/OWP's `inundation-mapping` tooling and the
 
 ## Known gaps / things to watch
 
-- `schema/hand_fim_schema.py` doesn't appear to be consumed elsewhere yet (no
-  references found in `src/` or `docker/`) — likely scaffolding for a
-  future API/service wrapper around the CLI workflow.
+- The shared schema lives under `src/schemas/` and is consumed by both the
+  host CLI and the API/worker. Some older CLI help/documentation still refers
+  to the former `schema/` directory.
+- API result/session/ownership metadata expires; there is no durable job
+  registry, automatic object cleanup, provider-token auto-refresh, or
+  coordinated multi-worker watershed cache. Configure OAuth and S3 credentials
+  before using job routes; jobs from before this integration are not migrated.
+- The API/worker now has focused automated tests, but there is no configured
+  linter/formatter or full scientific-computation integration test suite.
 - Most of `fimserve`'s original functionality (streamflow retrieval, plotting,
   evaluation, ML enhancement) is disabled in the patched `__init__.py`; only
   download + core HAND-FIM compute are active.

@@ -269,14 +269,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": {
-                    "items": {
-                      "type": "string"
-                    },
-                    "type": "array"
-                  },
-                  "type": "object",
-                  "title": "Response List Jobs Jobs Get"
+                  "$ref": "#/components/schemas/JobList"
                 }
               }
             }
@@ -371,6 +364,25 @@
               "default": "",
               "title": "Output Prefix"
             }
+          },
+          {
+            "name": "max_procs",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Max concurrent HAND-FIM processes; omit to use the worker's HAND_FIM_MAX_PROCS (default 1).",
+              "title": "Max Procs"
+            },
+            "description": "Max concurrent HAND-FIM processes; omit to use the worker's HAND_FIM_MAX_PROCS (default 1)."
           }
         ],
         "requestBody": {
@@ -736,6 +748,22 @@
         "title": "HandFimParameters",
         "description": "The shared scenario JSON schema with worker-specific validation."
       },
+      "JobList": {
+        "properties": {
+          "jobs": {
+            "items": {
+              "$ref": "#/components/schemas/JobSummary"
+            },
+            "type": "array",
+            "title": "Jobs"
+          }
+        },
+        "type": "object",
+        "required": [
+          "jobs"
+        ],
+        "title": "JobList"
+      },
       "JobRequest": {
         "properties": {
           "output_bucket": {
@@ -757,6 +785,19 @@
             "maxLength": 900,
             "title": "Output Prefix",
             "default": ""
+          },
+          "max_procs": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Procs",
+            "description": "Max concurrent HAND-FIM processes; omit to use the worker's HAND_FIM_MAX_PROCS (default 1)."
           },
           "payload": {
             "$ref": "#/components/schemas/HandFimParameters"
@@ -830,6 +871,24 @@
           "status_url"
         ],
         "title": "JobSubmitted"
+      },
+      "JobSummary": {
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "title": "Job Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          }
+        },
+        "type": "object",
+        "required": [
+          "job_id",
+          "status"
+        ],
+        "title": "JobSummary"
       },
       "OutputFile": {
         "properties": {

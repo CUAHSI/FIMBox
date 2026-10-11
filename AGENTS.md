@@ -14,32 +14,39 @@ making structural changes to the project, so future sessions can rely on it.
 
 ## Repo layout
 
-- `src/` — Host-side Typer CLI (`fimbox.py` entry point, `hand_fim.py` mode
-  logic). Run with `python src/fimbox.py`.
-- `schema/` — Pydantic models describing the HAND-FIM scenario request/response
-  contract (`hand_fim_schema.py`). Not yet wired into any running code.
+- `src/fimbox_cli.py` — Installable SDK-backed Click CLI. Run with `fimbox`
+  after `python -m pip install .`, or `pixi run fimbox`.
+- `src/fimbox_sdk/` — Generated sync/async Python client and attrs models.
+  Do not hand-edit; regenerate with `pixi run sdk-generate`.
+- `src/fimbox_api/` — FastAPI service, HydroShare sessions, Celery worker,
+  local/S3 output handling, and Pydantic job schemas.
+- `src/schemas/hand_fim_schema.py` — Shared scenario models used by API/worker.
+- `sdk/` — Captured OpenAPI document and pinned local generator configuration.
 - `docker/handfim/` — Code that runs *inside* the `cuahsi/handfim` Docker
   image: `entry.py` (container CLI), `compute_rating_increments.py` (rating
   curve interpolation), and `patches/` (files that intentionally override
   upstream `fimserve` modules — see "External dependencies" below).
 - `test-data/` — Sample input data for manual testing.
-- `input/`, `output/` — Runtime mount directories created by `hand_fim.py`
-  when running the container; contents are gitignored and not source.
+- `docker/input/`, `docker/output/` — Default runtime bind mounts for the API
+  Compose stack; configurable through FIMBOX_INPUT_DIR/FIMBOX_OUTPUT_DIR.
+  Output files live under scenarios/<job_id>/ and are shared read-only with API.
 - `pixi.toml` / `pixi.lock` / `.pixi/` — Pixi-managed Python environment
-  (Python 3.14, `rich`, `typer`). Use `pixi install` to set up, `pixi run
-  python src/fimbox.py` to execute. Don't hand-edit `pixi.lock`.
+  (Python 3.14). Use `pixi install` to set up, `pixi run fimbox` to execute.
+  Don't hand-edit `pixi.lock`.
 - `fimbox_map.qgz` — Binary QGIS project file; not something to open/edit as
   text.
 
 ## Build / run / test commands
 
-- Build the Docker image: `cd docker && docker-compose build`.
-- Run the CLI: `python src/fimbox.py` (or `pixi run python src/fimbox.py`).
-- **There is currently no automated test suite and no linter/formatter
-  configured in this repo.** Don't assume `pytest`, `ruff`, `black`, etc. are
-  set up — check before suggesting a specific command, and validate changes by
-  running the CLI manually (and noting in your response that no automated
-  tests exist).
+- Build the base Docker image: `docker build --platform linux/amd64 -t cuahsi/handfim:latest docker/handfim`.
+- Run the service from the repository root: `docker compose --env-file /dev/null up --build`.
+- Run the CLI: `fimbox submit --body test-data/single_reach.json`.
+  Optional `--max-procs N` overrides worker concurrency (default 1);
+  optional `--output-bucket` enables S3, otherwise output stays on the mount.
+- Tests: `PYTHONPATH=src python -m unittest discover -s tests -v`.
+  Tests cover API/worker/SDK/CLI/auth; scientific computation is mocked.
+  Container-only regressions require the HAND-FIM image.
+  No repository-wide linter/formatter is configured.
 
 ## External dependencies & patches
 
@@ -58,11 +65,10 @@ making structural changes to the project, so future sessions can rely on it.
   multi-purpose ones. Avoid scope creep — when implementing a requested
   change, don't bundle in unrelated refactors, features, or "while I'm here"
   fixes; raise them separately instead.
-- CLI commands are built with Typer; parameters typically use
+- Container CLI commands are built with Typer; parameters typically use
   `Annotated[type, typer.Argument(..., help=...)] = default` for container-side
-  commands (`entry.py`) and `typer.prompt(...)` for interactive host-side
-  prompts (`hand_fim.py`).
-- Console output uses `rich` (`Console`, `Panel`) for host-side UX.
+  commands (`entry.py`). The installable host CLI uses Click and the generated
+  SDK; authentication tokens are entered with a hidden prompt or environment.
 - Module-private helper functions are prefixed with a double underscore
   (e.g. `__write_flow_input_file`) even though they're module-level, not
   class methods — follow this pattern for new internal helpers.
@@ -70,10 +76,8 @@ making structural changes to the project, so future sessions can rely on it.
   Google/NumPy docstring formats (except in `compute_rating_increments.py`,
   which uses `====` underlines).
 
-## Known issues / TODOs
+## Validation notes
 
-- `src/hand_fim.py`'s `run()` function contains a leftover
-  `import pdb; pdb.set_trace()` breakpoint — flag this if touching that file,
-  since it looks unintentional.
-- `schema/hand_fim_schema.py` has no current callers; likely scaffolding for a
-  future API/service layer.
+- Update sdk/openapi.json and regenerate the SDK when the API schema changes.
+- Preserve explicit HTTP/transport errors and user ownership checks.
+- Use one worker per shared watershed cache.

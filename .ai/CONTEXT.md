@@ -14,17 +14,21 @@ actual FIM computation using NOAA/OWP's `inundation-mapping` tooling and the
 
 ## Host-side CLI (`src/`)
 
-- **`src/fimbox.py`** — Compatibility script entry point for `fimbox_cli.app`.
-  No Docker checks or mode menu. `pixi run fimbox` uses the installed console script.
 - **`src/fimbox_cli.py`** — Handwritten Click CLI using generated SDK operation
   modules/models, not runtime OpenAPI parsing or handwritten HTTP routes.
   Commands: submit, submit-envelope, jobs, status, output, scenario-output,
   cancel, session, logout, health. `--body` reads JSON.
+  `submit --max-procs N` selects per-job concurrency; the envelope accepts
+  max_procs too. Omission uses HAND_FIM_MAX_PROCS (worker default 1).
+  `fimbox`/`pixi run fimbox` are the installed console entry points.
   Defaults to `http://localhost:8000`.
-  Session supplied through `FIMBOX_SESSION_TOKEN` or hidden prompt.
+  Session precedence: option/environment, OS keychain scoped to API URL, hidden
+  prompt. Successful prompted tokens are saved with keyring; logout and saved
+  token HTTP 401 clear the entry. Only OS secure backends are accepted, no
+  plaintext fallback; keychain errors are explicit. Tests mock the keychain.
   The prompt shows the configured API's `/auth/login` link and instructions
   to copy the returned FIMBox `access_token`.
-  No local credential persistence, Docker subprocesses, or API server imports.
+  No plaintext credential files, Docker subprocesses, or API server imports.
   Help does not require a server. CLI rejects fields dropped by generated
   models and surfaces HTTP/transport/contract errors without retries.
 - **`src/fimbox_sdk/`** — Generated, do not hand-edit. Local
@@ -36,40 +40,10 @@ actual FIM computation using NOAA/OWP's `inundation-mapping` tooling and the
   and local generator config. `pixi run sdk-generate` regenerates only the SDK.
 - **`pyproject.toml`**, **`MANIFEST.in`** — Installable `fimbox` distribution:
   only fimbox_sdk and fimbox_cli, with fimbox console entry point. Python 3.10+.
-  Does not package server/legacy workflow modules. Optional codegen dependency
+  Does not package server modules. Optional codegen dependency
   pins generator; spec/config included in source distribution.
 - **`tests/test_fimbox_cli.py`** — SDK/CLI regression tests with mock HTTP,
   typed sync/async responses, source-spec parity, and submission through FastAPI.
-
-- **`src/compose_runner.py`** — Legacy `run_compose()` helper for launching
-  one-off Docker Compose service commands. Accepts the service, container
-  command, environment overrides, and optional bind mounts; intended for reuse
-  by host-side workflow modes.
-
-- **`src/hand_fim.py`** — Legacy direct-container host workflow, retained but
-  no longer used by the local entry point:
-  - Ensures the `cuahsi/handfim:latest` Docker image exists locally, offering to
-    `docker pull` it if missing (`image_exists`, `pull_image`, `ensure_image`).
-  - Presents an input-method menu (`select_input_mode`): (1) enter parameters
-    manually for the `reachfim` container command (`collect_args_manual`), or
-    (2) load one or more scenarios from a JSON file matching
-    `schema/schema.json` (`collect_args_from_json`), validated on the host via
-    the Pydantic `ScenarioList` model from
-    `src/schemas/hand_fim_schema.py` before ever starting Docker.
-    The `reachfim_interval` sub-command has been removed.
-  - Collects manual and scenario inputs with explicit Typer prompts, then
-    validates them with Pydantic `ReachFimArgs` and `ScenarioArgs` models.
-    Manual comma-separated reach/flow inputs are converted to shared schema
-    `Reach` objects before validation; scenario-file contents are validated
-    against `ScenarioList`.
-  - Uses `compose_runner.run_compose()` to run the `fimbox` Compose service with
-    prompted input and output bind mounts (defaults `./input` and `./output`)
-    relative to the CLI's current working directory. Compose creates those host
-    directories as needed. For the JSON flow, the scenario file is mounted read-only at
-    `/home/data/inputs/scenario.json`; otherwise the container's `reachfim`
-    command is invoked with the manually-entered arguments.
-  - **Note:** `run()` previously contained a leftover `import pdb; pdb.set_trace()`
-    debug breakpoint; it has since been removed.
 
 ## Schema (`src/schemas/`)
 
@@ -85,9 +59,8 @@ actual FIM computation using NOAA/OWP's `inundation-mapping` tooling and the
   All models use `extra = "forbid"` for strict validation.
   Swagger reach examples use the sample HUC/reach pair `03020201` / `8780625`,
   not the former placeholder HUC `12345678`.
-  Actively used by `src/hand_fim.py`'s JSON-file input flow to validate scenario files before
-  invoking Docker (see `load_scenarios`). `pydantic` was added as a host
-  dependency in `pixi.toml` specifically for this.
+  Used by the API and worker to validate job inputs. The SDK models are
+  generated separately from the API's OpenAPI schema.
 
 ## API and worker (`src/fimbox_api/`)
 
@@ -114,10 +87,15 @@ is not copied. OAuth/session/job-ownership behavior is adapted from the
   stored destination metadata, and presigned-URL responses.
   Bucket is optional (local default); prefix defaults empty and requires a
   bucket when nonempty. Result includes local_output_dir; local file keys are null.
+  HandFimJobOptions extends output options with optional positive max_procs;
+  JobRequest uses it for envelope submissions, and the direct route for query
+  parameters. Worker revalidates it before execution.
 - **`src/fimbox_api/main.py`** — FastAPI app: `POST /jobs` accepts the
   template's typed `payload` envelope; `POST /jobs/hand-fim` accepts the
   scenario array directly with destination query parameters. All job routes
   require a session and enforce user ownership. Also provides user job listing,
+  with JobList/JobSummary objects containing job_id/status (not plain ID
+  strings), sharing status normalization with individual job polling,
   polling, fresh S3 presigned URL responses or authenticated local content URLs,
   queued-job cancellation, public health, and explicit storage/queue errors.
   Local `/jobs/<uuid>/files/<index>/content` streams files from the read-only
@@ -135,7 +113,7 @@ is not copied. OAuth/session/job-ownership behavior is adapted from the
   Without a bucket, leaves files on the Compose output bind mount, skips
   credential generation/S3 entirely, and returns local output metadata.
   Compose preserves the existing FIMBOX_OUTPUT_DIR bind configuration
-  (default ../output relative to docker/api); API mounts the same path read-only.
+  (default ./docker/output relative to the repository root); API mounts the same path read-only.
 - **`src/fimbox_api/storage.py`** — Shared S3 client configuration, safe
   job-specific object-key construction, object existence checks, and SigV4
   presigned GET URLs using job-specific temporary credentials. Submissions
@@ -164,24 +142,28 @@ is not copied. OAuth/session/job-ownership behavior is adapted from the
   future failures and missing HUC rasters propagate. Skipped on the host.
 
 Deployment assets live in `docker/api/`: a slim API Dockerfile, a worker
-Dockerfile extending `cuahsi/handfim:latest`, a role-based entrypoint, pinned
-requirements, and an independent Compose stack. Only the worker mounts the
-output volume; the API signs uploaded S3 objects. Redis is not exposed to the host.
+Dockerfile extending `cuahsi/handfim:latest`, a role-based entrypoint, and pinned
+requirements. Root `docker-compose.yml` runs API/worker/Redis; its project
+name remains `api` to preserve existing containers and Redis sessions after
+consolidation. Both API (read-only) and worker mount docker/output by default.
+The base HAND-FIM image is built separately from docker/handfim; Compose
+contains only API, worker, and Redis.
+Redis is not exposed to the host.
 The worker runs `/home/entry.py` directly without a Docker socket. Keep a
 single worker per shared watershed cache. `pixi run api` runs FastAPI only.
 
 ## Container-side code (`docker/handfim/`)
 
 - **`docker/handfim/entry.py`** — The Typer CLI that runs *inside* the
-  `cuahsi/handfim` Docker container (invoked by `src/hand_fim.py` via
-  `docker compose run ... <command> <args>`). Commands:
+  `cuahsi/handfim` Docker container (invoked by the Celery worker's
+  scenario subprocess). Commands:
   - `reachfim` — Generates FIM for one or more explicit reach IDs + flow rates.
     Downloads HUC data if needed (`__download_huc_fim`), writes a
     `feature_id,discharge` CSV per reach (`__write_flow_input_file`), runs FIM
     generation in parallel via `ProcessPoolExecutor` (`__compute_fim_scenario`
     → `runFIM.runfim`), reorganizes outputs per reach, cleans rasters, and
     converts to Cloud-Optimized GeoTIFF (COG). One output per reach (not
-    merged) — used by the host's manual-entry flow.
+    merged). Available directly in the container, not through the job API.
   - `scenario` — Generates one FIM GeoTIFF per scenario defined in a JSON file
     matching `schema/schema.json` (`__load_scenarios` does light-weight
     structural validation without a pydantic dependency in the image).

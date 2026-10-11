@@ -22,11 +22,14 @@ class JobRequest:
         payload (list[Scenario]): The shared scenario JSON schema with worker-specific validation.
         output_bucket (None | str | Unset):
         output_prefix (str | Unset):  Default: ''.
+        max_procs (int | None | Unset): Max concurrent HAND-FIM processes; omit to use the worker's HAND_FIM_MAX_PROCS
+            (default 1).
     """
 
     payload: list[Scenario]
     output_bucket: None | str | Unset = UNSET
     output_prefix: str | Unset = ""
+    max_procs: int | None | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         payload = []
@@ -44,6 +47,12 @@ class JobRequest:
 
         output_prefix = self.output_prefix
 
+        max_procs: int | None | Unset
+        if isinstance(self.max_procs, Unset):
+            max_procs = UNSET
+        else:
+            max_procs = self.max_procs
+
         field_dict: dict[str, Any] = {}
 
         field_dict.update(
@@ -55,6 +64,8 @@ class JobRequest:
             field_dict["output_bucket"] = output_bucket
         if output_prefix is not UNSET:
             field_dict["output_prefix"] = output_prefix
+        if max_procs is not UNSET:
+            field_dict["max_procs"] = max_procs
 
         return field_dict
 
@@ -83,10 +94,20 @@ class JobRequest:
 
         output_prefix = d.pop("output_prefix", UNSET)
 
+        def _parse_max_procs(data: object) -> int | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(int | None | Unset, data)
+
+        max_procs = _parse_max_procs(d.pop("max_procs", UNSET))
+
         job_request = cls(
             payload=payload,
             output_bucket=output_bucket,
             output_prefix=output_prefix,
+            max_procs=max_procs,
         )
 
         return job_request

@@ -1,3 +1,5 @@
+name: api
+
 services:
   redis:
     image: redis:7-alpine
@@ -9,10 +11,10 @@ services:
 
   api:
     build:
-      context: ../..
+      context: .
       dockerfile: docker/api/Dockerfile
     env_file:
-      - path: ../../.env
+      - path: .env
         required: false
         format: raw
     environment:
@@ -37,7 +39,7 @@ services:
     ports:
       - "127.0.0.1:${FIMBOX_API_PORT:-8000}:8000"
     volumes:
-      - "${FIMBOX_OUTPUT_DIR:-../output}:/home/output:ro"
+      - "${FIMBOX_OUTPUT_DIR:-./docker/output}:/home/output:ro"
     depends_on:
       redis:
         condition: service_healthy
@@ -45,7 +47,7 @@ services:
   worker:
     platform: linux/amd64
     build:
-      context: ../..
+      context: .
       dockerfile: docker/api/worker.Dockerfile
     environment:
       APP_ROLE: worker
@@ -57,14 +59,10 @@ services:
       S3_REGION: ${S3_REGION:-us-east-1}
       S3_ADDRESSING_STYLE: ${S3_ADDRESSING_STYLE:-path}
     volumes:
-      - "${FIMBOX_INPUT_DIR:-../input}:/home/data/inputs"
-      - "${FIMBOX_OUTPUT_DIR:-../output}:/home/output"
+      - "${FIMBOX_INPUT_DIR:-./data/input}:/home/data/inputs"
+      - "${FIMBOX_OUTPUT_DIR:-./data/output}:/home/output"
     ulimits:
       stack: 67108864
     depends_on:
       redis:
         condition: service_healthy
-
-volumes:
-  hand-fim-input:
-  hand-fim-output:

@@ -1,7 +1,7 @@
 ## Building Docker Images
 
 ```
-docker compose -f docker/docker-compose.yml build
+docker build --platform linux/amd64 -t cuahsi/handfim:latest docker/handfim
 ```
 
 ## HAND-FIM API and worker
@@ -17,8 +17,12 @@ HydroShare OAuth and Redis sessions are adapted from the template's
 Start the local stack from the repository root:
 
 ```bash
-docker compose -f docker/api/docker-compose.yml up --build
+docker compose --env-file /dev/null up --build
 ```
+
+The main Compose file runs API, worker, and Redis. The base HAND-FIM image
+can be built separately as shown above. The Compose project name remains `api` to preserve
+existing containers and sessions; no data migration is needed.
 
 The API is available at `http://localhost:8000`, with interactive documentation
 at `/docs`. Redis is internal to the stack. The worker image extends
@@ -46,7 +50,7 @@ secret is never embedded in the Swagger page or sent to the browser.
 After adding or changing credentials, recreate the API to load them:
 
 ```bash
-docker compose --env-file /dev/null -f docker/api/docker-compose.yml up -d --build api
+docker compose --env-file /dev/null up -d --build api
 ```
 
 This bypasses Compose's global `.env` interpolation; the API still loads
@@ -148,8 +152,8 @@ Without `output_bucket`, files remain in the worker's Compose-mounted
 credentials, network access, or upload is required; session authentication
 and job ownership still apply.
 
-Compose uses `FIMBOX_OUTPUT_DIR` (default `../output`, resolved relative to
-`docker/api/docker-compose.yml`, i.e. `docker/output/`) as the host bind mount.
+Compose uses `FIMBOX_OUTPUT_DIR` (default `./docker/output`, resolved relative to
+the root `docker-compose.yml`) as the host bind mount.
 The API mounts the same directory read-only for authenticated downloads.
 Set an absolute `FIMBOX_OUTPUT_DIR` to select a different host directory.
 No output path from a job request is used to select an arbitrary filesystem
@@ -253,7 +257,16 @@ failure before the S3 upload.
 }
 ```
 
-`GET /jobs` lists the authenticated user's tracked job IDs. Poll
+`GET /jobs` (and `fimbox jobs`) lists the authenticated user's tracked job IDs
+and current statuses:
+
+```json
+{"jobs": [{"job_id": "<uuid>", "status": "started"}]}
+```
+
+The `jobs` array now contains objects instead of plain ID strings. Status
+names match the individual job endpoint; the list excludes results and errors.
+Poll
 `GET /jobs/<uuid>` for `queued`, `started`, `success`, `failure`, or
 `revoked`. Only the submitting user can poll, cancel, or obtain output URLs
 (HTTP 403 otherwise). On success, `result` extends the shared `HandFimResult`
@@ -337,7 +350,10 @@ cannot be interrupted by this single-process Celery worker and return HTTP 409.
 
 - `FIMBOX_API_PORT` controls the Compose host port (default `8000`).
 - `HAND_FIM_MAX_PROCS` controls parallel FIM computations inside the worker
-  (default `1`, must be positive).
+  (default `1`, must be positive). A job's `max_procs` overrides it: supply
+  `?max_procs=N` on `POST /jobs/hand-fim` or `"max_procs": N` in the
+  `POST /jobs` envelope. Values must be integers greater than zero; omission
+  uses the worker setting.
 - `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND`, and
   `CELERY_TASK_DEFAULT_QUEUE` configure the queue for non-Compose deployments.
 - `RESULT_TTL_SECONDS` and `VISIBILITY_TIMEOUT_SECONDS` default to 86400
@@ -364,7 +380,7 @@ cannot be interrupted by this single-process Celery worker and return HTTP 409.
 Stop the stack without deleting datasets:
 
 ```bash
-docker compose -f docker/api/docker-compose.yml down
+docker compose --env-file /dev/null down
 ```
 
 For host-side API development, `pixi install` followed by `pixi run api`
@@ -388,7 +404,7 @@ scientific computation while checking error propagation and missing-HUC
 handling:
 
 ```bash
-docker compose -f docker/api/docker-compose.yml run --rm --no-deps \
+docker compose --env-file /dev/null run --rm --no-deps \
   -v "$PWD/tests:/tests:ro" --entrypoint /opt/conda/bin/python \
   worker /tests/test_container_scenario.py
 ```
@@ -475,15 +491,29 @@ log sensitive authentication responses). HTTP transport failures raise
 ### Submitting jobs from the CLI
 
 Start the API/Redis/worker stack separately as described above. The CLI does
-not launch Docker or use the legacy `hand_fim`/`compose_runner` host modules;
+not launch Docker;
 computation runs in the API's worker. The default API URL is
 `http://localhost:8000`. Set `FIMBOX_API_URL` or place `--api-url URL` **before
 the command** to use another service. Use HTTPS outside local development.
 
-Authenticated commands use `FIMBOX_SESSION_TOKEN` or a hidden prompt when it
-is absent. The prompt includes a browser login link based on the configured
-API URL (`--api-url` or `FIMBOX_API_URL`). Tokens are not saved to disk, and no OAuth client secret is needed
-locally. To enter the token without placing it in shell history:
+Authenticated commands use an explicit `--session-token` or
+`FIMBOX_SESSION_TOKEN` first, then a session saved in the OS credential store.
+If none is available, a hidden prompt includes the browser login link based on
+the configured API URL (`--api-url` or `FIMBOX_API_URL`). After the prompted
+token succeeds, it is saved automatically and reused on subsequent CLI runs.
+Tokens are scoped to the API URL, including any base path; credentials for one
+server are never reused for another. No OAuth client secret is needed locally.
+
+Storage uses macOS Keychain, Windows Credential Locker, or Linux Secret
+Service/KWallet through `keyring`, with no plaintext file fallback. Your OS may
+ask permission to access the credential store. If no supported store is
+available, the CLI reports an error; supplying an environment token bypasses
+stored-token lookup. Environment/option overrides are not automatically saved.
+`fimbox logout` revokes the session and clears the saved token for that API.
+A saved token rejected with HTTP 401 is cleared; the request is not retried
+automatically. Log in again when a session expires.
+
+For temporary environment-only use, enter the token without shell history:
 
 ```bash
 read -r -s FIMBOX_SESSION_TOKEN
@@ -496,6 +526,16 @@ Submit a scenario JSON array:
 fimbox submit --body test-data/single_reach.json
 ```
 
+To set per-job concurrency:
+
+```bash
+fimbox submit --body test-data/single_reach.json --max-procs 4
+```
+
+`--max-procs` must be a positive integer. If omitted, the worker uses
+`HAND_FIM_MAX_PROCS` (default 1). The generated SDK submission functions accept
+`max_procs` too; concurrency applies inside one job, not to Celery worker count.
+
 This defaults to the Compose-mounted output directory. To opt into S3:
 
 ```bash
@@ -506,7 +546,8 @@ fimbox submit \
 ```
 
 `fimbox submit-envelope --body request.json` accepts the `payload`,
-`output_bucket`, `output_prefix` envelope instead. The CLI constructs generated
+optional `output_bucket`, `output_prefix`, and `max_procs` envelope instead.
+For example: `{"payload": [...], "max_procs": 4}`. The CLI constructs generated
 SDK models, rejects missing or unknown fields rather than silently dropping
 them, and sends them through the generated endpoint. Pydantic validation
 remains server-side. Submission prints JSON containing `job_id` and does not
@@ -533,9 +574,6 @@ are available in the SDK, not separate CLI login commands.
 
 `pixi install` installs the same editable distribution, and
 `pixi run fimbox ...` runs the installed console command.
-`python src/fimbox.py ...` remains a compatibility entry point.
-The former runtime-generated method/path command names, `--openapi-file`,
-and old Docker `--mode` interface have been replaced by the SDK-backed CLI.
 
 ### Regenerating the SDK
 
@@ -566,29 +604,13 @@ uses the generated client:
 PYTHONPATH=src python -m unittest discover -s tests -p test_fimbox_cli.py -v
 ```
 
-Without `--mode`, the CLI walks you through selecting a mode, then lets you
-choose between two ways of providing HAND-FIM input:
-
-1. **Manual entry** — interactively type in a single HUC-8 code, one or more
-   NWM reach IDs, and matching flow rates (cms).
-2. **Scenario JSON file** — point the CLI at a JSON file describing one or
-   more scenarios (see [`schema/schema.md`](schema/schema.md) and
-   [`schema/schema.json`](schema/schema.json) for the full format). Each
-   scenario is validated against the schema, then produces a single combined
-   output GeoTIFF, even if it spans multiple reaches or multiple HUCs.
-
-In both cases, the tool prompts for an input directory (default: `./input/`)
-and output directory (default: `./output/`) relative to your current working
-directory. It mounts them into the container and streams FIM computation
-progress to the terminal in real time. Final results are written under the
-selected output directory:
-`scenarios/<ScenarioID>.tif` (JSON mode) or `flood_<HUC>/...` (manual mode).
-
 ### Example: scenario JSON files
 
-Sample scenario files are provided in [`test-data/`](test-data/). When
-prompted for "Path to scenario JSON file", enter the path to one of these
-(or your own file following the same schema):
+Sample scenario files are provided in [`test-data/`](test-data/).
+Submit one with `fimbox submit --body PATH`. Each scenario produces a combined
+GeoTIFF, even if it spans multiple reaches or HUCs. Files are stored beneath
+`scenarios/<job_id>/` using internal `<job_id>-<index>` names; original scenario
+IDs remain metadata. The job's file manifest lists the exact output paths.
 
 #### `test-data/single_reach.json` — one scenario, one reach
 
@@ -606,7 +628,7 @@ GeoTIFF for the scenario.
 ]
 ```
 
-`./output/scenarios/single-reach-scenario.tif`:
+Example result for this scenario:
 
 <img src="docs/images/single-reach-scenario.png" alt="single-reach-scenario output" width="250">
 
@@ -629,7 +651,7 @@ file, producing one merged output GeoTIFF for the scenario.
 ]
 ```
 
-`./output/scenarios/single-huc-senario.tif`:
+Example result for this scenario:
 
 <img src="docs/images/single-huc-senario.png" alt="single-huc-senario output" width="250">
 
@@ -656,7 +678,7 @@ single combined output GeoTIFF for the scenario.
 ]
 ```
 
-`./output/scenarios/multiple-huc-scenario.tif`:
+Example result for this scenario:
 
 <img src="docs/images/multiple-huc-scenario.png" alt="multiple-huc-scenario output" width="250">
 
@@ -689,6 +711,6 @@ batch of related scenarios (e.g. steps of a hydrograph) in one job.
 ]
 ```
 
-`./output/scenarios/scenario1.tif` and `./output/scenarios/scenario2.tif`:
+Example results for these scenarios:
 
 <img src="docs/images/scenario1.png" alt="scenario1 output" width="250"> <img src="docs/images/scenario2.png" alt="scenario2 output" width="250">

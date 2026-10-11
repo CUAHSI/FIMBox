@@ -69,7 +69,7 @@ class ApiTests(unittest.TestCase):
                 self.assertEqual(result["status"], "queued")
                 self.assertEqual(result["status_url"], f"/jobs/{result['job_id']}")
                 enqueue.assert_called_once_with(
-                    args=[result["job_id"], PAYLOAD, "fim-output", "data/output"],
+                    args=[result["job_id"], PAYLOAD, "fim-output", "data/output", None],
                     task_id=result["job_id"],
                     retry=False,
                 )
@@ -134,9 +134,26 @@ class ApiTests(unittest.TestCase):
             result.assert_not_called()
 
     def test_list_jobs_for_authenticated_user(self):
-        with patch.object(main, "list_user_jobs", return_value=["job"]) as jobs:
-            self.assertEqual(self.client.get("/jobs").json(), {"jobs": ["job"]})
+        states = {
+            "PENDING": "queued", "RECEIVED": "queued", "STARTED": "started",
+            "RETRY": "started", "SUCCESS": "success", "FAILURE": "failure",
+            "REVOKED": "revoked", "CUSTOM": "custom",
+        }
+        with patch.object(main, "list_user_jobs", return_value=list(states)) as jobs, patch.object(
+            main.celery_app, "AsyncResult", side_effect=lambda job_id: Mock(state=job_id),
+        ) as results:
+            self.assertEqual(self.client.get("/jobs").json(), {
+                "jobs": [{"job_id": state, "status": status} for state, status in states.items()],
+            })
             jobs.assert_called_once_with("alice")
+            self.assertEqual(results.call_count, len(states))
+
+    def test_empty_job_list_does_not_fetch_task_statuses(self):
+        with patch.object(main, "list_user_jobs", return_value=[]), patch.object(
+            main.celery_app, "AsyncResult",
+        ) as results:
+            self.assertEqual(self.client.get("/jobs").json(), {"jobs": []})
+            results.assert_not_called()
 
     def test_status_and_presigned_url(self):
         job_id = str(uuid4())
@@ -176,8 +193,26 @@ class ApiTests(unittest.TestCase):
             for route, body in (("/jobs", {"payload": PAYLOAD}), ("/jobs/hand-fim", PAYLOAD)):
                 response = self.client.post(route, json=body)
                 self.assertEqual(response.status_code, 202, response.text)
-                self.assertEqual(enqueue.call_args.kwargs["args"][2:], [None, ""])
+                self.assertEqual(enqueue.call_args.kwargs["args"][2:], [None, "", None])
         self.create_job_credentials.assert_not_called()
+
+    def test_max_procs_is_validated_and_queued_for_both_request_shapes(self):
+        with patch.object(tasks.hand_fim, "apply_async") as enqueue:
+            for route, body in (
+                ("/jobs/hand-fim?max_procs=3", PAYLOAD),
+                ("/jobs", {"payload": PAYLOAD, "max_procs": 3}),
+            ):
+                response = self.client.post(route, json=body)
+                self.assertEqual(response.status_code, 202, response.text)
+                self.assertEqual(enqueue.call_args.kwargs["args"][-1], 3)
+            enqueue.reset_mock()
+            for value in (0, -1, "invalid", 1.5):
+                for route, body in (
+                    (f"/jobs/hand-fim?max_procs={value}", PAYLOAD),
+                    ("/jobs", {"payload": PAYLOAD, "max_procs": value}),
+                ):
+                    self.assertEqual(self.client.post(route, json=body).status_code, 422)
+            enqueue.assert_not_called()
 
     def test_local_file_urls_content_missing_files_and_traversal(self):
         job_id = str(uuid4())
@@ -327,6 +362,17 @@ class WorkerTests(unittest.TestCase):
         with patch.object(tasks.subprocess, "run", side_effect=subprocess.CalledProcessError(1, "scenario")):
             with self.assertRaises(subprocess.CalledProcessError):
                 tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION)
+
+    def test_max_procs_reaches_container_and_uses_worker_default_when_omitted(self):
+        with patch.object(tasks.settings, "hand_fim_max_procs", 2):
+            for max_procs, expected in ((None, "2"), (4, "4")):
+                with patch.object(tasks.subprocess, "run", side_effect=self.__write_output) as run:
+                    tasks.hand_fim.run(self.job_id, PAYLOAD, max_procs=max_procs)
+                self.assertEqual(run.call_args.args[0][-2], expected)
+        with patch.object(tasks.subprocess, "run") as run:
+            with self.assertRaises(ValidationError):
+                tasks.hand_fim.run(self.job_id, PAYLOAD, max_procs=0)
+            run.assert_not_called()
 
     def test_local_outputs_stay_on_mount_without_s3_client(self):
         with patch.object(tasks.subprocess, "run", side_effect=self.__write_output):

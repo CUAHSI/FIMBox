@@ -11,8 +11,6 @@ sdk-generate = "uv tool run --from openapi-python-client==0.28.0 openapi-python-
 
 [dependencies]
 python = "==3.14"
-rich = ">=15.0.0,<16"
-typer = ">=0.27.2,<0.28"
 pydantic = ">=2.0,<3"
 
 [pypi-dependencies]

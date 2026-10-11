@@ -21,10 +21,12 @@ from .celery_app import celery_app
 from .config import settings
 from .models import (
     HandFimParameters,
+    HandFimJobOptions,
     JobRequest,
+    JobList,
+    JobSummary,
     JobStatus,
     JobSubmitted,
-    OutputDestination,
     PresignedOutput,
 )
 from .storage import (
@@ -73,7 +75,7 @@ def storage_error_handler(_request: Request, error: Exception) -> JSONResponse:
 
 def __submit_hand_fim(
     parameters: HandFimParameters,
-    destination: OutputDestination,
+    destination: HandFimJobOptions,
     session: UserSession,
 ) -> JobSubmitted:
     job_id = str(uuid4())
@@ -87,6 +89,7 @@ def __submit_hand_fim(
                 parameters.model_dump(mode="json"),
                 destination.output_bucket,
                 destination.output_prefix,
+                destination.max_procs,
             ],
             task_id=job_id,
             retry=False,
@@ -111,16 +114,19 @@ def submit_job(body: JobRequest, session: AuthenticatedSession) -> JobSubmitted:
 @app.post("/jobs/hand-fim", status_code=202, response_model=JobSubmitted)
 def submit_hand_fim(
     body: HandFimParameters,
-    destination: Annotated[OutputDestination, Query()],
+    destination: Annotated[HandFimJobOptions, Query()],
     session: AuthenticatedSession,
 ) -> JobSubmitted:
     """Submit the scenario JSON array directly, without an envelope."""
     return __submit_hand_fim(body, destination, session)
 
 
-@app.get("/jobs")
-def list_jobs(session: AuthenticatedSession) -> dict[str, list[str]]:
-    return {"jobs": list_user_jobs(session.user_id)}
+@app.get("/jobs", response_model=JobList)
+def list_jobs(session: AuthenticatedSession) -> JobList:
+    return JobList(jobs=[
+        JobSummary(job_id=job_id, status=__job_status(celery_app.AsyncResult(job_id).state))
+        for job_id in list_user_jobs(session.user_id)
+    ])
 
 
 def __require_job_owner(job_id: UUID, session: UserSession) -> None:
@@ -128,11 +134,7 @@ def __require_job_owner(job_id: UUID, session: UserSession) -> None:
         raise HTTPException(status_code=403, detail="Job not owned by authenticated user")
 
 
-@app.get("/jobs/{job_id}", response_model=JobStatus)
-def get_job_status(job_id: UUID, session: AuthenticatedSession) -> JobStatus:
-    __require_job_owner(job_id, session)
-    result = celery_app.AsyncResult(str(job_id))
-    state = result.state
+def __job_status(state: str) -> str:
     status_map = {
         "PENDING": "queued",
         "RECEIVED": "queued",
@@ -142,7 +144,15 @@ def get_job_status(job_id: UUID, session: AuthenticatedSession) -> JobStatus:
         "FAILURE": "failure",
         "REVOKED": "revoked",
     }
-    status = status_map.get(state, state.lower())
+    return status_map.get(state, state.lower())
+
+
+@app.get("/jobs/{job_id}", response_model=JobStatus)
+def get_job_status(job_id: UUID, session: AuthenticatedSession) -> JobStatus:
+    __require_job_owner(job_id, session)
+    result = celery_app.AsyncResult(str(job_id))
+    state = result.state
+    status = __job_status(state)
     if state == "FAILURE":
         return JobStatus(job_id=str(job_id), status=status, error=str(result.result))
     if state == "SUCCESS":

@@ -9,6 +9,7 @@ from unittest.mock import patch
 from uuid import UUID, uuid4
 
 import httpx
+import click
 from click.testing import CliRunner
 from fastapi.testclient import TestClient
 
@@ -27,6 +28,10 @@ PAYLOAD = [{
 class SdkCliTests(unittest.TestCase):
     def setUp(self):
         self.runner = CliRunner()
+        patcher = patch.object(fimbox_cli, "__credential_store")
+        self.credential_store = patcher.start().return_value
+        self.credential_store.get_password.return_value = None
+        self.addCleanup(patcher.stop)
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.body = Path(self.directory.name) / "scenario.json"
@@ -134,6 +139,20 @@ class SdkCliTests(unittest.TestCase):
         result = self.invoke("submit-envelope", "--body", str(self.body))
         self.assertEqual(result.exit_code, 0, result.output)
 
+    def test_max_procs_cli_and_envelope_use_generated_schema(self):
+        result = self.invoke("submit", "--body", str(self.body), "--max-procs", "4")
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(self.requests[-1].url.params["max_procs"], "4")
+        self.assertEqual(len(self.requests), 1)
+        for value in ("0", "-1", "1.5"):
+            result = self.invoke("submit", "--body", str(self.body), "--max-procs", value)
+            self.assertEqual(result.exit_code, 2)
+        self.assertEqual(len(self.requests), 1)
+        self.body.write_text(json.dumps({"payload": PAYLOAD, "max_procs": 3}))
+        result = self.invoke("submit-envelope", "--body", str(self.body))
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(json.loads(self.requests[-1].content)["max_procs"], 3)
+
     def test_path_commands_and_presigned_url(self):
         self.response = httpx.Response(200, json={"url": "https://s3.test/signed", "expires_in": 60})
         result = self.invoke("output", "--job-id", self.job_id, "--index", "2")
@@ -147,7 +166,7 @@ class SdkCliTests(unittest.TestCase):
 
     def test_jobs_status_cancel_session_logout_and_health(self):
         responses = [
-            ("jobs", [], "/jobs", 200, {"jobs": [self.job_id]}),
+            ("jobs", [], "/jobs", 200, {"jobs": [{"job_id": self.job_id, "status": "started"}]}),
             ("status", ["--job-id", self.job_id], f"/jobs/{self.job_id}", 200,
              {"job_id": self.job_id, "status": "queued", "result": None, "error": None}),
             ("cancel", ["--job-id", self.job_id], f"/jobs/{self.job_id}", 204, None),
@@ -161,6 +180,8 @@ class SdkCliTests(unittest.TestCase):
                 result = self.invoke(name, *args)
                 self.assertEqual(result.exit_code, 0, result.output)
                 self.assertEqual(self.requests[-1].url.path, path)
+                if name == "jobs":
+                    self.assertEqual(json.loads(result.output), payload)
         self.assertNotIn("authorization", self.requests[-1].headers)
 
     def test_hidden_session_prompt_and_custom_url(self):
@@ -179,6 +200,67 @@ class SdkCliTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("http://localhost:8000/auth/login", result.output)
         self.assertNotIn("hidden-secret", result.output)
+        self.credential_store.set_password.assert_called_once_with(
+            "fimbox", "http://localhost:8000", "hidden-secret",
+        )
+
+    def test_saved_token_is_reused_and_scoped_to_api_url(self):
+        self.response = httpx.Response(200, json={"jobs": []})
+        self.credential_store.get_password.return_value = "saved-secret"
+        result = self.invoke("--api-url", "https://other.test/", "jobs", token="")
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.credential_store.get_password.assert_called_with("fimbox", "https://other.test")
+        self.assertEqual(self.requests[-1].headers["Authorization"], "Bearer saved-secret")
+        self.assertNotIn("saved-secret", result.output)
+        self.assertNotIn("session token", result.output)
+        self.credential_store.set_password.assert_not_called()
+
+    def test_explicit_token_takes_precedence_over_saved_token(self):
+        self.response = httpx.Response(200, json={"jobs": []})
+        self.credential_store.get_password.return_value = "saved-secret"
+        result = self.invoke("jobs")
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.credential_store.get_password.assert_not_called()
+        self.assertEqual(self.requests[-1].headers["Authorization"], "Bearer test-session")
+
+    def test_invalid_saved_token_is_cleared_without_retry(self):
+        self.credential_store.get_password.return_value = "expired"
+        self.response = httpx.Response(401, json={"detail": "Invalid or expired session"})
+        result = self.invoke("jobs", token="")
+        self.assertEqual(result.exit_code, 1)
+        self.credential_store.delete_password.assert_called_once_with("fimbox", "http://localhost:8000")
+        self.assertEqual(len(self.requests), 1)
+
+    def test_logout_clears_saved_token_after_revocation(self):
+        self.credential_store.get_password.return_value = "saved"
+        self.response = httpx.Response(204)
+        result = self.invoke("logout", token="")
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.credential_store.delete_password.assert_called_once_with("fimbox", "http://localhost:8000")
+
+    def test_failed_prompted_request_does_not_save_token(self):
+        self.response = httpx.Response(401, json={"detail": "Invalid session"})
+        result = self.invoke("jobs", token="", input="bad-secret\n")
+        self.assertEqual(result.exit_code, 1)
+        self.credential_store.set_password.assert_not_called()
+
+    def test_keychain_failure_is_explicit_and_never_leaks_token(self):
+        from keyring.errors import KeyringError
+
+        self.credential_store.get_password.side_effect = KeyringError("backend details")
+        result = self.invoke("jobs", token="")
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("Cannot read", result.output)
+        self.assertEqual(self.requests, [])
+        self.credential_store.get_password.side_effect = None
+        self.credential_store.set_password.side_effect = KeyringError("secret-details")
+        self.response = httpx.Response(200, json={"jobs": []})
+        result = self.invoke("jobs", token="", input="hidden-secret\n")
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("request succeeded", result.output)
+        self.assertNotIn("secret-details", result.output)
+        self.assertNotIn("hidden-secret", result.output)
+
 
     def test_http_errors_and_redirects_exit_nonzero_without_retry(self):
         for status in (401, 403, 409, 503):
@@ -234,7 +316,7 @@ class SdkIntegrationTests(unittest.TestCase):
             self.assertEqual(response.status_code, 202)
             self.assertIsInstance(response.parsed, JobSubmitted)
             enqueue.assert_called_once_with(
-                args=[response.parsed.job_id, PAYLOAD, "bucket", "output"],
+                args=[response.parsed.job_id, PAYLOAD, "bucket", "output", None],
                 task_id=response.parsed.job_id, retry=False,
             )
 
@@ -287,6 +369,20 @@ class SdkIntegrationTests(unittest.TestCase):
         result = asyncio.run(run())
         self.assertIsInstance(result, JobSubmitted)
         self.assertEqual(result.status, "queued")
+
+
+class CredentialBackendTests(unittest.TestCase):
+    def test_secure_os_backend_is_selected(self):
+        backend = type("SecureBackend", (), {"__module__": "keyring.backends.macOS"})()
+        with patch.object(fimbox_cli.keyring, "get_keyring", return_value=backend):
+            self.assertIs(fimbox_cli.__dict__["__credential_store"](), backend)
+
+    def test_plaintext_or_unavailable_backend_is_rejected(self):
+        from keyring.backends.fail import Keyring
+
+        with patch.object(fimbox_cli.keyring, "get_keyring", return_value=Keyring()):
+            with self.assertRaisesRegex(click.ClickException, "No supported OS credential store"):
+                fimbox_cli.__dict__["__credential_store"]()
 
 
 if __name__ == "__main__":

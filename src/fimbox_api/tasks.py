@@ -13,7 +13,7 @@ from schemas.hand_fim_schema import HandFimOutput
 
 from .celery_app import celery_app
 from .config import settings
-from .models import HandFimParameters, OutputDestination, OutputFile, StoredHandFimResult
+from .models import HandFimParameters, HandFimJobOptions, OutputFile, StoredHandFimResult
 from .storage import StorageCredentialsError, output_file_key, s3_client
 
 logger = logging.getLogger(__name__)
@@ -39,12 +39,13 @@ def hand_fim(
     payload: list[dict[str, Any]],
     output_bucket: str | None = None,
     output_prefix: str = "",
+    max_procs: int | None = None,
 ) -> dict[str, Any]:
     """Run the container scenario command and upload its job-specific output tree."""
     job_id = str(UUID(job_id))
     scenarios = HandFimParameters.model_validate(payload)
-    destination = OutputDestination(
-        output_bucket=output_bucket, output_prefix=output_prefix,
+    destination = HandFimJobOptions(
+        output_bucket=output_bucket, output_prefix=output_prefix, max_procs=max_procs,
     )
     input_dir = settings.hand_fim_input_dir / "jobs" / job_id
     output_dir = settings.hand_fim_output_dir / "scenarios" / job_id
@@ -69,7 +70,7 @@ def hand_fim(
                 str(settings.hand_fim_entry),
                 "scenario",
                 str(scenario_file),
-                str(settings.hand_fim_max_procs),
+                str(destination.max_procs if destination.max_procs is not None else settings.hand_fim_max_procs),
                 job_id,
             ],
             cwd=settings.hand_fim_entry.parent,
@@ -112,7 +113,7 @@ def hand_fim(
         logger.info("Completed HAND-FIM job %s", job_id)
         return StoredHandFimResult(
             outputs=outputs, files=files,
-            local_output_dir=str(output_dir), **destination.model_dump(),
+            local_output_dir=str(output_dir), **destination.model_dump(exclude={"max_procs"}),
         ).model_dump(mode="json")
     except (
         OSError, subprocess.CalledProcessError, RuntimeError,

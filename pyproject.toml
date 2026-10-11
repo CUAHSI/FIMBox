@@ -14,6 +14,7 @@ dependencies = [
     "python-dateutil>=2.8,<3",
     "click>=8.1,<9",
     "typing-extensions>=4.12,<5",
+    "keyring>=25.6,<26",
 ]
 
 [project.scripts]

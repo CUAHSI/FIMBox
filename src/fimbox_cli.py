@@ -9,6 +9,10 @@ from uuid import UUID
 
 import click
 import httpx
+import keyring
+from keyring.backend import KeyringBackend
+from keyring.backends.chainer import ChainerBackend
+from keyring.errors import KeyringError, PasswordDeleteError
 
 from fimbox_sdk import AuthenticatedClient, Client
 from fimbox_sdk.api.authentication import current_session_auth_session_get, logout_auth_logout_post
@@ -33,14 +37,66 @@ class Settings:
     timeout: float
 
 
+def __credential_store() -> KeyringBackend:
+    backend = keyring.get_keyring()
+    if isinstance(backend, ChainerBackend):
+        candidates = backend.backends
+    else:
+        candidates = [backend]
+    for candidate in candidates:
+        if type(candidate).__module__ in {
+            "keyring.backends.macOS", "keyring.backends.Windows",
+            "keyring.backends.SecretService", "keyring.backends.kwallet",
+        }:
+            return candidate
+    raise click.ClickException(
+        "No supported OS credential store is available. Configure macOS Keychain, "
+        "Windows Credential Locker, or Linux Secret Service/KWallet, "
+        "or supply FIMBOX_SESSION_TOKEN. No plaintext fallback is used."
+    )
+
+
+def __stored_token(api_url: str) -> str | None:
+    try:
+        return __credential_store().get_password("fimbox", api_url)
+    except (KeyringError, OSError):
+        raise click.ClickException("Cannot read the FIMBox session from the OS credential store.") from None
+
+
+def __save_token(api_url: str, token: str) -> None:
+    try:
+        __credential_store().set_password("fimbox", api_url, token)
+    except (KeyringError, OSError):
+        raise click.ClickException(
+            "API request succeeded, but the session could not be saved to the OS credential store. "
+            "Do not repeat a submission just to save the token."
+        ) from None
+
+
+def __delete_token(api_url: str) -> None:
+    try:
+        store = __credential_store()
+        if store.get_password("fimbox", api_url) is not None:
+            store.delete_password("fimbox", api_url)
+    except PasswordDeleteError:
+        raise click.ClickException("Could not remove the saved FIMBox session.") from None
+    except (KeyringError, OSError):
+        raise click.ClickException("Cannot clear the FIMBox session from the OS credential store.") from None
+
+
 def __call(
     ctx: click.Context, operation: Callable[..., Response[Any]],
     authenticated: bool = True, **kwargs: Any,
 ) -> None:
     settings: Settings = ctx.obj
     client: Client | AuthenticatedClient
+    prompted = False
+    saved = False
     if authenticated:
         token = settings.session_token
+        if not token:
+            token = __stored_token(settings.api_url)
+            saved = token is not None
         if not token:
             click.echo(
                 f"Get a FIMBox session token in your browser: {settings.api_url}/auth/login",
@@ -48,6 +104,7 @@ def __call(
             )
             click.echo("After signing in, copy the access_token from the response.", err=True)
             token = click.prompt("FIMBox session token", hide_input=True)
+            prompted = True
         if not token.strip():
             raise click.ClickException("A FIMBox session token is required.")
         client = AuthenticatedClient(
@@ -69,6 +126,8 @@ def __call(
     except (ValueError, KeyError, TypeError, AttributeError):
         raise click.ClickException("API response does not match the generated SDK contract.") from None
     if not 200 <= response.status_code < 300:
+        if response.status_code == 401 and saved:
+            __delete_token(settings.api_url)
         detail = response.status_code.phrase
         try:
             body = json.loads(response.content)
@@ -84,6 +143,10 @@ def __call(
             click.echo(json.dumps(json.loads(response.content), indent=2, ensure_ascii=True))
         except ValueError:
             raise click.ClickException("API returned a non-JSON response.") from None
+    if operation is logout_auth_logout_post.sync_detailed:
+        __delete_token(settings.api_url)
+    elif prompted:
+        __save_token(settings.api_url, token.strip())
 
 
 def __body(path: Path) -> Any:
@@ -128,14 +191,20 @@ def app(ctx: click.Context, api_url: str, session_token: str | None, timeout: fl
 @click.option("--body", required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--output-bucket", default=None, help="Optional S3 bucket; omit to keep output on the container mount.")
 @click.option("--output-prefix", default="", help="S3 key prefix; requires --output-bucket.")
+@click.option("--max-procs", type=click.IntRange(min=1), default=None,
+              help="Max concurrent HAND-FIM processes; defaults to the worker configuration (1).")
 @click.pass_context
-def submit(ctx: click.Context, body: Path, output_bucket: str | None, output_prefix: str) -> None:
+def submit(
+    ctx: click.Context, body: Path, output_bucket: str | None,
+    output_prefix: str, max_procs: int | None,
+) -> None:
     """Submit a scenario JSON array; print the queued job ID without waiting."""
     if output_bucket is None and output_prefix:
         raise click.ClickException("--output-prefix requires --output-bucket.")
     __call(
         ctx, submit_hand_fim_jobs_hand_fim_post.sync_detailed,
         body=__scenarios(__body(body)), output_bucket=output_bucket, output_prefix=output_prefix,
+        max_procs=max_procs,
     )
 
 
@@ -158,7 +227,7 @@ def submit_envelope(ctx: click.Context, body: Path) -> None:
 @app.command()
 @click.pass_context
 def jobs(ctx: click.Context) -> None:
-    """List the authenticated user's job IDs."""
+    """List the authenticated user's job IDs and current statuses."""
     __call(ctx, list_jobs_jobs_get.sync_detailed)
 
 

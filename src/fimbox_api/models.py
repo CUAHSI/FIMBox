@@ -44,7 +44,14 @@ class OutputDestination(BaseModel):
         return value
 
 
-class JobRequest(OutputDestination):
+class HandFimJobOptions(OutputDestination):
+    max_procs: int | None = Field(
+        default=None, ge=1,
+        description="Max concurrent HAND-FIM processes; omit to use the worker's HAND_FIM_MAX_PROCS (default 1).",
+    )
+
+
+class JobRequest(HandFimJobOptions):
     payload: HandFimParameters
 
     model_config = {"extra": "forbid"}
@@ -75,8 +82,15 @@ class PresignedOutput(BaseModel):
     expires_in: int
 
 
-class JobStatus(BaseModel):
+class JobSummary(BaseModel):
     job_id: str
     status: str
+
+
+class JobList(BaseModel):
+    jobs: list[JobSummary]
+
+
+class JobStatus(JobSummary):
     result: StoredHandFimResult | None = None
     error: str | None = None

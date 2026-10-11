@@ -16,6 +16,7 @@ def _get_kwargs(
     body: list[Scenario],
     output_bucket: None | str | Unset = UNSET,
     output_prefix: str | Unset = "",
+    max_procs: int | None | Unset = UNSET,
 ) -> dict[str, Any]:
     headers: dict[str, Any] = {}
 
@@ -29,6 +30,13 @@ def _get_kwargs(
     params["output_bucket"] = json_output_bucket
 
     params["output_prefix"] = output_prefix
+
+    json_max_procs: int | None | Unset
+    if isinstance(max_procs, Unset):
+        json_max_procs = UNSET
+    else:
+        json_max_procs = max_procs
+    params["max_procs"] = json_max_procs
 
     params = {k: v for k, v in params.items() if v is not UNSET and v is not None}
 
@@ -87,6 +95,7 @@ def sync_detailed(
     body: list[Scenario],
     output_bucket: None | str | Unset = UNSET,
     output_prefix: str | Unset = "",
+    max_procs: int | None | Unset = UNSET,
 ) -> Response[HTTPValidationError | JobSubmitted]:
     """Submit Hand Fim
 
@@ -95,6 +104,8 @@ def sync_detailed(
     Args:
         output_bucket (None | str | Unset):
         output_prefix (str | Unset):  Default: ''.
+        max_procs (int | None | Unset): Max concurrent HAND-FIM processes; omit to use the
+            worker's HAND_FIM_MAX_PROCS (default 1).
         body (list[Scenario]): The shared scenario JSON schema with worker-specific validation.
 
     Raises:
@@ -109,6 +120,7 @@ def sync_detailed(
         body=body,
         output_bucket=output_bucket,
         output_prefix=output_prefix,
+        max_procs=max_procs,
     )
 
     response = client.get_httpx_client().request(
@@ -124,6 +136,7 @@ def sync(
     body: list[Scenario],
     output_bucket: None | str | Unset = UNSET,
     output_prefix: str | Unset = "",
+    max_procs: int | None | Unset = UNSET,
 ) -> HTTPValidationError | JobSubmitted | None:
     """Submit Hand Fim
 
@@ -132,6 +145,8 @@ def sync(
     Args:
         output_bucket (None | str | Unset):
         output_prefix (str | Unset):  Default: ''.
+        max_procs (int | None | Unset): Max concurrent HAND-FIM processes; omit to use the
+            worker's HAND_FIM_MAX_PROCS (default 1).
         body (list[Scenario]): The shared scenario JSON schema with worker-specific validation.
 
     Raises:
@@ -147,6 +162,7 @@ def sync(
         body=body,
         output_bucket=output_bucket,
         output_prefix=output_prefix,
+        max_procs=max_procs,
     ).parsed
 
 
@@ -156,6 +172,7 @@ async def asyncio_detailed(
     body: list[Scenario],
     output_bucket: None | str | Unset = UNSET,
     output_prefix: str | Unset = "",
+    max_procs: int | None | Unset = UNSET,
 ) -> Response[HTTPValidationError | JobSubmitted]:
     """Submit Hand Fim
 
@@ -164,6 +181,8 @@ async def asyncio_detailed(
     Args:
         output_bucket (None | str | Unset):
         output_prefix (str | Unset):  Default: ''.
+        max_procs (int | None | Unset): Max concurrent HAND-FIM processes; omit to use the
+            worker's HAND_FIM_MAX_PROCS (default 1).
         body (list[Scenario]): The shared scenario JSON schema with worker-specific validation.
 
     Raises:
@@ -178,6 +197,7 @@ async def asyncio_detailed(
         body=body,
         output_bucket=output_bucket,
         output_prefix=output_prefix,
+        max_procs=max_procs,
     )
 
     response = await client.get_async_httpx_client().request(**kwargs)
@@ -191,6 +211,7 @@ async def asyncio(
     body: list[Scenario],
     output_bucket: None | str | Unset = UNSET,
     output_prefix: str | Unset = "",
+    max_procs: int | None | Unset = UNSET,
 ) -> HTTPValidationError | JobSubmitted | None:
     """Submit Hand Fim
 
@@ -199,6 +220,8 @@ async def asyncio(
     Args:
         output_bucket (None | str | Unset):
         output_prefix (str | Unset):  Default: ''.
+        max_procs (int | None | Unset): Max concurrent HAND-FIM processes; omit to use the
+            worker's HAND_FIM_MAX_PROCS (default 1).
         body (list[Scenario]): The shared scenario JSON schema with worker-specific validation.
 
     Raises:
@@ -215,5 +238,6 @@ async def asyncio(
             body=body,
             output_bucket=output_bucket,
             output_prefix=output_prefix,
+            max_procs=max_procs,
         )
     ).parsed

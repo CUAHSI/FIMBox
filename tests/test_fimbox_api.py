@@ -84,6 +84,23 @@ class ApiTests(unittest.TestCase):
                 self.create_job_credentials.assert_called()
                 self.assertNotIn("provider-token", str(enqueue.call_args))
 
+    def test_cloud_policy_requires_s3_for_both_submission_routes(self):
+        with patch.object(main.settings, "require_hydroshare_output", True), patch.object(
+            tasks.hand_fim, "apply_async",
+        ) as enqueue:
+            for route, body in (("/jobs", {"payload": PAYLOAD}), ("/jobs/hand-fim", PAYLOAD)):
+                response = self.client.post(route, json=body)
+                self.assertEqual(response.status_code, 422)
+                self.assertIn("output_bucket", response.json()["detail"])
+            enqueue.assert_not_called()
+            self.track_user_job.assert_not_called()
+            self.create_job_credentials.assert_not_called()
+            self.assertEqual(
+                self.client.post("/jobs", json={"payload": PAYLOAD, **DESTINATION}).status_code, 202,
+            )
+            self.create_job_credentials.assert_called_once()
+            enqueue.assert_called_once()
+
     def test_anonymous_local_job_workflow_and_s3_rejection(self):
         main.app.dependency_overrides.clear()
         with patch.object(main.settings, "hydroshare_client_id", ""), patch.object(

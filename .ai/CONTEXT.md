@@ -72,7 +72,7 @@ actual FIM computation using NOAA/OWP's `inundation-mapping` tooling and the
 
 Adapted from the application in `CUAHSI/fimbox-api` at commit
 `b6ddd220bd72c950cfa16a6f76bf3de3a54acd11`; the template's Terraform deployment
-is not copied. OAuth/session/job-ownership behavior is adapted from the
+is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior is adapted from the
 `authentication` branch at `5da02c2171aca24ab69a0687be64b730e4d0272c`.
 
 - **`src/fimbox_api/__init__.py`** — Package marker and template attribution.
@@ -86,6 +86,9 @@ is not copied. OAuth/session/job-ownership behavior is adapted from the
   credential characters; Compose 2.30+ is required.
   Neither OAuth credential enables shared anonymous local mode; both enforce
   authentication. Partial credentials fail startup, with input values hidden.
+  REQUIRE_HYDROSHARE_OUTPUT defaults false locally; Terraform sets it true for
+  the API, which fails startup without OAuth credentials and rejects missing
+  output_bucket at either submission route before enqueueing.
 - **`src/fimbox_api/celery_app.py`** — JSON-only Celery configuration and
   task discovery, started-state tracking, late acknowledgement, and a
   single-process worker.
@@ -154,6 +157,38 @@ is not copied. OAuth/session/job-ownership behavior is adapted from the
 - **`tests/test_container_scenario.py`** — Container-only regression tests
   that load the real `entry.py` and mock computation/downloads to prove that
   future failures and missing HUC rasters propagate. Skipped on the host.
+
+## Google Cloud Terraform (`terraform/`)
+
+Adapted from CUAHSI/fimbox-api b6ddd220bd72c950cfa16a6f76bf3de3a54acd11.
+Provisions Cloud Run API and google-beta worker pool with separate images,
+private VPC/PSA Memorystore (DB0 broker, DB1 results, DB2 sessions/ownership/S3
+credentials), Artifact Registry, runtime service accounts and scoped IAM.
+Secret Manager OAuth versions may be populated externally (null inputs, pinned
+oauth_secret_version), or managed using sensitive hydroshare_client_id/secret
+tfvars inputs (values enter state, API pins created versions).
+s3_endpoint_url configures API signing and worker uploads together; it must
+accept HydroShare-issued credentials. Only the API has
+OAuth secret access. API policy always requires HydroShare authentication and
+S3 destination; no shared local output mount is deployed.
+
+`deploy_services=false` bootstraps registry/network/Redis/secrets before images
+and secret versions exist. API min/max instances, request concurrency, and HTTP
+timeout are wired through api_min_instances/api_max_instances/api_concurrency/
+api_timeout_seconds (defaults 0/5/80/60).
+Enable afterwards. The initial invalid public origin
+must be replaced with api_url and applied before registering OAuth redirects.
+Worker scratch/cache storage is ephemeral and consumes its memory budget
+(default 4 CPU/16Gi); this deployment needs workload-specific capacity checks.
+No Filestore, durable metadata archive, or queue autoscaler is supplied.
+`terraform/build_push_images.sh TAG` reads registry_url from applied state,
+checks tools/Docker, configures gcloud's credential helper, builds both
+Linux/amd64 images and pushes them. Prints tfvars image assignments only after
+both uploads; never edits configuration or applies infrastructure.
+`tests/test_build_push_images.sh` validates it with exported Bash command mocks,
+including failures and invocation outside the repository; no real uploads.
+`terraform/tests/deployment.tftest.hcl` uses mock providers (Terraform 1.7+) for
+bootstrap/auth/S3/secret/image wiring; no actual Google resources are created.
 
 Deployment assets live in `docker/api/`: a slim API Dockerfile, a worker
 Dockerfile extending `cuahsi/handfim:latest`, a role-based entrypoint, and pinned

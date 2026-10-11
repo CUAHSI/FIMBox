@@ -230,3 +230,12 @@ __marimo__/
 input/*
 output/*
 data/*
+
+# Terraform local state, credentials, plans, and provider downloads
+terraform/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+*.tfplan
+crash.log

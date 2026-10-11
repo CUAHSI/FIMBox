@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     hand_fim_input_dir: Path = Path("/home/data/inputs")
     hand_fim_output_dir: Path = Path("/home/output")
     hand_fim_max_procs: int = Field(default=1, ge=1)
+    require_hydroshare_output: bool = False
     s3_endpoint_url: str = "https://s3.hydroshare.org"
     s3_region: str = "us-east-1"
     s3_addressing_style: Literal["path", "virtual", "auto"] = "path"
@@ -48,6 +49,8 @@ class Settings(BaseSettings):
     def validate_authentication_configuration(self) -> "Settings":
         if bool(self.hydroshare_client_id) != bool(self.hydroshare_client_secret.get_secret_value()):
             raise ValueError("Configure both HydroShare client ID and secret, or neither for local mode")
+        if self.require_hydroshare_output and not self.authentication_enabled:
+            raise ValueError("REQUIRE_HYDROSHARE_OUTPUT requires HydroShare client ID and secret")
         return self
 
     model_config = SettingsConfigDict(

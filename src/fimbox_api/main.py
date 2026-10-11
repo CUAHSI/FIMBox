@@ -99,6 +99,8 @@ def __submit_hand_fim(
     destination: HandFimJobOptions,
     session: UserSession,
 ) -> JobSubmitted:
+    if settings.require_hydroshare_output and destination.output_bucket is None:
+        raise HTTPException(status_code=422, detail="This deployment requires a HydroShare output_bucket")
     job_id = str(uuid4())
     if destination.output_bucket is not None:
         if not settings.authentication_enabled:

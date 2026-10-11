@@ -263,6 +263,15 @@ class AuthTests(unittest.TestCase):
 
 
 class OAuthSettingsTests(unittest.TestCase):
+    def test_cloud_policy_cannot_start_anonymously(self):
+        with patch.dict("os.environ", {}, clear=True):
+            with self.assertRaisesRegex(ValidationError, "requires HydroShare"):
+                Settings(_env_file=None, require_hydroshare_output=True)
+            self.assertTrue(Settings(
+                _env_file=None, require_hydroshare_output=True,
+                API_CLIENT_ID="client", API_CLIENT_SECRET="secret",
+            ).authentication_enabled)
+
     def test_api_client_aliases_and_hydroshare_precedence(self):
         with patch.dict("os.environ", {
             "API_CLIENT_ID": "alias-client",

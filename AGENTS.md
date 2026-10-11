@@ -38,6 +38,13 @@ making structural changes to the project, so future sessions can rely on it.
 
 ## Build / run / test commands
 
+- Google Cloud deployment: `terraform/` adapts fimbox-api's Cloud Run template.
+  It forces HydroShare auth/S3 on the API; Compose remains anonymous/local by default.
+  Run `terraform -chdir=terraform validate` after init; mock-provider tests use
+  `terraform -chdir=terraform test` (Terraform 1.7+). Sensitive OAuth tfvars inputs
+  optionally manage Secret Manager versions but enter state; never commit them.
+  External Secret Manager versions avoid putting OAuth values in state.
+
 - Build the base Docker image: `docker build --platform linux/amd64 -t cuahsi/handfim:latest docker/handfim`.
 - Run the service from the repository root: `docker compose up --build`.
   No configuration means shared anonymous local mode; both OAuth client ID

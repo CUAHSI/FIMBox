@@ -26,6 +26,219 @@ local jobs. Compose binds the API to loopback; keep this mode limited to trusted
 single-user local use. Local jobs remain separate from authenticated users'
 jobs if authentication is enabled later.
 
+## Google Cloud deployment with Terraform
+
+[`terraform/`](terraform/) adapts the Cloud Run API/worker-pool, Memorystore,
+VPC/private service access, Artifact Registry, IAM, and Secret Manager resources
+from [CUAHSI/fimbox-api](https://github.com/cuahsi/fimbox-api/tree/b6ddd220bd72c950cfa16a6f76bf3de3a54acd11/terraform).
+The API and HAND-FIM worker use **separate images** from this repository.
+
+**This deployment always requires HydroShare authentication and S3 output.**
+The API gets both OAuth credentials from Secret Manager and
+`REQUIRE_HYDROSHARE_OUTPUT=true`. Missing credentials prevent startup.
+Both submission endpoints reject jobs without `output_bucket` before
+credential exchange or enqueueing. The endpoint is publicly reachable for
+browser OAuth, but job access is protected by FIMBox sessions and ownership.
+The worker gets per-job temporary S3 credentials from Redis, not OAuth client
+secrets or static AWS credentials. Local Compose defaults remain unchanged.
+
+### 1. Bootstrap infrastructure
+
+Requirements: a billed GCP project, Google Cloud CLI, Terraform 1.5+, Docker,
+permission to enable services and manage these resources, and availability/
+quota for Cloud Run worker pools in the selected region. Provisioning creates
+billable resources, even before workers start.
+
+```bash
+gcloud auth application-default login
+cp terraform/terraform.tfvars.example terraform/terraform.tfvars
+```
+
+Set `project_id` (and desired region/name/environment) in the copied file.
+Leave `deploy_services=false` initially.
+Configure `s3_endpoint_url` (default `https://s3.hydroshare.org`) for both API
+signing and worker uploads. An alternative endpoint must accept the credentials
+issued by HydroShare's service-account API; this does not change that API.
+
+```bash
+terraform -chdir=terraform init
+terraform -chdir=terraform plan
+terraform -chdir=terraform apply
+```
+
+Terraform does not build images or read the repository's `.env`. OAuth secret
+containers are created empty when both credential variables are null. Optionally
+set both `hydroshare_client_id` and `hydroshare_client_secret` in your ignored
+tfvars file to create Secret Manager versions automatically. These inputs are
+sensitive (redacted from normal CLI output) but **their values are stored in
+Terraform state and saved plans**. Never commit credential files, state, or plans.
+Alternatively populate credentials externally as described below to keep OAuth
+values out of state. Queue URLs always enter state.
+Use a secured remote state backend and restricted project/IAM permissions for
+production; the example uses local state, which must not be committed.
+
+### 2. Build and push Linux/amd64 images
+
+After the bootstrap apply, run:
+
+```bash
+bash terraform/build_push_images.sh release-20261011
+```
+
+The script reads `registry_url` from Terraform state, configures the gcloud
+Docker credential helper, builds both Linux/amd64 images, and pushes them.
+Use a new tag for each release. Docker must be running and gcloud must be
+authenticated with permission to upload to the repository. It prints
+`api_image` and `worker_image` assignments only after both pushes succeed;
+copy those into tfvars and enable `deploy_services`. It does not edit tfvars
+or apply Terraform. On failure, it stops immediately; if one push already
+succeeded, that image remains in the registry. The script works from any
+directory when invoked using its full path.
+
+The equivalent manual commands are:
+
+Run from the repository root, replacing the project and region below with the
+values from your Terraform variables:
+
+```bash
+export PROJECT_ID=YOUR_GCP_PROJECT
+export REGION=us-central1
+export REGISTRY="$(terraform -chdir=terraform output -raw registry_url)"
+gcloud auth configure-docker "$REGION-docker.pkg.dev"
+
+docker build --platform linux/amd64 \
+  -f docker/api/Dockerfile -t "$REGISTRY/api:v1" .
+docker build --platform linux/amd64 \
+  -f docker/api/worker.Dockerfile -t "$REGISTRY/worker:v1" .
+docker push "$REGISTRY/api:v1"
+docker push "$REGISTRY/worker:v1"
+```
+
+The worker build extends `cuahsi/handfim:latest`; it does not use the slim API
+image. Use immutable digests or unique release tags for subsequent deployments.
+If these images are stored in another project/repository, grant its pull
+permissions to the appropriate Cloud Run service agent as well.
+
+### 3. Populate HydroShare credentials
+
+Register a confidential HydroShare OAuth application. To manage credentials
+through tfvars, replace the null values with the client ID and plaintext secret:
+
+```hcl
+hydroshare_client_id     = "YOUR_OAUTH_CLIENT_ID"
+hydroshare_client_secret = "YOUR_PLAINTEXT_OAUTH_CLIENT_SECRET"
+s3_endpoint_url         = "https://s3.hydroshare.org"
+```
+
+Supply both credentials or neither; partial and empty values fail validation.
+Terraform creates new Secret Manager versions on changes and pins the API to
+those specific versions. `oauth_secret_version` is ignored in this mode.
+Only the API reads the OAuth secrets; the worker still uses per-job credentials.
+Protect the tfvars file and state. Switching between Terraform-managed and
+externally populated credentials may destroy managed versions; inspect the plan
+and provision replacement external versions before removing the inputs.
+
+For external secret management, leave both variables null and add its client ID and
+**plaintext client secret** to the provisioned secrets, without putting values
+on the command line or into Terraform. The following Bash commands read them
+without echoing:
+
+```bash
+read -r -s -p 'HydroShare client ID: ' OAUTH_ID; printf '\n'
+printf '%s' "$OAUTH_ID" | gcloud secrets versions add \
+  "$(terraform -chdir=terraform output -raw oauth_client_id_secret)" \
+  --project="$PROJECT_ID" --data-file=-
+unset OAUTH_ID
+
+read -r -s -p 'HydroShare client secret: ' OAUTH_SECRET; printf '\n'
+printf '%s' "$OAUTH_SECRET" | gcloud secrets versions add \
+  "$(terraform -chdir=terraform output -raw oauth_client_secret_secret)" \
+  --project="$PROJECT_ID" --data-file=-
+unset OAUTH_SECRET
+```
+
+For external management, the default `oauth_secret_version=1` pins both secrets' initial versions. When
+rotating, add corresponding versions of both credentials, update the variable,
+and apply. The API runtime alone has access to these secrets.
+
+### 4. Deploy and register HTTPS callbacks
+
+Update the copied variables:
+
+```hcl
+deploy_services = true
+api_image       = "REGISTRY_FROM_OUTPUT/api:v1"
+worker_image    = "REGISTRY_FROM_OUTPUT/worker:v1"
+```
+
+Run `terraform -chdir=terraform plan`, then `terraform -chdir=terraform apply`.
+Obtain the generated HTTPS API URL:
+
+```bash
+terraform -chdir=terraform output -raw api_url
+```
+
+Set `public_api_url` to that origin **without a trailing slash** and apply again.
+The initial `configure-before-login.invalid` value deliberately disables usable
+OAuth redirects until this step; do not try logging in before updating it.
+Alternatively, use a custom HTTPS origin that you have configured separately.
+Register these exact URLs on the HydroShare OAuth client:
+
+- `<public_api_url>/auth/callback`
+- `<public_api_url>/docs/oauth2-redirect`
+
+Then install the client and submit with a HydroShare S3 bucket:
+
+```bash
+python -m pip install .
+export FIMBOX_API_URL="$(terraform -chdir=terraform output -raw api_url)"
+curl --fail "$FIMBOX_API_URL/auth/config"
+fimbox submit --body test-data/single_reach.json \
+  --output-bucket YOUR_HYDROSHARE_BUCKET --output-prefix fimbox
+```
+
+Authentication discovery must return `{"authentication_enabled":true}`.
+The CLI links to browser login and saves the resulting FIMBox session token.
+Outputs are uploaded to the supplied HydroShare bucket and prefix; download
+endpoints return presigned URLs. There is no shared local-output mount in Cloud Run.
+
+### Capacity and lifecycle
+
+`api_min_instances` (default 0), `api_max_instances` (5), `api_concurrency` (80),
+and `api_timeout_seconds` (60) configure API scaling and request handling.
+Minimum instances cannot exceed maximum instances. The API timeout applies to
+HTTP requests, not the asynchronous scientific job duration.
+
+The worker pool is always running (default one worker, 4 CPUs, 16 GiB memory),
+not request-driven or automatically scaled by queue length. CPU/memory and
+instance count are configurable. Cloud Run's writable filesystem is ephemeral
+and **counts against memory**: HAND-FIM watershed caches, intermediate rasters,
+and outputs must fit alongside scientific processing. Scratch data accumulates
+within an instance and is lost on replacement; monitor capacity and replace
+idle workers when necessary. Large workloads may need a persistent-disk/NFS
+or Compute Engine deployment instead. S3 uploads preserve completed artifacts,
+not computation scratch state. This Terraform does not provision Filestore.
+
+Set `result_ttl_seconds` above the longest job duration; it also controls broker
+visibility timeout. Redis is BASIC tier and metadata is TTL-based, not a durable
+job archive. S3 credentials and sessions expire independently. Worker replacement
+may redeliver jobs; it cannot safely interrupt an active scientific subprocess.
+Do not scale down or destroy the stack during active work.
+
+Validate infrastructure without creating resources:
+
+```bash
+terraform -chdir=terraform init -backend=false
+terraform -chdir=terraform fmt -check
+terraform -chdir=terraform validate
+# Mock-provider contract tests require Terraform 1.7+:
+terraform -chdir=terraform test
+bash tests/test_build_push_images.sh
+```
+
+Inspect `terraform -chdir=terraform plan -destroy` before intentionally removing
+infrastructure. Terraform does not remove artifacts already uploaded to HydroShare.
+
 ## Building Docker Images
 
 ```
@@ -38,7 +251,7 @@ The `src/fimbox_api` package adapts the application template from
 [CUAHSI/fimbox-api](https://github.com/cuahsi/fimbox-api/tree/b6ddd220bd72c950cfa16a6f76bf3de3a54acd11/code).
 It keeps FastAPI, Celery, Redis, job submission, status polling, and queued-job
 cancellation, replacing the demonstration task with HAND-FIM. The template's
-GCP/Terraform deployment is not included here.
+GCP deployment is adapted in [`terraform/`](terraform/) as described above.
 HydroShare OAuth and Redis sessions are adapted from the template's
 [`authentication` branch](https://github.com/cuahsi/fimbox-api/tree/5da02c2171aca24ab69a0687be64b730e4d0272c).
 

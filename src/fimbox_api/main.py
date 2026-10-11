@@ -4,7 +4,7 @@ from uuid import UUID, uuid4
 
 from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from kombu.exceptions import KombuError
 from redis.exceptions import RedisError
 
@@ -77,7 +77,8 @@ def __submit_hand_fim(
     session: UserSession,
 ) -> JobSubmitted:
     job_id = str(uuid4())
-    create_job_credentials(UUID(job_id), session)
+    if destination.output_bucket is not None:
+        create_job_credentials(UUID(job_id), session)
     try:
         track_user_job(session.user_id, job_id)
         hand_fim.apply_async(
@@ -91,7 +92,8 @@ def __submit_hand_fim(
             retry=False,
         )
     except (KombuError, RedisError, OSError):
-        delete_job_credentials(UUID(job_id))
+        if destination.output_bucket is not None:
+            delete_job_credentials(UUID(job_id))
         untrack_user_job(session.user_id, job_id)
         raise
     logger.info("Enqueued HAND-FIM job %s", job_id)
@@ -157,11 +159,19 @@ def get_job_output(
         raise HTTPException(status_code=409, detail="Job has not completed successfully")
     if index < 0 or index >= len(status.result.outputs):
         raise HTTPException(status_code=404, detail="Output not found")
+    if status.result.output_bucket is None:
+        filename = f"{job_id}-{index}.cog"
+        file_index = next(
+            (i for i, file in enumerate(status.result.files) if file.path == filename), None,
+        )
+        if file_index is None:
+            raise HTTPException(status_code=404, detail="Scenario output not found")
+        return PresignedOutput(url=f"/jobs/{job_id}/files/{file_index}/content", expires_in=0)
     key = output_key(status.result.output_prefix, job_id, index)
     if status.result.files:
         filename = f"{job_id}-{index}.cog"
         artifact = next((file for file in status.result.files if file.path == filename), None)
-        if artifact is None:
+        if artifact is None or artifact.key is None:
             raise HTTPException(status_code=404, detail="Scenario output not found")
         key = artifact.key
     url, expires_in = presign_output(
@@ -181,10 +191,40 @@ def get_job_file(
         raise HTTPException(status_code=409, detail="Job has not completed successfully")
     if index < 0 or index >= len(status.result.files):
         raise HTTPException(status_code=404, detail="Output file not found")
+    if status.result.output_bucket is None:
+        return PresignedOutput(url=f"/jobs/{job_id}/files/{index}/content", expires_in=0)
+    key = status.result.files[index].key
+    if key is None:
+        raise HTTPException(status_code=404, detail="Output object key not found")
     url, expires_in = presign_output(
-        job_id, status.result.output_bucket, status.result.files[index].key,
+        job_id, status.result.output_bucket, key,
     )
     return PresignedOutput(url=url, expires_in=expires_in)
+
+
+@app.get(
+    "/jobs/{job_id}/files/{index}/content",
+    response_class=FileResponse,
+    responses={200: {"content": {"application/octet-stream": {"schema": {"type": "string", "format": "binary"}}}}},
+)
+def get_local_job_file(job_id: UUID, index: int, session: AuthenticatedSession) -> FileResponse:
+    """Download a local output file from the shared mount; requires the owner's session."""
+    status = get_job_status(job_id, session)
+    if status.status != "success" or status.result is None:
+        raise HTTPException(status_code=409, detail="Job has not completed successfully")
+    if status.result.output_bucket is not None or index < 0 or index >= len(status.result.files):
+        raise HTTPException(status_code=404, detail="Local output file not found")
+    root = settings.hand_fim_output_dir.resolve() / "scenarios" / str(job_id)
+    relative_path = status.result.files[index].path
+    path = root / relative_path
+    resolved = path.resolve()
+    if (
+        not resolved.is_relative_to(root.resolve()) or path.is_symlink()
+        or any(parent.is_symlink() for parent in path.parents)
+        or not resolved.is_file()
+    ):
+        raise HTTPException(status_code=404, detail="Local output file not found")
+    return FileResponse(resolved, filename=resolved.name, media_type="application/octet-stream")
 
 
 @app.delete("/jobs/{job_id}", status_code=204, response_class=Response)

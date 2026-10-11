@@ -5,7 +5,9 @@ platforms = ["osx-arm64"]
 version = "0.1.0"
 
 [tasks]
+fimbox = "fimbox"
 api = "python -m uvicorn fimbox_api.main:app --app-dir src --no-access-log"
+sdk-generate = "uv tool run --from openapi-python-client==0.28.0 openapi-python-client generate --path sdk/openapi.json --config sdk/generator.yaml --meta none --output-path src/fimbox_sdk --overwrite --fail-on-warning"
 
 [dependencies]
 python = "==3.14"
@@ -14,6 +16,7 @@ typer = ">=0.27.2,<0.28"
 pydantic = ">=2.0,<3"
 
 [pypi-dependencies]
+fimbox = { path = ".", editable = true }
 fastapi = "==0.115.12"
 uvicorn = { version = "==0.34.3", extras = ["standard"] }
 celery = { version = "==5.5.3", extras = ["redis"] }

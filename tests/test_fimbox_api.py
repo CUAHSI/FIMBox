@@ -126,6 +126,7 @@ class ApiTests(unittest.TestCase):
                 ("GET", f"/jobs/{job_id}"),
                 ("GET", f"/jobs/{job_id}/outputs/0.tif"),
                 ("GET", f"/jobs/{job_id}/files/0"),
+                ("GET", f"/jobs/{job_id}/files/0/content"),
                 ("DELETE", f"/jobs/{job_id}"),
             ):
                 self.assertEqual(self.client.request(method, route).status_code, 403)
@@ -139,7 +140,7 @@ class ApiTests(unittest.TestCase):
 
     def test_status_and_presigned_url(self):
         job_id = str(uuid4())
-        result = {**DESTINATION, "files": [], "outputs": [{"ScenarioID": "single-reach-scenario", "geotiff_url": f"/jobs/{job_id}/outputs/0.tif"}]}
+        result = {**DESTINATION, "local_output_dir": None, "files": [], "outputs": [{"ScenarioID": "single-reach-scenario", "geotiff_url": f"/jobs/{job_id}/outputs/0.tif"}]}
         client = Mock()
         client.generate_presigned_url.return_value = "https://objects.example/signed"
         with patch.object(storage, "s3_client", return_value=client), patch.object(
@@ -160,15 +161,54 @@ class ApiTests(unittest.TestCase):
             client.head_object.side_effect = NoCredentialsError()
             self.assertEqual(self.client.get(f"/jobs/{job_id}/outputs/0.tif").status_code, 503)
 
-    def test_destination_is_required(self):
+    def test_invalid_destination_is_rejected(self):
         with patch.object(tasks.hand_fim, "apply_async") as enqueue:
             for route, body in (
-                ("/jobs", {"payload": PAYLOAD}),
-                ("/jobs/hand-fim", PAYLOAD),
+                ("/jobs", {"payload": PAYLOAD, "output_prefix": "orphan"}),
+                ("/jobs/hand-fim?output_prefix=orphan", PAYLOAD),
                 ("/jobs", {"payload": PAYLOAD, **DESTINATION, "output_bucket": ""}),
             ):
                 self.assertEqual(self.client.post(route, json=body).status_code, 422)
             enqueue.assert_not_called()
+
+    def test_local_submission_skips_s3_credentials(self):
+        with patch.object(tasks.hand_fim, "apply_async") as enqueue:
+            for route, body in (("/jobs", {"payload": PAYLOAD}), ("/jobs/hand-fim", PAYLOAD)):
+                response = self.client.post(route, json=body)
+                self.assertEqual(response.status_code, 202, response.text)
+                self.assertEqual(enqueue.call_args.kwargs["args"][2:], [None, ""])
+        self.create_job_credentials.assert_not_called()
+
+    def test_local_file_urls_content_missing_files_and_traversal(self):
+        job_id = str(uuid4())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "scenarios" / job_id
+            output.mkdir(parents=True)
+            filename = f"{job_id}-0.cog"
+            (output / filename).write_bytes(b"local-raster")
+            result = {
+                "outputs": [{"ScenarioID": "test", "geotiff_url": f"/jobs/{job_id}/outputs/0.tif"}],
+                "files": [{"path": filename, "size_bytes": 12, "download_url": f"/jobs/{job_id}/files/0"}],
+            }
+            with patch.object(main.settings, "hand_fim_output_dir", root), patch.object(
+                main.celery_app, "AsyncResult", return_value=Mock(state="SUCCESS", result=result),
+            ), patch.object(main, "presign_output") as sign:
+                for route in (f"/jobs/{job_id}/files/0", f"/jobs/{job_id}/outputs/0.tif"):
+                    self.assertEqual(self.client.get(route).json(), {
+                        "url": f"/jobs/{job_id}/files/0/content", "expires_in": 0,
+                    })
+                route = f"/jobs/{job_id}/files/0/content"
+                self.assertEqual(self.client.get(route).content, b"local-raster")
+                (output / filename).unlink()
+                self.assertEqual(self.client.get(route).status_code, 404)
+                result["files"][0]["path"] = "../../outside"
+                (root / "outside").write_bytes(b"secret")
+                self.assertEqual(self.client.get(route).status_code, 404)
+                result["files"][0]["path"] = filename
+                (output / filename).symlink_to(root / "outside")
+                self.assertEqual(self.client.get(route).status_code, 404)
+                sign.assert_not_called()
 
     def test_file_manifest_and_scenario_download_use_preserved_keys(self):
         job_id = str(uuid4())
@@ -287,6 +327,16 @@ class WorkerTests(unittest.TestCase):
         with patch.object(tasks.subprocess, "run", side_effect=subprocess.CalledProcessError(1, "scenario")):
             with self.assertRaises(subprocess.CalledProcessError):
                 tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION)
+
+    def test_local_outputs_stay_on_mount_without_s3_client(self):
+        with patch.object(tasks.subprocess, "run", side_effect=self.__write_output):
+            result = tasks.hand_fim.run(self.job_id, PAYLOAD)
+        self.assertIsNone(result["output_bucket"])
+        self.assertIsNone(result["files"][0]["key"])
+        output_dir = self.root / "output" / "scenarios" / self.job_id
+        self.assertEqual(result["local_output_dir"], str(output_dir))
+        self.assertTrue((output_dir / f"{self.job_id}-0.cog").is_file())
+        self.storage_client.upload_file.assert_not_called()
 
     def test_output_symlink_is_rejected_without_uploading_external_data(self):
         external = self.root / "secret.txt"

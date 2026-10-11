@@ -36,6 +36,8 @@ services:
       S3_PRESIGNED_URL_SECONDS: ${S3_PRESIGNED_URL_SECONDS:-3600}
     ports:
       - "127.0.0.1:${FIMBOX_API_PORT:-8000}:8000"
+    volumes:
+      - "${FIMBOX_OUTPUT_DIR:-../output}:/home/output:ro"
     depends_on:
       redis:
         condition: service_healthy
@@ -55,8 +57,8 @@ services:
       S3_REGION: ${S3_REGION:-us-east-1}
       S3_ADDRESSING_STYLE: ${S3_ADDRESSING_STYLE:-path}
     volumes:
-      - hand-fim-input:/home/data/inputs
-      - hand-fim-output:/home/output
+      - "${FIMBOX_INPUT_DIR:-../input}:/home/data/inputs"
+      - "${FIMBOX_OUTPUT_DIR:-../output}:/home/output"
     ulimits:
       stack: 67108864
     depends_on:

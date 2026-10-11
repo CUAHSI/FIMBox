@@ -37,8 +37,8 @@ def __output_files(output_dir: Path) -> list[Path]:
 def hand_fim(
     job_id: str,
     payload: list[dict[str, Any]],
-    output_bucket: str,
-    output_prefix: str,
+    output_bucket: str | None = None,
+    output_prefix: str = "",
 ) -> dict[str, Any]:
     """Run the container scenario command and upload its job-specific output tree."""
     job_id = str(UUID(job_id))
@@ -89,25 +89,30 @@ def hand_fim(
                 )
             )
         files = []
-        client = s3_client(UUID(job_id))
+        client = s3_client(UUID(job_id)) if destination.output_bucket is not None else None
         for path in __output_files(output_dir):
             relative_path = path.relative_to(output_dir).as_posix()
-            key = output_file_key(destination.output_prefix, UUID(job_id), relative_path)
+            key = (
+                output_file_key(destination.output_prefix, UUID(job_id), relative_path)
+                if destination.output_bucket is not None else None
+            )
             content_type = (
                 "image/tiff" if path.suffix.lower() in (".tif", ".tiff", ".cog")
                 else mimetypes.guess_type(path.name)[0] or "application/octet-stream"
             )
-            client.upload_file(
-                str(path), destination.output_bucket, key,
-                ExtraArgs={"ContentType": content_type},
-            )
+            if client is not None:
+                client.upload_file(
+                    str(path), destination.output_bucket, key,
+                    ExtraArgs={"ContentType": content_type},
+                )
             files.append(OutputFile(
                 path=relative_path, key=key, size_bytes=path.stat().st_size,
                 download_url=f"/jobs/{job_id}/files/{len(files)}",
             ))
         logger.info("Completed HAND-FIM job %s", job_id)
         return StoredHandFimResult(
-            outputs=outputs, files=files, **destination.model_dump(),
+            outputs=outputs, files=files,
+            local_output_dir=str(output_dir), **destination.model_dump(),
         ).model_dump(mode="json")
     except (
         OSError, subprocess.CalledProcessError, RuntimeError,

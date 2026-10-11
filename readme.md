@@ -123,8 +123,8 @@ Use this **FIMBox session token**, not the provider token, as
 `GET /auth/session` returns the current identity and expiry; `POST /auth/logout`
 revokes the local session. Provider access/refresh tokens are stored only in
 Redis, never returned in API responses or sent to the FIM task. At job
-submission, the API uses the HydroShare access token to request temporary
-S3 credentials for the submitting user.
+submission with an S3 bucket, the API uses the HydroShare access token to
+request temporary S3 credentials. Local-output jobs skip that exchange.
 
 Login state is tied to an HttpOnly browser cookie and consumed once.
 Swagger uses authorization-code + PKCE via `POST /auth/oauth/token`.
@@ -140,14 +140,36 @@ When changing the host/port, update both redirect URI settings and the
 provider's registered URLs. Access logging is disabled for the supplied API
 commands to avoid logging OAuth callback codes.
 
-### HydroShare S3 output storage
+### Output storage: local by default, optional HydroShare S3
 
-Outputs are written to **`https://s3.hydroshare.org`** by default.
+Without `output_bucket`, files remain in the worker's Compose-mounted
+`/home/output/scenarios/<job_id>/` directory. The result includes
+`local_output_dir` and a file manifest with `key: null`. No S3 account,
+credentials, network access, or upload is required; session authentication
+and job ownership still apply.
+
+Compose uses `FIMBOX_OUTPUT_DIR` (default `../output`, resolved relative to
+`docker/api/docker-compose.yml`, i.e. `docker/output/`) as the host bind mount.
+The API mounts the same directory read-only for authenticated downloads.
+Set an absolute `FIMBOX_OUTPUT_DIR` to select a different host directory.
+No output path from a job request is used to select an arbitrary filesystem
+location. Job files stay isolated beneath `scenarios/<job_id>/`.
+
+```bash
+curl --fail -X POST http://localhost:8000/jobs/hand-fim \
+  -H "Authorization: Bearer $FIMBOX_SESSION_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data-binary @test-data/single_reach.json
+```
+
+To additionally upload output to S3, supply `output_bucket` and optionally
+`output_prefix` (defaults to the bucket root). A prefix without a bucket
+is rejected. The default **S3 endpoint** is `https://s3.hydroshare.org`.
 `S3_ENDPOINT_URL` may override this for a compatible HydroShare deployment;
 also configure its credential API URL. `S3_REGION` defaults to `us-east-1`
 and `S3_ADDRESSING_STYLE` to `path`.
 
-For each submitted job, the API makes an authenticated request:
+For each S3-output job only, the API makes an authenticated request:
 
 ```http
 POST https://www.hydroshare.org/hsapi/user/service/accounts/s3/
@@ -171,12 +193,12 @@ files. API downloads use the same job credentials. There is **no fallback**
 to static AWS environment credentials or a privileged service account.
 Credential issuance failure returns HTTP 503 without queueing the job.
 
-The caller supplies `output_bucket` and `output_prefix` per job. The bucket
+For S3 output, the caller supplies `output_bucket` and optionally `output_prefix`. The bucket
 and destination HydroShare resource must already exist. Supply the resource's
 S3 bucket and writable prefix, not an arbitrary new bucket. The submitting
 HydroShare user must have write access there; `HeadObject`/`GetObject` are
 also needed for URL issuance/downloads. Output paths append
-`<job_id>/<index>.tif` to your prefix. Job ownership checks do not bypass
+`<job_id>/<relative-file-path>` to your prefix. Job ownership checks do not bypass
 HydroShare resource permissions.
 
 Submit the existing scenario JSON array as the request body with destination
@@ -250,7 +272,7 @@ schema with the persisted output destination:
 }
 ```
 
-The worker recursively uploads **all files in this job's output directory**
+For S3 jobs, the worker recursively uploads **all files in this job's output directory**
 (`/home/output/scenarios/<job_id>/` in the container), preserving filenames
 and subdirectories:
 `s3://<output_bucket>/<output_prefix>/<job_id>/<relative-file-path>`.
@@ -264,13 +286,27 @@ Failed computation, missing output, or an upload failure fails the job.
 Successful results include a `files` manifest alongside `outputs`, with each
 file's relative `path`, S3 `key`, `size_bytes`, and `download_url`
 (`/jobs/<job_id>/files/<index>`). Request that URL with your session token
-for a presigned URL to any uploaded file. Scenario `geotiff_url` endpoints
-continue to work and now sign the preserved `.cog` object key.
+for a presigned URL to an uploaded file, or a local authenticated download URL.
+Scenario `geotiff_url` endpoints also work in both modes.
 Existing successful results without a manifest retain their legacy
 `<index>.tif` download behavior.
 
-Request the relative `geotiff_url` with your session token to obtain a fresh
-presigned GET URL as JSON (the endpoint no longer streams a local file):
+For local jobs, file/scenario endpoints return:
+
+```json
+{"url": "/jobs/<uuid>/files/0/content", "expires_in": 0}
+```
+
+`expires_in: 0` means this is not a presigned URL. Resolve the URL against
+the API origin and send your FIMBox session token to download it.
+`GET /jobs/<uuid>/files/<index>/content` streams the file, checks ownership,
+and rejects traversal/symlinks. Missing local files return 404.
+Local downloads require the shared output mount and unexpired job metadata.
+The SDK provides `get_local_job_file_jobs_job_id_files_index_content_get`
+with a generated binary `File` response (buffered in memory).
+
+For S3 jobs, request the relative `geotiff_url` with your session token to
+obtain a fresh presigned GET URL as JSON:
 
 ```json
 {"url": "https://<storage-endpoint>/<signed-object-url>", "expires_in": 3600}
@@ -282,7 +318,7 @@ share them. `S3_PRESIGNED_URL_SECONDS` controls validity (default 3600,
 maximum 604800 seconds); the actual returned lifetime is capped by the
 remaining HydroShare S3 credential lifetime.
 Deleted objects return HTTP 404 and signing/storage failures return HTTP 503.
-The API no longer mounts the worker's local output volume.
+The API shares the worker's local output bind mount read-only.
 
 Credentials expire in Redis at the earlier of their provider expiry and
 `RESULT_TTL_SECONDS` after submission. Choose a credential lifetime covering
@@ -307,8 +343,8 @@ cannot be interrupted by this single-process Celery worker and return HTTP 409.
 - `RESULT_TTL_SECONDS` and `VISIBILITY_TIMEOUT_SECONDS` default to 86400
   seconds. Set visibility timeout longer than the longest job to prevent Redis
   from redelivering active work. These settings must agree on API and worker.
-- The input/output named volumes retain watershed data and generated rasters.
-  Removing volumes deletes these datasets. Result metadata expires after its
+- The input/output bind mounts retain watershed data and generated rasters.
+  Deleting these host directories deletes datasets. Result metadata expires after its
   TTL; URL issuance requires unexpired successful result metadata and ownership.
   Uploaded objects have independent storage retention.
 - Ownership and per-user job tracking expire `RESULT_TTL_SECONDS` after
@@ -357,27 +393,178 @@ docker compose -f docker/api/docker-compose.yml run --rm --no-deps \
   worker /tests/test_container_scenario.py
 ```
 
-## Running the FIM Docker Container
+## Installable Python SDK and CLI
 
-```
-pixi install
+The `fimbox` distribution includes the generated [`fimbox_sdk`](src/fimbox_sdk)
+Python package and an SDK-backed `fimbox` console command. It is generated
+locally with [openapi-python-client](https://github.com/openapi-generators/openapi-python-client)
+0.28.0 from [`sdk/openapi.json`](sdk/openapi.json). Generation does not send the
+API spec to a hosted service. The SDK provides typed models and synchronous and
+asynchronous methods for every API endpoint, including authentication.
+Generated files should not be hand-edited.
+
+Install from the repository root (Python 3.10+):
+
+```bash
+python -m pip install .
+fimbox --help
 ```
 
-```
-pixi run python src/fimbox.py
+For editable development, use `python -m pip install -e .`. This installs only
+client dependencies, not FastAPI, Celery, Redis, or Docker. No generator is
+required at runtime. The CLI works from any directory and help works offline.
+The package has not been published to PyPI; `pip install fimbox` is not the
+installation command for this repository.
+
+To build an installable wheel without publishing:
+
+```bash
+python -m pip wheel . --no-deps --wheel-dir dist
 ```
 
-To skip the mode-selection menu, pass `--mode` (or `-m`):
+### Using the SDK
 
-```
-pixi run python src/fimbox.py --mode handfim
+Get your [FIMBox session token](http://localhost:8000/auth/login) in a browser.
+After signing in with HydroShare, copy the `access_token` from the callback's
+JSON response. This is the **FIMBox session token**, not the HydroShare access
+token.
+
+```python
+import os
+
+import httpx
+from fimbox_sdk import AuthenticatedClient
+from fimbox_sdk.api.default import submit_hand_fim_jobs_hand_fim_post
+from fimbox_sdk.models import JobSubmitted, Reach, Scenario
+
+with AuthenticatedClient(
+    base_url="http://localhost:8000",
+    token=os.environ["FIMBOX_SESSION_TOKEN"],
+    timeout=httpx.Timeout(30),
+    raise_on_unexpected_status=True,
+) as client:
+    response = submit_hand_fim_jobs_hand_fim_post.sync_detailed(
+        client=client,
+        body=[Scenario(
+            scenario_id="single-reach",
+            reaches=[Reach(huc="03020201", reach_id="8780625", streamflow=7)],
+        )],
+        output_bucket="YOUR_HYDROSHARE_BUCKET",
+        output_prefix="data/output",
+    )
+    if response.status_code != 202 or not isinstance(response.parsed, JobSubmitted):
+        raise RuntimeError(f"Submission failed: HTTP {response.status_code}")
+    print(response.parsed.job_id)
 ```
 
-Supported values are `handfim`, `derived-hand`, `hand-ml`, and
-`fim-evaluation`. Currently, only `handfim` is implemented; the other modes
-display a "coming soon" message. Selecting `handfim` skips only the mode menu:
-the CLI still prompts you to choose how to provide HAND-FIM inputs and collect
-the required parameters.
+Generated operation modules use names derived from FastAPI `operationId`.
+For example, use `get_job_status_jobs_job_id_get` to poll, and
+`get_job_file_jobs_job_id_files_index_get` for file URLs. Each module provides
+`sync`, `sync_detailed`, `asyncio`, and `asyncio_detailed`. Use `async with
+AuthenticatedClient(...)` for async calls. Public endpoints accept `Client`.
+Models provide `from_dict` and `to_dict`; they are generated attrs classes,
+not Pydantic validators. The server remains the authority for input validation.
+
+The generated client's default `raise_on_unexpected_status` is `False`:
+undocumented error statuses can have `parsed=None`. Always inspect status
+with `*_detailed`, or set `raise_on_unexpected_status=True` and handle
+`fimbox_sdk.errors.UnexpectedStatus` (it contains response bytes; do not
+log sensitive authentication responses). HTTP transport failures raise
+`httpx.RequestError`. No requests are automatically retried.
+
+### Submitting jobs from the CLI
+
+Start the API/Redis/worker stack separately as described above. The CLI does
+not launch Docker or use the legacy `hand_fim`/`compose_runner` host modules;
+computation runs in the API's worker. The default API URL is
+`http://localhost:8000`. Set `FIMBOX_API_URL` or place `--api-url URL` **before
+the command** to use another service. Use HTTPS outside local development.
+
+Authenticated commands use `FIMBOX_SESSION_TOKEN` or a hidden prompt when it
+is absent. The prompt includes a browser login link based on the configured
+API URL (`--api-url` or `FIMBOX_API_URL`). Tokens are not saved to disk, and no OAuth client secret is needed
+locally. To enter the token without placing it in shell history:
+
+```bash
+read -r -s FIMBOX_SESSION_TOKEN
+export FIMBOX_SESSION_TOKEN
+```
+
+Submit a scenario JSON array:
+
+```bash
+fimbox submit --body test-data/single_reach.json
+```
+
+This defaults to the Compose-mounted output directory. To opt into S3:
+
+```bash
+fimbox submit \
+  --body test-data/single_reach.json \
+  --output-bucket YOUR_HYDROSHARE_BUCKET \
+  --output-prefix data/output
+```
+
+`fimbox submit-envelope --body request.json` accepts the `payload`,
+`output_bucket`, `output_prefix` envelope instead. The CLI constructs generated
+SDK models, rejects missing or unknown fields rather than silently dropping
+them, and sends them through the generated endpoint. Pydantic validation
+remains server-side. Submission prints JSON containing `job_id` and does not
+wait for computation.
+
+```bash
+fimbox jobs
+fimbox status --job-id JOB_UUID
+fimbox output --job-id JOB_UUID --index 0
+fimbox scenario-output --job-id JOB_UUID --index 0
+fimbox cancel --job-id JOB_UUID
+fimbox session
+fimbox logout
+fimbox health
+```
+
+`output` uses the file manifest; `scenario-output` uses the scenario COG link.
+Both print a local authenticated content URL (`expires_in: 0`) or an S3
+presigned URL, without downloading. Send the session token only to the API
+for local downloads, never to S3. Errors exit nonzero. Redirects are not followed, and submissions
+are not retried. `--timeout` controls HTTP timeout (default 30 seconds).
+Browser login is still performed in the browser; authentication endpoints
+are available in the SDK, not separate CLI login commands.
+
+`pixi install` installs the same editable distribution, and
+`pixi run fimbox ...` runs the installed console command.
+`python src/fimbox.py ...` remains a compatibility entry point.
+The former runtime-generated method/path command names, `--openapi-file`,
+and old Docker `--mode` interface have been replaced by the SDK-backed CLI.
+
+### Regenerating the SDK
+
+Capture the current service spec, then run the pinned local generator:
+
+```bash
+curl --fail http://localhost:8000/openapi.json -o sdk/openapi.json
+pixi run sdk-generate
+```
+
+This task requires `uv` and overwrites **only** `src/fimbox_sdk`, not the
+handwritten CLI. To generate without Pixi/uv:
+
+```bash
+python -m pip install '.[codegen]'
+openapi-python-client generate \
+  --path sdk/openapi.json --config sdk/generator.yaml \
+  --meta none --output-path src/fimbox_sdk --overwrite --fail-on-warning
+```
+
+Commit the spec and generated files together. Stable API operation IDs preserve
+SDK imports; changes to operation signatures may require related CLI updates.
+The regression suite checks that the captured spec matches the source API,
+all endpoints are generated, SDK response models parse, and CLI submission
+uses the generated client:
+
+```bash
+PYTHONPATH=src python -m unittest discover -s tests -p test_fimbox_cli.py -v
+```
 
 Without `--mode`, the CLI walks you through selecting a mode, then lets you
 choose between two ways of providing HAND-FIM input:

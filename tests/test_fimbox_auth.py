@@ -171,6 +171,7 @@ class AuthTests(unittest.TestCase):
             ("GET", f"/jobs/{job_id}", None),
             ("GET", f"/jobs/{job_id}/outputs/0.tif", None),
             ("GET", f"/jobs/{job_id}/files/0", None),
+            ("GET", f"/jobs/{job_id}/files/0/content", None),
             ("DELETE", f"/jobs/{job_id}", None),
             ("POST", "/jobs", {}),
             ("POST", "/jobs/hand-fim?output_bucket=bucket&output_prefix=out", []),

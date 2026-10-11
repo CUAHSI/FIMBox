@@ -5,28 +5,49 @@ give future work quick orientation without re-reading all source files.
 
 ## Project overview
 
-FIMBox is a CLI + Docker workflow tool for running CUAHSI's HAND-based Flood
-Inundation Mapping (FIM). A host-side Typer CLI (`src/`) checks Docker, collects
-parameters interactively, and runs the `cuahsi/handfim:latest` container. Inside
+FIMBox provides a FastAPI/Celery service, a generated Python SDK, and a local HTTP CLI
+for running CUAHSI's HAND-based Flood Inundation Mapping (FIM).
+The local CLI submits jobs to the service instead of launching Docker. Inside
 that container (`docker/handfim/`), a second Typer CLI (`entry.py`) drives the
 actual FIM computation using NOAA/OWP's `inundation-mapping` tooling and the
 `fimserve` package (vendored/patched under `docker/handfim/patches/`).
 
 ## Host-side CLI (`src/`)
 
-- **`src/fimbox.py`** — Top-level Typer app / entry point (`fimbox` command).
-  Defines the `Mode` enum (Derived HAND Input, HAND-FIM, HAND-ML, FIM
-  Evaluation). Verifies Docker is installed and running (`check_docker`),
-  presents an interactive mode-selection menu (or accepts `--mode`), and
-  dispatches to `hand_fim.run()` for the HAND-FIM mode. Other modes currently
-  print a "coming soon" panel (`run_coming_soon`).
+- **`src/fimbox.py`** — Compatibility script entry point for `fimbox_cli.app`.
+  No Docker checks or mode menu. `pixi run fimbox` uses the installed console script.
+- **`src/fimbox_cli.py`** — Handwritten Click CLI using generated SDK operation
+  modules/models, not runtime OpenAPI parsing or handwritten HTTP routes.
+  Commands: submit, submit-envelope, jobs, status, output, scenario-output,
+  cancel, session, logout, health. `--body` reads JSON.
+  Defaults to `http://localhost:8000`.
+  Session supplied through `FIMBOX_SESSION_TOKEN` or hidden prompt.
+  The prompt shows the configured API's `/auth/login` link and instructions
+  to copy the returned FIMBox `access_token`.
+  No local credential persistence, Docker subprocesses, or API server imports.
+  Help does not require a server. CLI rejects fields dropped by generated
+  models and surfaces HTTP/transport/contract errors without retries.
+- **`src/fimbox_sdk/`** — Generated, do not hand-edit. Local
+  openapi-python-client 0.28.0 generates Client/AuthenticatedClient, attrs models,
+  sync/async operation modules, errors and response types for every endpoint.
+  Module names derive from FastAPI operation IDs. Dependencies: httpx, attrs,
+  python-dateutil, typing-extensions. No server imports.
+- **`sdk/openapi.json`**, **`sdk/generator.yaml`** — Captured API contract
+  and local generator config. `pixi run sdk-generate` regenerates only the SDK.
+- **`pyproject.toml`**, **`MANIFEST.in`** — Installable `fimbox` distribution:
+  only fimbox_sdk and fimbox_cli, with fimbox console entry point. Python 3.10+.
+  Does not package server/legacy workflow modules. Optional codegen dependency
+  pins generator; spec/config included in source distribution.
+- **`tests/test_fimbox_cli.py`** — SDK/CLI regression tests with mock HTTP,
+  typed sync/async responses, source-spec parity, and submission through FastAPI.
 
-- **`src/compose_runner.py`** — Shared `run_compose()` helper for launching
+- **`src/compose_runner.py`** — Legacy `run_compose()` helper for launching
   one-off Docker Compose service commands. Accepts the service, container
   command, environment overrides, and optional bind mounts; intended for reuse
   by host-side workflow modes.
 
-- **`src/hand_fim.py`** — Implements the HAND-FIM mode end-to-end on the host:
+- **`src/hand_fim.py`** — Legacy direct-container host workflow, retained but
+  no longer used by the local entry point:
   - Ensures the `cuahsi/handfim:latest` Docker image exists locally, offering to
     `docker pull` it if missing (`image_exists`, `pull_image`, `ensure_image`).
   - Presents an input-method menu (`select_input_mode`): (1) enter parameters
@@ -91,12 +112,16 @@ is not copied. OAuth/session/job-ownership behavior is adapted from the
   reusing `src/schemas/hand_fim_schema.py`. Adds API-specific unique
   scenario ID, HUC-8, finite streamflow validation, per-job output bucket/prefix,
   stored destination metadata, and presigned-URL responses.
+  Bucket is optional (local default); prefix defaults empty and requires a
+  bucket when nonempty. Result includes local_output_dir; local file keys are null.
 - **`src/fimbox_api/main.py`** — FastAPI app: `POST /jobs` accepts the
   template's typed `payload` envelope; `POST /jobs/hand-fim` accepts the
   scenario array directly with destination query parameters. All job routes
   require a session and enforce user ownership. Also provides user job listing,
-  polling, fresh S3 presigned URL responses (not local file streaming),
+  polling, fresh S3 presigned URL responses or authenticated local content URLs,
   queued-job cancellation, public health, and explicit storage/queue errors.
+  Local `/jobs/<uuid>/files/<index>/content` streams files from the read-only
+  shared output mount with ownership and traversal/symlink checks.
 - **`src/fimbox_api/tasks.py`** — Real HAND-FIM Celery task. Revalidates input,
   substitutes safe job-specific internal scenario names, writes the scenario
   JSON, invokes the existing container `scenario` CLI in a subprocess, verifies
@@ -107,6 +132,10 @@ is not copied. OAuth/session/job-ownership behavior is adapted from the
   local job files first. `/jobs/<job_id>/files/<index>` signs any manifest file;
   scenario endpoints sign the preserved COG key, with legacy-key compatibility
   for old results without manifests.
+  Without a bucket, leaves files on the Compose output bind mount, skips
+  credential generation/S3 entirely, and returns local output metadata.
+  Compose preserves the existing FIMBOX_OUTPUT_DIR bind configuration
+  (default ../output relative to docker/api); API mounts the same path read-only.
 - **`src/fimbox_api/storage.py`** — Shared S3 client configuration, safe
   job-specific object-key construction, object existence checks, and SigV4
   presigned GET URLs using job-specific temporary credentials. Submissions

@@ -23,12 +23,18 @@ class HandFimParameters(ScenarioList):
 
 
 class OutputDestination(BaseModel):
-    output_bucket: str = Field(
-        min_length=1, max_length=255, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    output_bucket: str | None = Field(
+        default=None, min_length=1, max_length=255, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
     )
-    output_prefix: str = Field(max_length=900)
+    output_prefix: str = Field(default="", max_length=900)
 
     model_config = {"extra": "forbid"}
+
+    @model_validator(mode="after")
+    def validate_destination(self) -> "OutputDestination":
+        if self.output_bucket is None and self.output_prefix:
+            raise ValueError("output_prefix requires output_bucket")
+        return self
 
     @field_validator("output_prefix")
     @classmethod
@@ -52,7 +58,7 @@ class JobSubmitted(BaseModel):
 
 class OutputFile(BaseModel):
     path: str
-    key: str
+    key: str | None = None
     size_bytes: int
     download_url: str
 
@@ -61,6 +67,7 @@ class StoredHandFimResult(HandFimResult, OutputDestination):
     """Successful outputs and the destination persisted by the worker."""
 
     files: list[OutputFile] = Field(default_factory=list)
+    local_output_dir: str | None = None
 
 
 class PresignedOutput(BaseModel):

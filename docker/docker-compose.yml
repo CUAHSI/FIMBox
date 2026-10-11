@@ -7,7 +7,7 @@ services:
       dockerfile: Dockerfile
     working_dir: /home
     volumes:
-      - "${FIMBOX_INPUT_DIR:-../input}:/home/data/inputs"
-      - "${FIMBOX_OUTPUT_DIR:-../output}:/home/output"
+      - "${FIMBOX_INPUT_DIR:-../../data/input}:/home/data/inputs"
+      - "${FIMBOX_OUTPUT_DIR:-../../data/output}:/home/output"
     ulimits:
       stack: 67108864

@@ -23,6 +23,7 @@ JOB_OWNER_PREFIX = "auth:job_owner:"
 AUTH_STATE_PREFIX = "auth:oauth_state:"
 STATE_COOKIE = "fimbox_oauth_state"
 STATE_TTL_SECONDS = 600
+LOCAL_USER_ID = "__fimbox_local__"
 
 oauth2_scheme = OAuth2AuthorizationCodeBearer(
     authorizationUrl=settings.hydroshare_oauth_authorize_url,
@@ -151,6 +152,9 @@ def issue_user_session_from_authorization_code(
     if not isinstance(user_id, str) or not user_id:
         logger.error("HydroShare user lookup returned no authenticated identity")
         raise HTTPException(status_code=502, detail="Unable to determine authenticated user")
+    if user_id == LOCAL_USER_ID:
+        logger.error("HydroShare user lookup returned a reserved identity")
+        raise HTTPException(status_code=502, detail="Invalid HydroShare user identity")
 
     session_token = secrets.token_urlsafe(32)
     session = UserSession(
@@ -187,6 +191,10 @@ def complete_oauth_authorization(code: str, state: str, cookie_state: str | None
 
 
 def get_authenticated_session(token: Annotated[str | None, Depends(oauth2_scheme)]) -> UserSession:
+    if not settings.authentication_enabled:
+        return UserSession(
+            user_id=LOCAL_USER_ID, access_token=SecretStr(""), scope="", expires_at=0,
+        )
     if not token:
         raise HTTPException(
             status_code=401, detail="Authentication required", headers={"WWW-Authenticate": "Bearer"},
@@ -202,6 +210,8 @@ def get_authenticated_session(token: Annotated[str | None, Depends(oauth2_scheme
     except ValidationError:
         logger.error("Invalid session data in Redis")
         raise HTTPException(status_code=503, detail="Session data unavailable") from None
+    if session.user_id == LOCAL_USER_ID:
+        raise HTTPException(status_code=401, detail="Invalid or expired session")
     if session.expires_at <= time.time():
         client.delete(__session_key(token))
         raise HTTPException(status_code=401, detail="Session expired", headers={"WWW-Authenticate": "Bearer"})

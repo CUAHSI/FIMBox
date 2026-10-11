@@ -16,8 +16,15 @@ from .auth import (
     revoke_session,
 )
 from .config import settings
+from .models import AuthenticationConfig
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
+
+
+@router.get("/config", response_model=AuthenticationConfig)
+def authentication_config() -> AuthenticationConfig:
+    """Discover whether this server requires HydroShare authentication."""
+    return AuthenticationConfig(authentication_enabled=settings.authentication_enabled)
 
 
 @router.get("/login")
@@ -75,7 +82,11 @@ def current_session(session: Annotated[UserSession, Depends(get_authenticated_se
 @router.post("/logout", status_code=204)
 def logout(
     _session: Annotated[UserSession, Depends(get_authenticated_session)],
-    token: Annotated[str, Depends(oauth2_scheme)],
+    token: Annotated[str | None, Depends(oauth2_scheme)],
 ) -> Response:
+    if not settings.authentication_enabled:
+        raise HTTPException(status_code=409, detail="Authentication is disabled in local mode")
+    if token is None:
+        raise HTTPException(status_code=401, detail="Authentication required")
     revoke_session(token)
     return Response(status_code=204)

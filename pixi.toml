@@ -7,7 +7,7 @@ version = "0.1.0"
 [tasks]
 fimbox = "fimbox"
 api = "python -m uvicorn fimbox_api.main:app --app-dir src --no-access-log"
-sdk-generate = "uv tool run --from openapi-python-client==0.28.0 openapi-python-client generate --path sdk/openapi.json --config sdk/generator.yaml --meta none --output-path src/fimbox_sdk --overwrite --fail-on-warning"
+sdk-generate = "uv tool run --from openapi-python-client==0.28.0 python sdk/generate.py"
 
 [dependencies]
 python = "==3.14"

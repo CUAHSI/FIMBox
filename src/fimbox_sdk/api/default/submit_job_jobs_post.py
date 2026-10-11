@@ -62,12 +62,14 @@ def _build_response(
 
 def sync_detailed(
     *,
-    client: AuthenticatedClient,
+    client: AuthenticatedClient | Client,
     body: JobRequest,
 ) -> Response[HTTPValidationError | JobSubmitted]:
     """Submit Job
 
      Submit HAND-FIM using the template's payload envelope.
+    Authentication is required only when the server has OAuth credentials configured. See GET
+    /auth/config.
 
     Args:
         body (JobRequest):
@@ -93,12 +95,14 @@ def sync_detailed(
 
 def sync(
     *,
-    client: AuthenticatedClient,
+    client: AuthenticatedClient | Client,
     body: JobRequest,
 ) -> HTTPValidationError | JobSubmitted | None:
     """Submit Job
 
      Submit HAND-FIM using the template's payload envelope.
+    Authentication is required only when the server has OAuth credentials configured. See GET
+    /auth/config.
 
     Args:
         body (JobRequest):
@@ -119,12 +123,14 @@ def sync(
 
 async def asyncio_detailed(
     *,
-    client: AuthenticatedClient,
+    client: AuthenticatedClient | Client,
     body: JobRequest,
 ) -> Response[HTTPValidationError | JobSubmitted]:
     """Submit Job
 
      Submit HAND-FIM using the template's payload envelope.
+    Authentication is required only when the server has OAuth credentials configured. See GET
+    /auth/config.
 
     Args:
         body (JobRequest):
@@ -148,12 +154,14 @@ async def asyncio_detailed(
 
 async def asyncio(
     *,
-    client: AuthenticatedClient,
+    client: AuthenticatedClient | Client,
     body: JobRequest,
 ) -> HTTPValidationError | JobSubmitted | None:
     """Submit Job
 
      Submit HAND-FIM using the template's payload envelope.
+    Authentication is required only when the server has OAuth credentials configured. See GET
+    /auth/config.
 
     Args:
         body (JobRequest):

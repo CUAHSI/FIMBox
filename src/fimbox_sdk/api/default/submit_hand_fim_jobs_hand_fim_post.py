@@ -91,7 +91,7 @@ def _build_response(
 
 def sync_detailed(
     *,
-    client: AuthenticatedClient,
+    client: AuthenticatedClient | Client,
     body: list[Scenario],
     output_bucket: None | str | Unset = UNSET,
     output_prefix: str | Unset = "",
@@ -100,6 +100,8 @@ def sync_detailed(
     """Submit Hand Fim
 
      Submit the scenario JSON array directly, without an envelope.
+    Authentication is required only when the server has OAuth credentials configured. See GET
+    /auth/config.
 
     Args:
         output_bucket (None | str | Unset):
@@ -132,7 +134,7 @@ def sync_detailed(
 
 def sync(
     *,
-    client: AuthenticatedClient,
+    client: AuthenticatedClient | Client,
     body: list[Scenario],
     output_bucket: None | str | Unset = UNSET,
     output_prefix: str | Unset = "",
@@ -141,6 +143,8 @@ def sync(
     """Submit Hand Fim
 
      Submit the scenario JSON array directly, without an envelope.
+    Authentication is required only when the server has OAuth credentials configured. See GET
+    /auth/config.
 
     Args:
         output_bucket (None | str | Unset):
@@ -168,7 +172,7 @@ def sync(
 
 async def asyncio_detailed(
     *,
-    client: AuthenticatedClient,
+    client: AuthenticatedClient | Client,
     body: list[Scenario],
     output_bucket: None | str | Unset = UNSET,
     output_prefix: str | Unset = "",
@@ -177,6 +181,8 @@ async def asyncio_detailed(
     """Submit Hand Fim
 
      Submit the scenario JSON array directly, without an envelope.
+    Authentication is required only when the server has OAuth credentials configured. See GET
+    /auth/config.
 
     Args:
         output_bucket (None | str | Unset):
@@ -207,7 +213,7 @@ async def asyncio_detailed(
 
 async def asyncio(
     *,
-    client: AuthenticatedClient,
+    client: AuthenticatedClient | Client,
     body: list[Scenario],
     output_bucket: None | str | Unset = UNSET,
     output_prefix: str | Unset = "",
@@ -216,6 +222,8 @@ async def asyncio(
     """Submit Hand Fim
 
      Submit the scenario JSON array directly, without an envelope.
+    Authentication is required only when the server has OAuth credentials configured. See GET
+    /auth/config.
 
     Args:
         output_bucket (None | str | Unset):

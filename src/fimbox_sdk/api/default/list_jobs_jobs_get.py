@@ -46,9 +46,12 @@ def _build_response(
 
 def sync_detailed(
     *,
-    client: AuthenticatedClient,
+    client: AuthenticatedClient | Client,
 ) -> Response[JobList]:
     """List Jobs
+
+     Authentication is required only when the server has OAuth credentials configured. See GET
+    /auth/config.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -69,9 +72,12 @@ def sync_detailed(
 
 def sync(
     *,
-    client: AuthenticatedClient,
+    client: AuthenticatedClient | Client,
 ) -> JobList | None:
     """List Jobs
+
+     Authentication is required only when the server has OAuth credentials configured. See GET
+    /auth/config.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -88,9 +94,12 @@ def sync(
 
 async def asyncio_detailed(
     *,
-    client: AuthenticatedClient,
+    client: AuthenticatedClient | Client,
 ) -> Response[JobList]:
     """List Jobs
+
+     Authentication is required only when the server has OAuth credentials configured. See GET
+    /auth/config.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -109,9 +118,12 @@ async def asyncio_detailed(
 
 async def asyncio(
     *,
-    client: AuthenticatedClient,
+    client: AuthenticatedClient | Client,
 ) -> JobList | None:
     """List Jobs
+
+     Authentication is required only when the server has OAuth credentials configured. See GET
+    /auth/config.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

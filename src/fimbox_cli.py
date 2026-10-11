@@ -15,7 +15,9 @@ from keyring.backends.chainer import ChainerBackend
 from keyring.errors import KeyringError, PasswordDeleteError
 
 from fimbox_sdk import AuthenticatedClient, Client
-from fimbox_sdk.api.authentication import current_session_auth_session_get, logout_auth_logout_post
+from fimbox_sdk.api.authentication import (
+    authentication_config_auth_config_get, current_session_auth_session_get, logout_auth_logout_post,
+)
 from fimbox_sdk.api.default import (
     cancel_job_jobs_job_id_delete,
     get_job_file_jobs_job_id_files_index_get,
@@ -26,7 +28,7 @@ from fimbox_sdk.api.default import (
     submit_hand_fim_jobs_hand_fim_post,
     submit_job_jobs_post,
 )
-from fimbox_sdk.models import JobRequest, Scenario
+from fimbox_sdk.models import AuthenticationConfig, JobRequest, Scenario
 from fimbox_sdk.types import Response
 
 
@@ -84,6 +86,25 @@ def __delete_token(api_url: str) -> None:
         raise click.ClickException("Cannot clear the FIMBox session from the OS credential store.") from None
 
 
+def __authentication_enabled(settings: Settings) -> bool:
+    try:
+        with Client(
+            base_url=settings.api_url, timeout=httpx.Timeout(settings.timeout), follow_redirects=False,
+        ) as client:
+            response = authentication_config_auth_config_get.sync_detailed(client=client)
+    except httpx.RequestError:
+        raise click.ClickException("Cannot reach the API to determine authentication mode.") from None
+    except (ValueError, KeyError, TypeError, AttributeError):
+        raise click.ClickException("API authentication configuration does not match the SDK contract.") from None
+    if response.status_code != 200 or not isinstance(response.parsed, AuthenticationConfig):
+        raise click.ClickException(
+            f"Cannot determine API authentication mode (HTTP {response.status_code})."
+        )
+    if not isinstance(response.parsed.authentication_enabled, bool):
+        raise click.ClickException("API returned an invalid authentication mode.")
+    return response.parsed.authentication_enabled
+
+
 def __call(
     ctx: click.Context, operation: Callable[..., Response[Any]],
     authenticated: bool = True, **kwargs: Any,
@@ -92,6 +113,8 @@ def __call(
     client: Client | AuthenticatedClient
     prompted = False
     saved = False
+    if authenticated:
+        authenticated = __authentication_enabled(settings)
     if authenticated:
         token = settings.session_token
         if not token:

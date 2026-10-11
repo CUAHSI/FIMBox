@@ -62,11 +62,13 @@ def sync_detailed(
     job_id: UUID,
     index: int,
     *,
-    client: AuthenticatedClient,
+    client: AuthenticatedClient | Client,
 ) -> Response[File | HTTPValidationError]:
     """Get Local Job File
 
-     Download a local output file from the shared mount; requires the owner's session.
+     Download a local output file; requires the owner's session when auth is enabled.
+    Authentication is required only when the server has OAuth credentials configured. See GET
+    /auth/config.
 
     Args:
         job_id (UUID):
@@ -96,11 +98,13 @@ def sync(
     job_id: UUID,
     index: int,
     *,
-    client: AuthenticatedClient,
+    client: AuthenticatedClient | Client,
 ) -> File | HTTPValidationError | None:
     """Get Local Job File
 
-     Download a local output file from the shared mount; requires the owner's session.
+     Download a local output file; requires the owner's session when auth is enabled.
+    Authentication is required only when the server has OAuth credentials configured. See GET
+    /auth/config.
 
     Args:
         job_id (UUID):
@@ -125,11 +129,13 @@ async def asyncio_detailed(
     job_id: UUID,
     index: int,
     *,
-    client: AuthenticatedClient,
+    client: AuthenticatedClient | Client,
 ) -> Response[File | HTTPValidationError]:
     """Get Local Job File
 
-     Download a local output file from the shared mount; requires the owner's session.
+     Download a local output file; requires the owner's session when auth is enabled.
+    Authentication is required only when the server has OAuth credentials configured. See GET
+    /auth/config.
 
     Args:
         job_id (UUID):
@@ -157,11 +163,13 @@ async def asyncio(
     job_id: UUID,
     index: int,
     *,
-    client: AuthenticatedClient,
+    client: AuthenticatedClient | Client,
 ) -> File | HTTPValidationError | None:
     """Get Local Job File
 
-     Download a local output file from the shared mount; requires the owner's session.
+     Download a local output file; requires the owner's session when auth is enabled.
+    Authentication is required only when the server has OAuth credentials configured. See GET
+    /auth/config.
 
     Args:
         job_id (UUID):

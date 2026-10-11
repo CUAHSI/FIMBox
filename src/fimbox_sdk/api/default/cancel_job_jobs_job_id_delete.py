@@ -57,11 +57,13 @@ def _build_response(
 def sync_detailed(
     job_id: UUID,
     *,
-    client: AuthenticatedClient,
+    client: AuthenticatedClient | Client,
 ) -> Response[Any | HTTPValidationError]:
     """Cancel Job
 
      Revoke queued jobs; the solo worker cannot interrupt a running subprocess.
+    Authentication is required only when the server has OAuth credentials configured. See GET
+    /auth/config.
 
     Args:
         job_id (UUID):
@@ -88,11 +90,13 @@ def sync_detailed(
 def sync(
     job_id: UUID,
     *,
-    client: AuthenticatedClient,
+    client: AuthenticatedClient | Client,
 ) -> Any | HTTPValidationError | None:
     """Cancel Job
 
      Revoke queued jobs; the solo worker cannot interrupt a running subprocess.
+    Authentication is required only when the server has OAuth credentials configured. See GET
+    /auth/config.
 
     Args:
         job_id (UUID):
@@ -114,11 +118,13 @@ def sync(
 async def asyncio_detailed(
     job_id: UUID,
     *,
-    client: AuthenticatedClient,
+    client: AuthenticatedClient | Client,
 ) -> Response[Any | HTTPValidationError]:
     """Cancel Job
 
      Revoke queued jobs; the solo worker cannot interrupt a running subprocess.
+    Authentication is required only when the server has OAuth credentials configured. See GET
+    /auth/config.
 
     Args:
         job_id (UUID):
@@ -143,11 +149,13 @@ async def asyncio_detailed(
 async def asyncio(
     job_id: UUID,
     *,
-    client: AuthenticatedClient,
+    client: AuthenticatedClient | Client,
 ) -> Any | HTTPValidationError | None:
     """Cancel Job
 
      Revoke queued jobs; the solo worker cannot interrupt a running subprocess.
+    Authentication is required only when the server has OAuth credentials configured. See GET
+    /auth/config.
 
     Args:
         job_id (UUID):

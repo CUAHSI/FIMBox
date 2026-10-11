@@ -1,3 +1,31 @@
+## Local quickstart (no configuration or login)
+
+From a fresh clone, start the stack:
+
+```bash
+docker compose up --build
+```
+
+In another terminal, from the repository root (Python 3.10+):
+
+```bash
+python -m pip install .
+fimbox submit --body test-data/single_reach.json
+fimbox jobs
+fimbox status --job-id JOB_ID
+```
+
+No `.env`, OAuth credentials, session token, or keychain setup is needed.
+The worker writes output under `data/output/scenarios/<job_id>/`, shared
+read-only with the API. The initial image build and watershed downloads
+require network access.
+
+With neither OAuth client ID nor secret configured, the server uses a shared
+local identity. Anyone who can reach it can submit, view, download, or cancel
+local jobs. Compose binds the API to loopback; keep this mode limited to trusted,
+single-user local use. Local jobs remain separate from authenticated users'
+jobs if authentication is enabled later.
+
 ## Building Docker Images
 
 ```
@@ -17,7 +45,7 @@ HydroShare OAuth and Redis sessions are adapted from the template's
 Start the local stack from the repository root:
 
 ```bash
-docker compose --env-file /dev/null up --build
+docker compose up --build
 ```
 
 The main Compose file runs API, worker, and Redis. The base HAND-FIM image
@@ -31,6 +59,17 @@ not need access to the Docker socket. Build the existing HAND-FIM image first
 if you want to use a locally rebuilt base.
 
 ### HydroShare authentication
+
+Authentication is configuration-driven: neither client ID nor secret enables
+local mode; providing both enables mandatory session authentication for job
+routes. Providing only one fails startup with an explicit configuration error.
+`GET /auth/config` reports `{"authentication_enabled": false}` or `true`.
+The CLI discovers this setting and, in local mode, neither prompts for a token,
+accesses the keychain, nor sends a supplied token. Discovery failures are
+reported, not treated as permission to bypass authentication.
+Local mode has no login/logout session to manage (`logout` returns HTTP 409).
+HydroShare S3 output requires configured authentication and a valid user session;
+anonymous S3 submissions return HTTP 409 without enqueueing.
 
 Register a confidential OAuth client with HydroShare and configure
 `HYDROSHARE_CLIENT_ID` and `HYDROSHARE_CLIENT_SECRET` in the root `.env`
@@ -149,12 +188,12 @@ commands to avoid logging OAuth callback codes.
 Without `output_bucket`, files remain in the worker's Compose-mounted
 `/home/output/scenarios/<job_id>/` directory. The result includes
 `local_output_dir` and a file manifest with `key: null`. No S3 account,
-credentials, network access, or upload is required; session authentication
-and job ownership still apply.
+credentials, or upload is required. Session authentication and per-user
+ownership apply when OAuth is configured; otherwise jobs use the shared local identity.
 
-Compose uses `FIMBOX_OUTPUT_DIR` (default `./docker/output`, resolved relative to
+Compose uses `FIMBOX_OUTPUT_DIR` (default `./data/output`, resolved relative to
 the root `docker-compose.yml`) as the host bind mount.
-The API mounts the same directory read-only for authenticated downloads.
+The API mounts the same directory read-only for downloads in either mode.
 Set an absolute `FIMBOX_OUTPUT_DIR` to select a different host directory.
 No output path from a job request is used to select an arbitrary filesystem
 location. Job files stay isolated beneath `scenarios/<job_id>/`.
@@ -187,7 +226,7 @@ The provider returns `access_key`, `secret_key`, and `expiry`. This uses
 HydroShare's service-account API, not AWS STS. The lifetime is expressed in
 **days**; `HYDROSHARE_S3_CREDENTIALS_EXPIRY_DAYS` defaults to `1`.
 `HYDROSHARE_S3_CREDENTIALS_URL` configures the exchange endpoint.
-See [HydroShare's service-account implementation](https://github.com/hydroshare/hydroshare/blob/bfec0e08ccb74561c813353f585c485d9e1f6a5d/hs_rest_api/views/service_account_minio.py)
+See [HydroShare&#39;s service-account implementation](https://github.com/hydroshare/hydroshare/blob/bfec0e08ccb74561c813353f585c485d9e1f6a5d/hs_rest_api/views/service_account_minio.py)
 for the request/response contract.
 
 Temporary credentials are stored under a job-specific Redis key and fetched
@@ -440,7 +479,13 @@ python -m pip wheel . --no-deps --wheel-dir dist
 
 ### Using the SDK
 
-Get your [FIMBox session token](http://localhost:8000/auth/login) in a browser.
+For the default local server, use `Client(base_url="http://localhost:8000")`
+with the generated job operations and omit `output_bucket` / `output_prefix`.
+No token is needed. The public generated
+`authentication_config_auth_config_get` operation discovers the server's mode.
+
+For a server with OAuth credentials configured, get your
+[FIMBox session token](http://localhost:8000/auth/login) in a browser.
 After signing in with HydroShare, copy the `access_token` from the callback's
 JSON response. This is the **FIMBox session token**, not the HydroShare access
 token.
@@ -476,8 +521,9 @@ with AuthenticatedClient(
 Generated operation modules use names derived from FastAPI `operationId`.
 For example, use `get_job_status_jobs_job_id_get` to poll, and
 `get_job_file_jobs_job_id_files_index_get` for file URLs. Each module provides
-`sync`, `sync_detailed`, `asyncio`, and `asyncio_detailed`. Use `async with
-AuthenticatedClient(...)` for async calls. Public endpoints accept `Client`.
+`sync`, `sync_detailed`, `asyncio`, and `asyncio_detailed`. Use `async with AuthenticatedClient(...)` for async calls. Public endpoints and configurable-auth
+job operations accept `Client`; configured servers still require `AuthenticatedClient`
+with a valid session at runtime.
 Models provide `from_dict` and `to_dict`; they are generated attrs classes,
 not Pydantic validators. The server remains the authority for input validation.
 
@@ -496,7 +542,7 @@ computation runs in the API's worker. The default API URL is
 `http://localhost:8000`. Set `FIMBOX_API_URL` or place `--api-url URL` **before
 the command** to use another service. Use HTTPS outside local development.
 
-Authenticated commands use an explicit `--session-token` or
+When the server requires authentication, commands use an explicit `--session-token` or
 `FIMBOX_SESSION_TOKEN` first, then a session saved in the OS credential store.
 If none is available, a hidden prompt includes the browser login link based on
 the configured API URL (`--api-url` or `FIMBOX_API_URL`). After the prompted
@@ -589,10 +635,13 @@ handwritten CLI. To generate without Pixi/uv:
 
 ```bash
 python -m pip install '.[codegen]'
-openapi-python-client generate \
-  --path sdk/openapi.json --config sdk/generator.yaml \
-  --meta none --output-path src/fimbox_sdk --overwrite --fail-on-warning
+python sdk/generate.py
 ```
+
+The generation driver corrects generator 0.28's handling of optional security
+alternatives before rendering. This preserves Swagger authorization support
+while generating job operations that accept either client type. The captured
+contract is identical in local and authenticated deployments.
 
 Commit the spec and generated files together. Stable API operation IDs preserve
 SDK imports; changes to operation signatures may require related CLI updates.

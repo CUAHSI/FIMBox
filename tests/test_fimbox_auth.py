@@ -1,4 +1,5 @@
 import json
+import os
 import time
 import unittest
 from unittest.mock import MagicMock, Mock, patch
@@ -7,7 +8,7 @@ from uuid import uuid4
 
 import httpx
 from fastapi.testclient import TestClient
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 from redis.exceptions import ConnectionError
 
 from fimbox_api import auth, main
@@ -51,6 +52,46 @@ class AuthTests(unittest.TestCase):
         factory.return_value.__enter__.return_value = client
         self.addCleanup(context.stop)
         return client
+
+    def test_local_mode_exposes_config_and_needs_no_session(self):
+        with patch.object(auth.settings, "hydroshare_client_id", ""), patch.object(
+            auth.settings, "hydroshare_client_secret", SecretStr(""),
+        ):
+            response = self.client.get("/auth/config")
+            self.assertEqual(response.json(), {"authentication_enabled": False})
+            response = self.client.get("/auth/session")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["user_id"], auth.LOCAL_USER_ID)
+            self.assertEqual(self.client.post("/auth/logout").status_code, 409)
+        self.redis.get.assert_not_called()
+
+    def test_configured_mode_advertises_authentication(self):
+        self.assertEqual(
+            self.client.get("/auth/config").json(), {"authentication_enabled": True},
+        )
+
+    def test_partial_oauth_configuration_fails_without_disclosing_inputs(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(Settings(_env_file=None).authentication_enabled)
+            self.assertTrue(Settings(
+                _env_file=None, API_CLIENT_ID="client", API_CLIENT_SECRET="secret",
+            ).authentication_enabled)
+            for values in ({"API_CLIENT_ID": "client"}, {"API_CLIENT_SECRET": "private-test-secret"}):
+                with self.assertRaises(ValidationError) as raised:
+                    Settings(_env_file=None, **values)
+                self.assertNotIn("private-test-secret", str(raised.exception))
+
+    def test_provider_cannot_issue_a_session_for_local_identity(self):
+        state = self.__login()
+        provider = self.__provider()
+        provider.get.return_value = httpx.Response(
+            200, json={"username": auth.LOCAL_USER_ID},
+            request=httpx.Request("GET", "https://provider.example/user"),
+        )
+        self.assertEqual(
+            self.client.get("/auth/callback", params={"code": "code", "state": state}).status_code, 502,
+        )
+        self.redis.set.assert_not_called()
 
     def __login(self):
         response = self.client.get("/auth/login", follow_redirects=False)

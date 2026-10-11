@@ -1,5 +1,6 @@
 """Contains all the data models used in inputs/outputs"""
 
+from .authentication_config import AuthenticationConfig
 from .body_oauth_token_exchange_auth_oauth_token_post import (
     BodyOauthTokenExchangeAuthOauthTokenPost,
 )
@@ -25,6 +26,7 @@ from .stored_hand_fim_result import StoredHandFimResult
 from .validation_error import ValidationError
 
 __all__ = (
+    "AuthenticationConfig",
     "BodyOauthTokenExchangeAuthOauthTokenPost",
     "CurrentSessionAuthSessionGetResponseCurrentSessionAuthSessionGet",
     "HTTPValidationError",

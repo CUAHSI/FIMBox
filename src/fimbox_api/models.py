@@ -63,6 +63,10 @@ class JobSubmitted(BaseModel):
     status_url: str
 
 
+class AuthenticationConfig(BaseModel):
+    authentication_enabled: bool
+
+
 class OutputFile(BaseModel):
     path: str
     key: str | None = None

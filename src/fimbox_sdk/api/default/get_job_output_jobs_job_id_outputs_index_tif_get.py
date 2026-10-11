@@ -62,9 +62,12 @@ def sync_detailed(
     job_id: UUID,
     index: int,
     *,
-    client: AuthenticatedClient,
+    client: AuthenticatedClient | Client,
 ) -> Response[HTTPValidationError | PresignedOutput]:
     """Get Job Output
+
+     Authentication is required only when the server has OAuth credentials configured. See GET
+    /auth/config.
 
     Args:
         job_id (UUID):
@@ -94,9 +97,12 @@ def sync(
     job_id: UUID,
     index: int,
     *,
-    client: AuthenticatedClient,
+    client: AuthenticatedClient | Client,
 ) -> HTTPValidationError | PresignedOutput | None:
     """Get Job Output
+
+     Authentication is required only when the server has OAuth credentials configured. See GET
+    /auth/config.
 
     Args:
         job_id (UUID):
@@ -121,9 +127,12 @@ async def asyncio_detailed(
     job_id: UUID,
     index: int,
     *,
-    client: AuthenticatedClient,
+    client: AuthenticatedClient | Client,
 ) -> Response[HTTPValidationError | PresignedOutput]:
     """Get Job Output
+
+     Authentication is required only when the server has OAuth credentials configured. See GET
+    /auth/config.
 
     Args:
         job_id (UUID):
@@ -151,9 +160,12 @@ async def asyncio(
     job_id: UUID,
     index: int,
     *,
-    client: AuthenticatedClient,
+    client: AuthenticatedClient | Client,
 ) -> HTTPValidationError | PresignedOutput | None:
     """Get Job Output
+
+     Authentication is required only when the server has OAuth credentials configured. See GET
+    /auth/config.
 
     Args:
         job_id (UUID):

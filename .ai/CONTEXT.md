@@ -22,7 +22,9 @@ actual FIM computation using NOAA/OWP's `inundation-mapping` tooling and the
   max_procs too. Omission uses HAND_FIM_MAX_PROCS (worker default 1).
   `fimbox`/`pixi run fimbox` are the installed console entry points.
   Defaults to `http://localhost:8000`.
-  Session precedence: option/environment, OS keychain scoped to API URL, hidden
+  Discovers `/auth/config` via the SDK; local mode uses Client without a token,
+  prompt, or keychain access. Discovery errors fail explicitly.
+  Authenticated session precedence: option/environment, OS keychain scoped to API URL, hidden
   prompt. Successful prompted tokens are saved with keyring; logout and saved
   token HTTP 401 clear the entry. Only OS secure backends are accepted, no
   plaintext fallback; keychain errors are explicit. Tests mock the keychain.
@@ -38,6 +40,10 @@ actual FIM computation using NOAA/OWP's `inundation-mapping` tooling and the
   python-dateutil, typing-extensions. No server imports.
 - **`sdk/openapi.json`**, **`sdk/generator.yaml`** — Captured API contract
   and local generator config. `pixi run sdk-generate` regenerates only the SDK.
+- **`sdk/generate.py`** — Local generation driver for pinned generator 0.28.
+  Corrects its parsed optional-security flag before template rendering, so
+  job operations accept Client or AuthenticatedClient without changing the
+  captured spec or hand-editing generated files. Warnings/errors fail generation.
 - **`pyproject.toml`**, **`MANIFEST.in`** — Installable `fimbox` distribution:
   only fimbox_sdk and fimbox_cli, with fimbox console entry point. Python 3.10+.
   Does not package server modules. Optional codegen dependency
@@ -78,6 +84,8 @@ is not copied. OAuth/session/job-ownership behavior is adapted from the
   the secret is used by the server-side authorization-code exchange.
   The API Compose service loads root `.env` in raw mode to preserve literal
   credential characters; Compose 2.30+ is required.
+  Neither OAuth credential enables shared anonymous local mode; both enforce
+  authentication. Partial credentials fail startup, with input values hidden.
 - **`src/fimbox_api/celery_app.py`** — JSON-only Celery configuration and
   task discovery, started-state tracking, late acknowledgement, and a
   single-process worker.
@@ -93,7 +101,9 @@ is not copied. OAuth/session/job-ownership behavior is adapted from the
 - **`src/fimbox_api/main.py`** — FastAPI app: `POST /jobs` accepts the
   template's typed `payload` envelope; `POST /jobs/hand-fim` accepts the
   scenario array directly with destination query parameters. All job routes
-  require a session and enforce user ownership. Also provides user job listing,
+  enforce ownership via a session when configured, or a reserved shared local
+  identity without credentials. OpenAPI documents both alternatives consistently
+  across modes. Also provides user job listing,
   with JobList/JobSummary objects containing job_id/status (not plain ID
   strings), sharing status normalization with individual job polling,
   polling, fresh S3 presigned URL responses or authenticated local content URLs,
@@ -113,7 +123,7 @@ is not copied. OAuth/session/job-ownership behavior is adapted from the
   Without a bucket, leaves files on the Compose output bind mount, skips
   credential generation/S3 entirely, and returns local output metadata.
   Compose preserves the existing FIMBOX_OUTPUT_DIR bind configuration
-  (default ./docker/output relative to the repository root); API mounts the same path read-only.
+  (default ./data/output relative to the repository root); API mounts the same path read-only.
 - **`src/fimbox_api/storage.py`** — Shared S3 client configuration, safe
   job-specific object-key construction, object existence checks, and SigV4
   presigned GET URLs using job-specific temporary credentials. Submissions
@@ -126,11 +136,15 @@ is not copied. OAuth/session/job-ownership behavior is adapted from the
   verified user-info identity, Redis-backed opaque sessions with expiry,
   single-use browser-bound OAuth state, and per-user job ownership/tracking.
   Provider tokens stay in Redis. No prototype mock-token or client-supplied
-  identity fallback; bearer authentication uses the real supplied token.
+  identity fallback when authentication is configured; bearer authentication
+  uses the real supplied token. Anonymous local mode uses a reserved identity
+  that cannot be issued by the provider or loaded from an authenticated session.
   OAuth failures report the token-exchange/user-info stage, HTTP status, and
   allowlisted OAuth error codes without exposing provider bodies or tokens.
 - **`src/fimbox_api/auth_routes.py`** — Browser login/callback, PKCE form-token
   exchange for Swagger, authenticated session info, and local session logout.
+  Public `/auth/config` advertises authentication_enabled; logout in anonymous
+  mode returns 409. HydroShare S3 submissions require configured authentication.
 - **`tests/test_fimbox_api.py`** — Focused `unittest` coverage for API
   validation/queueing, status/downloads, cancellation, worker command
   construction, identifier isolation, missing/stale outputs, and failures.
@@ -145,7 +159,7 @@ Deployment assets live in `docker/api/`: a slim API Dockerfile, a worker
 Dockerfile extending `cuahsi/handfim:latest`, a role-based entrypoint, and pinned
 requirements. Root `docker-compose.yml` runs API/worker/Redis; its project
 name remains `api` to preserve existing containers and Redis sessions after
-consolidation. Both API (read-only) and worker mount docker/output by default.
+consolidation. Both API (read-only) and worker mount data/output by default.
 The base HAND-FIM image is built separately from docker/handfim; Compose
 contains only API, worker, and Redis.
 Redis is not exposed to the host.

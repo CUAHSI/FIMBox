@@ -16,7 +16,7 @@ from botocore.stub import Stubber
 
 from fastapi.testclient import TestClient
 from kombu.exceptions import OperationalError
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from fimbox_api import auth, main, storage, tasks
 from fimbox_api.models import HandFimParameters, OutputDestination
@@ -41,6 +41,13 @@ def credentials_fixture():
 class ApiTests(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(main.app)
+        for name, value in (
+            ("hydroshare_client_id", "test-client"),
+            ("hydroshare_client_secret", SecretStr("test-secret")),
+        ):
+            patcher = patch.object(main.settings, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         main.app.dependency_overrides[auth.get_authenticated_session] = lambda: auth.UserSession(
             user_id="alice", access_token="provider-token", scope="read", expires_at=time.time() + 60,
         )
@@ -76,6 +83,36 @@ class ApiTests(unittest.TestCase):
                 self.track_user_job.assert_called_with("alice", result["job_id"])
                 self.create_job_credentials.assert_called()
                 self.assertNotIn("provider-token", str(enqueue.call_args))
+
+    def test_anonymous_local_job_workflow_and_s3_rejection(self):
+        main.app.dependency_overrides.clear()
+        with patch.object(main.settings, "hydroshare_client_id", ""), patch.object(
+            main.settings, "hydroshare_client_secret", SecretStr(""),
+        ), patch.object(tasks.hand_fim, "apply_async") as enqueue:
+            for route, body in (("/jobs/hand-fim", PAYLOAD), ("/jobs", {"payload": PAYLOAD})):
+                response = self.client.post(route, json=body)
+                self.assertEqual(response.status_code, 202, response.text)
+                job_id = response.json()["job_id"]
+                self.track_user_job.assert_called_with(auth.LOCAL_USER_ID, job_id)
+                self.assertEqual(enqueue.call_args.kwargs["args"], [job_id, PAYLOAD, None, "", None])
+            self.assertEqual(self.client.post(HAND_FIM_ROUTE, json=PAYLOAD).status_code, 409)
+            self.assertEqual(enqueue.call_count, 2)
+            self.create_job_credentials.assert_not_called()
+            with patch.object(main.celery_app, "AsyncResult", return_value=Mock(state="PENDING")), patch.object(
+                main, "list_user_jobs", return_value=[job_id],
+            ) as jobs, patch.object(main.celery_app.control, "revoke") as revoke:
+                self.assertEqual(self.client.get("/jobs").json(), {
+                    "jobs": [{"job_id": job_id, "status": "queued"}],
+                })
+                jobs.assert_called_with(auth.LOCAL_USER_ID)
+                self.assertEqual(self.client.get(f"/jobs/{job_id}").json()["status"], "queued")
+                self.assertEqual(self.client.delete(f"/jobs/{job_id}").status_code, 204)
+                revoke.assert_called_once_with(job_id, terminate=False)
+                self.user_has_job.assert_called_with(auth.LOCAL_USER_ID, job_id)
+            self.test_local_file_urls_content_missing_files_and_traversal()
+            self.user_has_job.return_value = False
+            self.assertEqual(self.client.get(f"/jobs/{job_id}").status_code, 403)
+        self.assertEqual(self.client.get("/jobs").status_code, 401)
 
     def test_invalid_payloads_never_enqueue(self):
         bad_reach = {"HUC": "03020201", "ReachID": "8780625", "Streamflow": -1}

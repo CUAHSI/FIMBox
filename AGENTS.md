@@ -27,7 +27,7 @@ making structural changes to the project, so future sessions can rely on it.
   curve interpolation), and `patches/` (files that intentionally override
   upstream `fimserve` modules — see "External dependencies" below).
 - `test-data/` — Sample input data for manual testing.
-- `docker/input/`, `docker/output/` — Default runtime bind mounts for the API
+- `data/input/`, `data/output/` — Default runtime bind mounts for the API
   Compose stack; configurable through FIMBOX_INPUT_DIR/FIMBOX_OUTPUT_DIR.
   Output files live under scenarios/<job_id>/ and are shared read-only with API.
 - `pixi.toml` / `pixi.lock` / `.pixi/` — Pixi-managed Python environment
@@ -39,7 +39,10 @@ making structural changes to the project, so future sessions can rely on it.
 ## Build / run / test commands
 
 - Build the base Docker image: `docker build --platform linux/amd64 -t cuahsi/handfim:latest docker/handfim`.
-- Run the service from the repository root: `docker compose --env-file /dev/null up --build`.
+- Run the service from the repository root: `docker compose up --build`.
+  No configuration means shared anonymous local mode; both OAuth client ID
+  and secret enable authentication, partial configuration fails startup.
+  Use `--env-file /dev/null` to avoid global interpolation for raw `.env` secrets.
 - Run the CLI: `fimbox submit --body test-data/single_reach.json`.
   Optional `--max-procs N` overrides worker concurrency (default 1);
   optional `--output-bucket` enables S3, otherwise output stays on the mount.
@@ -68,7 +71,8 @@ making structural changes to the project, so future sessions can rely on it.
 - Container CLI commands are built with Typer; parameters typically use
   `Annotated[type, typer.Argument(..., help=...)] = default` for container-side
   commands (`entry.py`). The installable host CLI uses Click and the generated
-  SDK; authentication tokens are entered with a hidden prompt or environment.
+  SDK; `/auth/config` drives whether a token/keychain is needed. Authenticated
+  tokens are entered with a hidden prompt or environment.
 - Module-private helper functions are prefixed with a double underscore
   (e.g. `__write_flow_input_file`) even though they're module-level, not
   class methods — follow this pattern for new internal helpers.

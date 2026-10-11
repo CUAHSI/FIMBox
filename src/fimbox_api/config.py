@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Literal
 
-from pydantic import AliasChoices, Field, SecretStr
+from pydantic import AliasChoices, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -40,7 +40,19 @@ class Settings(BaseSettings):
     oauth_state_cookie_secure: bool = True
     swagger_oauth_redirect_uri: str = "http://localhost:8000/docs/oauth2-redirect"
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore", populate_by_name=True)
+    @property
+    def authentication_enabled(self) -> bool:
+        return bool(self.hydroshare_client_id and self.hydroshare_client_secret.get_secret_value())
+
+    @model_validator(mode="after")
+    def validate_authentication_configuration(self) -> "Settings":
+        if bool(self.hydroshare_client_id) != bool(self.hydroshare_client_secret.get_secret_value()):
+            raise ValueError("Configure both HydroShare client ID and secret, or neither for local mode")
+        return self
+
+    model_config = SettingsConfigDict(
+        env_file=".env", extra="ignore", populate_by_name=True, hide_input_in_errors=True,
+    )
 
 
 settings = Settings()

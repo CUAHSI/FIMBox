@@ -5,6 +5,28 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/auth/config": {
+      "get": {
+        "tags": [
+          "authentication"
+        ],
+        "summary": "Authentication Config",
+        "description": "Discover whether this server requires HydroShare authentication.",
+        "operationId": "authentication_config_auth_config_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthenticationConfig"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/auth/login": {
       "get": {
         "tags": [
@@ -214,8 +236,10 @@
         "security": [
           {
             "OAuth2AuthorizationCodeBearer": []
-          }
-        ]
+          },
+          {}
+        ],
+        "description": "Authentication is required only when the server has OAuth credentials configured. See GET /auth/config."
       }
     },
     "/auth/logout": {
@@ -278,12 +302,14 @@
         "security": [
           {
             "OAuth2AuthorizationCodeBearer": []
-          }
-        ]
+          },
+          {}
+        ],
+        "description": "Authentication is required only when the server has OAuth credentials configured. See GET /auth/config."
       },
       "post": {
         "summary": "Submit Job",
-        "description": "Submit HAND-FIM using the template's payload envelope.",
+        "description": "Submit HAND-FIM using the template's payload envelope.\nAuthentication is required only when the server has OAuth credentials configured. See GET /auth/config.",
         "operationId": "submit_job_jobs_post",
         "requestBody": {
           "content": {
@@ -320,19 +346,21 @@
         "security": [
           {
             "OAuth2AuthorizationCodeBearer": []
-          }
+          },
+          {}
         ]
       }
     },
     "/jobs/hand-fim": {
       "post": {
         "summary": "Submit Hand Fim",
-        "description": "Submit the scenario JSON array directly, without an envelope.",
+        "description": "Submit the scenario JSON array directly, without an envelope.\nAuthentication is required only when the server has OAuth credentials configured. See GET /auth/config.",
         "operationId": "submit_hand_fim_jobs_hand_fim_post",
         "security": [
           {
             "OAuth2AuthorizationCodeBearer": []
-          }
+          },
+          {}
         ],
         "parameters": [
           {
@@ -426,7 +454,8 @@
         "security": [
           {
             "OAuth2AuthorizationCodeBearer": []
-          }
+          },
+          {}
         ],
         "parameters": [
           {
@@ -461,16 +490,18 @@
               }
             }
           }
-        }
+        },
+        "description": "Authentication is required only when the server has OAuth credentials configured. See GET /auth/config."
       },
       "delete": {
         "summary": "Cancel Job",
-        "description": "Revoke queued jobs; the solo worker cannot interrupt a running subprocess.",
+        "description": "Revoke queued jobs; the solo worker cannot interrupt a running subprocess.\nAuthentication is required only when the server has OAuth credentials configured. See GET /auth/config.",
         "operationId": "cancel_job_jobs__job_id__delete",
         "security": [
           {
             "OAuth2AuthorizationCodeBearer": []
-          }
+          },
+          {}
         ],
         "parameters": [
           {
@@ -508,7 +539,8 @@
         "security": [
           {
             "OAuth2AuthorizationCodeBearer": []
-          }
+          },
+          {}
         ],
         "parameters": [
           {
@@ -552,7 +584,8 @@
               }
             }
           }
-        }
+        },
+        "description": "Authentication is required only when the server has OAuth credentials configured. See GET /auth/config."
       }
     },
     "/jobs/{job_id}/files/{index}": {
@@ -562,7 +595,8 @@
         "security": [
           {
             "OAuth2AuthorizationCodeBearer": []
-          }
+          },
+          {}
         ],
         "parameters": [
           {
@@ -606,18 +640,20 @@
               }
             }
           }
-        }
+        },
+        "description": "Authentication is required only when the server has OAuth credentials configured. See GET /auth/config."
       }
     },
     "/jobs/{job_id}/files/{index}/content": {
       "get": {
         "summary": "Get Local Job File",
-        "description": "Download a local output file from the shared mount; requires the owner's session.",
+        "description": "Download a local output file; requires the owner's session when auth is enabled.\nAuthentication is required only when the server has OAuth credentials configured. See GET /auth/config.",
         "operationId": "get_local_job_file_jobs__job_id__files__index__content_get",
         "security": [
           {
             "OAuth2AuthorizationCodeBearer": []
-          }
+          },
+          {}
         ],
         "parameters": [
           {
@@ -668,6 +704,19 @@
   },
   "components": {
     "schemas": {
+      "AuthenticationConfig": {
+        "properties": {
+          "authentication_enabled": {
+            "type": "boolean",
+            "title": "Authentication Enabled"
+          }
+        },
+        "type": "object",
+        "required": [
+          "authentication_enabled"
+        ],
+        "title": "AuthenticationConfig"
+      },
       "Body_oauth_token_exchange_auth_oauth_token_post": {
         "properties": {
           "code": {

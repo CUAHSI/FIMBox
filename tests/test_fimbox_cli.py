@@ -12,10 +12,11 @@ import httpx
 import click
 from click.testing import CliRunner
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 
 import fimbox_cli
 from fimbox_api import auth, main, tasks
-from fimbox_sdk import AuthenticatedClient
+from fimbox_sdk import AuthenticatedClient, Client
 from fimbox_sdk.api.default import get_job_file_jobs_job_id_files_index_get, submit_hand_fim_jobs_hand_fim_post
 from fimbox_sdk.models import JobSubmitted, PresignedOutput, Reach, Scenario
 
@@ -28,6 +29,10 @@ PAYLOAD = [{
 class SdkCliTests(unittest.TestCase):
     def setUp(self):
         self.runner = CliRunner()
+        self.real_auth_mode = fimbox_cli.__dict__["__authentication_enabled"]
+        patcher = patch.object(fimbox_cli, "__authentication_enabled", return_value=True)
+        self.auth_mode = patcher.start()
+        self.addCleanup(patcher.stop)
         patcher = patch.object(fimbox_cli, "__credential_store")
         self.credential_store = patcher.start().return_value
         self.credential_store.get_password.return_value = None
@@ -215,6 +220,41 @@ class SdkCliTests(unittest.TestCase):
         self.assertNotIn("session token", result.output)
         self.credential_store.set_password.assert_not_called()
 
+    def test_local_mode_never_prompts_or_reads_keychain_even_with_override_token(self):
+        self.auth_mode.return_value = False
+        self.response = httpx.Response(200, json={"jobs": []})
+        for token in ("", "unused-token"):
+            result = self.invoke("jobs", token=token)
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertNotIn("authorization", self.requests[-1].headers)
+            self.assertNotIn("session token", result.output)
+        self.credential_store.get_password.assert_not_called()
+        self.credential_store.set_password.assert_not_called()
+
+    def test_local_mode_submits_without_a_token(self):
+        self.auth_mode.return_value = False
+        result = self.invoke("submit", "--body", str(self.body), token="")
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("authorization", self.requests[-1].headers)
+        self.assertEqual(json.loads(self.requests[-1].content), PAYLOAD)
+        self.credential_store.get_password.assert_not_called()
+
+    def test_auth_mode_is_discovered_from_generated_public_endpoint(self):
+        settings = fimbox_cli.Settings("http://localhost:8000", None, 30)
+        self.response = httpx.Response(200, json={"authentication_enabled": False})
+        with patch.object(fimbox_cli, "__authentication_enabled", wraps=self.real_auth_mode):
+            self.assertFalse(fimbox_cli.__dict__["__authentication_enabled"](settings))
+            for response in (
+                httpx.Response(503), httpx.Response(200, json={}),
+                httpx.Response(200, json={"authentication_enabled": "false"}),
+                httpx.Response(200, content=b"invalid"),
+            ):
+                self.response = response
+                with self.assertRaises(click.ClickException):
+                    fimbox_cli.__dict__["__authentication_enabled"](settings)
+        self.assertEqual(self.requests[-1].url.path, "/auth/config")
+        self.assertNotIn("authorization", self.requests[-1].headers)
+
     def test_explicit_token_takes_precedence_over_saved_token(self):
         self.response = httpx.Response(200, json={"jobs": []})
         self.credential_store.get_password.return_value = "saved-secret"
@@ -298,6 +338,13 @@ class SdkCliTests(unittest.TestCase):
 
 class SdkIntegrationTests(unittest.TestCase):
     def setUp(self):
+        for name, value in (
+            ("hydroshare_client_id", "test-client"),
+            ("hydroshare_client_secret", SecretStr("test-secret")),
+        ):
+            patcher = patch.object(main.settings, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         main.app.dependency_overrides[auth.get_authenticated_session] = lambda: auth.UserSession(
             user_id="alice", access_token="provider", scope="read write", expires_at=time.time() + 60,
         )
@@ -326,6 +373,8 @@ class SdkIntegrationTests(unittest.TestCase):
             body.write_text(json.dumps(PAYLOAD))
             with TestClient(main.app) as client, patch.object(
                 AuthenticatedClient, "get_httpx_client", return_value=client,
+            ), patch.object(
+                Client, "get_httpx_client", return_value=client,
             ), patch.object(main, "create_job_credentials"), patch.object(main, "track_user_job"), patch.object(
                 tasks.hand_fim, "apply_async",
             ) as enqueue:

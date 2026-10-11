@@ -1,10 +1,11 @@
 import logging
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID, uuid4
 
 from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.openapi.utils import get_openapi
 from kombu.exceptions import KombuError
 from redis.exceptions import RedisError
 
@@ -53,6 +54,26 @@ app.include_router(auth_router)
 AuthenticatedSession = Annotated[UserSession, Depends(get_authenticated_session)]
 
 
+def __openapi() -> dict[str, Any]:
+    if app.openapi_schema is None:
+        schema = get_openapi(title=app.title, version=app.version, routes=app.routes)
+        for path, path_item in schema["paths"].items():
+            if path.startswith("/jobs") or path == "/auth/session":
+                for operation in path_item.values():
+                    if isinstance(operation, dict) and "security" in operation:
+                        operation["security"].append({})
+                        operation["description"] = (
+                            operation.get("description", "")
+                            + "\nAuthentication is required only when the server has OAuth credentials configured. "
+                            "See GET /auth/config."
+                        ).strip()
+        app.openapi_schema = schema
+    return app.openapi_schema
+
+
+app.openapi = __openapi
+
+
 @app.exception_handler(KombuError)
 @app.exception_handler(RedisError)
 def queue_error_handler(_request: Request, error: Exception) -> JSONResponse:
@@ -80,6 +101,8 @@ def __submit_hand_fim(
 ) -> JobSubmitted:
     job_id = str(uuid4())
     if destination.output_bucket is not None:
+        if not settings.authentication_enabled:
+            raise HTTPException(status_code=409, detail="HydroShare S3 output requires configured authentication")
         create_job_credentials(UUID(job_id), session)
     try:
         track_user_job(session.user_id, job_id)
@@ -218,7 +241,7 @@ def get_job_file(
     responses={200: {"content": {"application/octet-stream": {"schema": {"type": "string", "format": "binary"}}}}},
 )
 def get_local_job_file(job_id: UUID, index: int, session: AuthenticatedSession) -> FileResponse:
-    """Download a local output file from the shared mount; requires the owner's session."""
+    """Download a local output file; requires the owner's session when auth is enabled."""
     status = get_job_status(job_id, session)
     if status.status != "success" or status.result is None:
         raise HTTPException(status_code=409, detail="Job has not completed successfully")

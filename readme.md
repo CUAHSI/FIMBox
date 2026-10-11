@@ -663,6 +663,87 @@ docker compose --env-file /dev/null run --rm --no-deps \
 
 ## Installable Python SDK and CLI
 
+### Cloud job notebook
+
+Open [`notebooks/cloud_hand_fim.ipynb`](notebooks/cloud_hand_fim.ipynb) in
+Jupyter or VS Code with a Python kernel. It installs the client and optional
+map dependencies, accepts your cloud API URL and HydroShare bucket, prompts
+for a FIMBox session token in a masked widget field, then validates it in a
+separate Connect cell. Pause to enter the token before continuing; do not use
+Run All on the first pass. It submits directly via the generated Python
+SDK (no CLI subprocess), polls job status,
+and downloads the completed scenario's COG using a fresh presigned URL.
+The setup cell refreshes editable-install paths in the running kernel so
+`fimbox_sdk` can be imported immediately after installation.
+An interactive ipyleaflet map displays a bounded, georeferenced raster preview;
+the downloaded COG retains its full resolution.
+
+Submission creates a real, billable cloud job. Use `RESUME_JOB_ID` to monitor
+an existing job after restarting the kernel rather than submitting again.
+No credentials or execution outputs are stored in the checked-in notebook.
+Clear outputs before sharing your executed copy.
+
+### OpenAPI, CLI, and deployment architecture
+
+```mermaid
+flowchart TB
+    subgraph Generation["Development time: generate and package the client"]
+        Models["Pydantic request and response models"] --> Routes["FastAPI routes"]
+        Routes --> Spec["Capture /openapi.json as sdk/openapi.json"]
+        Spec --> Generator["pixi run sdk-generate<br/>Local openapi-python-client generator"]
+        Generator --> SDK["Generated fimbox_sdk<br/>Typed models and HTTP operations"]
+        SDK --> Package["pip install .<br/>Install SDK and handwritten Click CLI"]
+    end
+
+    Package --> CLI["fimbox CLI"]
+    CLI --> Target["Select API URL<br/>--api-url or FIMBOX_API_URL<br/>Default: http://localhost:8000"]
+    Target --> Discovery["SDK: GET /auth/config<br/>Discover authentication mode"]
+    Discovery --> Client["SDK Client: no bearer token<br/>Anonymous local server"]
+    Discovery --> AuthClient["SDK AuthenticatedClient<br/>Configured server: FIMBox session token"]
+    Login["Browser: API /auth/login<br/>HydroShare OAuth"] --> Token["FIMBox session token<br/>Option/env, saved OS keychain, or prompt"]
+    Token --> AuthClient
+    Client --> HTTP["Generated SDK HTTP operations<br/>Submit, list, poll, cancel, output URLs"]
+    AuthClient --> HTTP
+
+    subgraph Local["Local Docker Compose"]
+        LocalAPI["FastAPI API<br/>localhost:8000"]
+        Redis["Redis<br/>Queue, results, ownership and sessions"]
+        Worker["Celery HAND-FIM worker"]
+        Mount["Shared host data/output<br/>API reads files; worker writes files"]
+        LocalAPI -->|enqueue| Redis
+        Redis -->|consume jobs| Worker
+        Worker -->|status and result metadata| Redis
+        Redis -->|status and result metadata| LocalAPI
+        Worker --> Mount
+        Mount -->|download through API| LocalAPI
+    end
+
+    subgraph Cloud["Google Cloud: provisioned by Terraform"]
+        CloudAPI["Cloud Run FastAPI service<br/>HTTPS; HydroShare authentication required"]
+        Memorystore["Memorystore Redis<br/>Queue, results, ownership and credentials"]
+        CloudWorker["Cloud Run worker pool<br/>Celery and HAND-FIM"]
+        Secrets["Secret Manager<br/>OAuth client ID and secret"]
+        S3["HydroShare S3<br/>Required output bucket and prefix"]
+        Secrets --> CloudAPI
+        CloudAPI -->|enqueue| Memorystore
+        Memorystore -->|consume jobs| CloudWorker
+        CloudWorker -->|status and result metadata| Memorystore
+        Memorystore -->|status and result metadata| CloudAPI
+        CloudWorker -->|upload artifacts| S3
+        CloudAPI -->|sign output URLs| S3
+    end
+
+    HTTP <-->|HTTP JSON and file downloads| LocalAPI
+    HTTP <-->|HTTPS JSON and presigned URL responses| CloudAPI
+```
+
+The OpenAPI spec is used **during SDK generation**, not downloaded or
+interpreted by the CLI on each invocation. Both deployments expose the same
+contract; the configured API URL selects the destination. Authentication is
+discovered at runtime, independently of the captured spec. Local Compose can
+also enable HydroShare authentication and optional S3 output; Terraform
+requires both authentication and S3 output.
+
 The `fimbox` distribution includes the generated [`fimbox_sdk`](src/fimbox_sdk)
 Python package and an SDK-backed `fimbox` console command. It is generated
 locally with [openapi-python-client](https://github.com/openapi-generators/openapi-python-client)

@@ -1,0 +1,171 @@
+import importlib.util
+import asyncio
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import Mock, patch
+from urllib.parse import urlsplit
+
+import httpx
+
+
+NOTEBOOK = Path(__file__).resolve().parents[1] / "notebooks" / "cloud_hand_fim.ipynb"
+
+
+class CloudNotebookTests(unittest.TestCase):
+    def setUp(self):
+        self.notebook = json.loads(NOTEBOOK.read_text())
+        self.sources = {
+            cell["id"]: "".join(cell["source"])
+            for cell in self.notebook["cells"] if cell["cell_type"] == "code"
+        }
+
+    def test_code_compiles(self):
+        for cell in self.notebook["cells"]:
+            if cell["cell_type"] == "code":
+                source = "".join(line for line in cell["source"] if not line.startswith("%"))
+                compile(source, cell["id"], "exec")
+
+    def test_setup_loads_editable_install_in_running_interpreter(self):
+        source = self.sources["dependencies"]
+        refresh_and_imports = source.split("# Load editable-install", 1)[1]
+        code = (
+            "import importlib.util, site, sysconfig\n"
+            "assert importlib.util.find_spec('fimbox_sdk') is None\n"
+            "# Load editable-install" + refresh_and_imports
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            completed = subprocess.run(
+                [sys.executable, "-S", "-c", code],
+                cwd=directory, env={key: value for key, value in os.environ.items() if key != "PYTHONPATH"},
+                capture_output=True, text=True,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_sdk_authentication_submission_monitoring_and_download(self):
+        from fimbox_sdk import AuthenticatedClient, Client
+        from fimbox_sdk.models import StoredHandFimResult
+
+        job_id = "4ec24445-d50f-434b-bce6-c1364762bfac"
+        requests = []
+        states = iter(["queued", "success"])
+
+        def respond(request):
+            requests.append(request)
+            path = request.url.path
+            if path == "/auth/config":
+                self.assertNotIn("authorization", request.headers)
+                return httpx.Response(200, json={"authentication_enabled": True})
+            self.assertEqual(request.headers["authorization"], "Bearer notebook-test-token")
+            if path == "/auth/session":
+                return httpx.Response(200, json={"user_id": "test", "expires_at": 9999999999})
+            if path == "/jobs/hand-fim":
+                self.assertEqual(json.loads(request.content)[0]["Reaches"][0]["HUC"], "03020201")
+                self.assertEqual(request.url.params["max_procs"], "1")
+                return httpx.Response(202, json={"job_id": job_id, "status": "queued", "status_url": f"/jobs/{job_id}"})
+            if path == f"/jobs/{job_id}":
+                state = next(states)
+                return httpx.Response(200, json={
+                    "job_id": job_id, "status": state,
+                    "result": {"outputs": [], "files": []} if state == "success" else None,
+                })
+            if path == f"/jobs/{job_id}/outputs/0.tif":
+                return httpx.Response(200, json={
+                    "url": "https://objects.example.org/cog?signature=test", "expires_in": 300,
+                })
+            return httpx.Response(401, json={"detail": "sensitive-server-detail"})
+
+        namespace = {
+            "API_URL": "https://api.example.org", "os": os, "urlsplit": urlsplit,
+            "Path": Path, "RESUME_JOB_ID": "", "OUTPUT_BUCKET": "bucket",
+            "OUTPUT_PREFIX": "demo", "MAX_PROCS": 1, "WAIT_SECONDS": 60, "POLL_SECONDS": 0,
+            "USE_MACOS_KEYCHAIN": False,
+        }
+        imports = self.sources["dependencies"].split("from fimbox_sdk import", 1)[1]
+        exec("from fimbox_sdk import" + imports, namespace)
+        transport = httpx.MockTransport(respond)
+        public_http = httpx.Client(transport=transport, base_url=namespace["API_URL"])
+        self.addCleanup(public_http.close)
+        with httpx.Client(
+            transport=transport, base_url=namespace["API_URL"],
+            headers={"Authorization": "Bearer notebook-test-token"},
+        ) as authenticated_http, patch.object(
+            Client, "get_httpx_client", return_value=public_http,
+        ), patch.object(
+            AuthenticatedClient, "get_httpx_client", return_value=authenticated_http,
+        ), patch.dict("os.environ", {"FIMBOX_SESSION_TOKEN": ""}), patch("IPython.display.display"):
+            exec(self.sources["authentication"], namespace)
+            self.addCleanup(namespace["token_input"].close)
+            with self.assertRaisesRegex(ValueError, "masked field"):
+                exec(self.sources["connect"], namespace)
+            namespace["token_input"].value = "notebook-test-token"
+            exec(self.sources["connect"], namespace)
+            self.assertEqual(namespace["token_input"].value, "")
+            namespace["USE_MACOS_KEYCHAIN"] = True
+            namespace["api_client"] = None
+            with patch("sys.platform", "darwin"), patch(
+                "keyring.backends.macOS.Keyring.get_password", return_value="notebook-test-token",
+            ) as saved_token:
+                exec(self.sources["connect"], namespace)
+                saved_token.assert_called_once_with("fimbox", namespace["API_URL"])
+            exec(self.sources["submission"], namespace)
+            exec(self.sources["submission"], namespace)
+            self.assertEqual(sum(request.method == "POST" for request in requests), 1)
+            exec(self.sources["monitoring"], namespace)
+            self.assertIsInstance(namespace["final_result"], StoredHandFimResult)
+            download = Mock(status_code=200)
+            download.iter_bytes.return_value = [b"test-raster"]
+            with patch("httpx.stream") as stream:
+                stream.return_value.__enter__.return_value = download
+                try:
+                    exec(self.sources["download"], namespace)
+                    self.assertEqual(namespace["cog_path"].read_bytes(), b"test-raster")
+                    self.assertNotIn("headers", stream.call_args.kwargs)
+                    self.assertNotIn("signed_url", namespace)
+                finally:
+                    namespace["cog_directory"].cleanup()
+            operation = Mock()
+            operation.sync_detailed.return_value = Mock(status_code=401)
+            with self.assertRaisesRegex(RuntimeError, "HTTP 401"):
+                namespace["call_api"](operation, client=namespace["api_client"])
+            self.assertTrue(all("notebook-test-token" not in str(request.url) for request in requests))
+
+    @unittest.skipUnless(
+        all(importlib.util.find_spec(name) for name in ("rasterio", "ipyleaflet", "PIL")),
+        "Optional notebook map dependencies are not installed",
+    )
+    def test_georeferenced_map_preview(self):
+        import numpy as np
+        import rasterio
+        from rasterio.transform import from_bounds
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "synthetic.cog.tif"
+            with rasterio.open(
+                path, "w", driver="COG", width=16, height=16, count=1,
+                dtype="float32", crs="EPSG:4326", nodata=float("nan"),
+                transform=from_bounds(-78, 35, -77, 36, 16, 16),
+            ) as dataset:
+                band = np.zeros((16, 16), dtype="float32")
+                band[4:12, 4:12] = 1
+                dataset.write(band, 1)
+            namespace = {"cog_path": path, "display": Mock()}
+            async def render():
+                exec(self.sources["map"], namespace)
+                await asyncio.sleep(0)
+
+            asyncio.run(render())
+            self.assertEqual(namespace["bounds"], ((35, -78), (36, -77)))
+            self.assertTrue(namespace["image_uri"].startswith("data:image/png;base64,"))
+            self.assertEqual(np.count_nonzero(namespace["rgba"][:, :, 3]), 64)
+            self.assertLessEqual(max(namespace["preview"].shape), 1024)
+            self.assertEqual(namespace["flood_map"].layers[-1].name, "HAND-FIM inundation (COG preview)")
+            namespace["flood_map"].close()
+
+
+if __name__ == "__main__":
+    unittest.main()

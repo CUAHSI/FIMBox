@@ -51,6 +51,24 @@ actual FIM computation using NOAA/OWP's `inundation-mapping` tooling and the
 - **`tests/test_fimbox_cli.py`** — SDK/CLI regression tests with mock HTTP,
   typed sync/async responses, source-spec parity, and submission through FastAPI.
 
+## Cloud example notebook (`notebooks/`)
+
+- **`notebooks/cloud_hand_fim.ipynb`** — User-run generated SDK example: HTTPS API
+  configuration, SDK auth discovery/masked ipywidgets.Password token input,
+  separate Connect cell (no blocking getpass), typed direct submission
+  with opt-in USE_MACOS_KEYCHAIN for clipboard/widget issues (native Keychain,
+  no plaintext backend; URL matches CLI credential account),
+  using AuthenticatedClient (no CLI subprocess), bounded polling/resume, fresh presigned S3
+  download without bearer forwarding, and rasterio/ipyleaflet COG map preview.
+  Optional rasterio/Pillow/ipyleaflet dependencies are notebook-only.
+  Setup reprocesses the kernel's site-package .pth files after editable install
+  so SDK imports work without a kernel restart.
+  Displays a WGS84 image overlay up to 1024px, not a full-resolution tile service.
+  No saved outputs or live cloud execution during validation.
+- **`tests/test_cloud_notebook.py`** — Cell syntax/editable-import checks, mocked
+  SDK/auth/download workflow, and synthetic COG map test (skips when optional
+  map dependencies are unavailable).
+
 ## Schema (`src/schemas/`)
 
 - **`src/schemas/hand_fim_schema.py`** — Pydantic v2 models defining the HAND-FIM

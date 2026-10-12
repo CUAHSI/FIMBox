@@ -124,6 +124,7 @@ class ApiTests(unittest.TestCase):
         payloads = [
             [],
             [{"ScenarioID": "bad", "Reaches": []}],
+            [{**PAYLOAD[0], "ScenarioID": "../../unsafe"}],
             [{"ScenarioID": "bad", "Reaches": [bad_reach]}],
             [{"ScenarioID": "bad", "Reaches": [{**bad_reach, "Streamflow": 1, "HUC": "123"}]}],
             [{**PAYLOAD[0], "unexpected": True}],
@@ -258,6 +259,7 @@ class ApiTests(unittest.TestCase):
 
     def test_openapi_uses_scenario_array(self):
         schema = self.client.get("/openapi.json").json()
+        self.assertFalse(any(path.startswith("/auth/") for path in schema["paths"]))
         self.assertEqual(set(schema["paths"]["/jobs"]), {"get"})
         self.assertNotIn("JobRequest", schema["components"]["schemas"])
         self.assertNotIn("/jobs/{job_id}/outputs/{index}.tif", schema["paths"])
@@ -282,7 +284,6 @@ class WorkerTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
         self.job_id = str(uuid4())
-        self.output_scenario_id = PAYLOAD[0]["ScenarioID"]
         patcher = patch.object(tasks, "s3_client")
         self.storage_client = patcher.start().return_value
         self.addCleanup(patcher.stop)
@@ -298,32 +299,30 @@ class WorkerTests(unittest.TestCase):
     def __write_output(self, command, **kwargs):
         source = Path(command[3])
         scenario = json.loads(source.read_text())[0]
-        self.assertEqual(scenario["ScenarioID"], f"{self.job_id}-0")
+        self.assertEqual(scenario["ScenarioID"], PAYLOAD[0]["ScenarioID"])
         self.assertEqual(scenario["Reaches"], PAYLOAD[0]["Reaches"])
         self.assertTrue(kwargs["check"])
         output = (
             self.root / "output" / "scenarios" / self.job_id
-            / f"{self.output_scenario_id}.cog"
+            / f"{scenario['ScenarioID']}.cog"
         )
         output.write_bytes(b"test-cog")
         return subprocess.CompletedProcess(command, 0)
 
     def test_executes_scenario_and_preserves_original_identifier(self):
-        self.output_scenario_id = "original-scenario-id"
-        payload = [{**PAYLOAD[0], "ScenarioID": self.output_scenario_id}]
         with patch.object(tasks.subprocess, "run", side_effect=self.__write_output) as run:
-            result = tasks.hand_fim.run(self.job_id, payload, **DESTINATION)
+            result = tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION)
         output_path = (
             self.root / "output" / "scenarios" / self.job_id
-            / f"{self.output_scenario_id}.cog"
+            / f"{PAYLOAD[0]['ScenarioID']}.cog"
         )
-        self.assertEqual(result["outputs"][0]["ScenarioID"], self.output_scenario_id)
-        self.assertEqual(result["outputs"], [{"ScenarioID": self.output_scenario_id}])
+        self.assertEqual(result["outputs"][0]["ScenarioID"], PAYLOAD[0]["ScenarioID"])
+        self.assertEqual(result["outputs"], [{"ScenarioID": PAYLOAD[0]["ScenarioID"]}])
         self.assertEqual(result["output_bucket"], "fim-output")
         self.assertEqual(result["output_prefix"], "data/output")
         self.storage_client.upload_file.assert_called_once_with(
             str(output_path),
-            "fim-output", f"data/output/{self.job_id}/{self.output_scenario_id}.cog",
+            "fim-output", f"data/output/{self.job_id}/{PAYLOAD[0]['ScenarioID']}.cog",
             ExtraArgs={"ContentType": "image/tiff"},
         )
         self.assertEqual(run.call_args.args[0][-3:], [
@@ -342,14 +341,14 @@ class WorkerTests(unittest.TestCase):
             self.__write_output(command, **kwargs)
             (output_dir / "logs").mkdir()
             (output_dir / "logs" / "run.txt").write_text("log")
-            (output_dir / f"{self.job_id}-0.tif").write_bytes(b"raster")
+            (output_dir / f"{PAYLOAD[0]['ScenarioID']}.tif").write_bytes(b"raster")
             return subprocess.CompletedProcess(command, 0)
 
         with patch.object(tasks.subprocess, "run", side_effect=compute):
             result = tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION)
         self.assertEqual(
             {file["path"] for file in result["files"]},
-            {f"{self.output_scenario_id}.cog", f"{self.job_id}-0.tif", "logs/run.txt"},
+            {f"{PAYLOAD[0]['ScenarioID']}.cog", f"{PAYLOAD[0]['ScenarioID']}.tif", "logs/run.txt"},
         )
         self.assertEqual(self.storage_client.upload_file.call_count, 3)
         for file in result["files"]:
@@ -381,7 +380,7 @@ class WorkerTests(unittest.TestCase):
         self.assertIsNone(result["files"][0]["key"])
         output_dir = self.root / "output" / "scenarios" / self.job_id
         self.assertEqual(result["local_output_dir"], str(output_dir))
-        self.assertTrue((output_dir / f"{self.output_scenario_id}.cog").is_file())
+        self.assertTrue((output_dir / f"{PAYLOAD[0]['ScenarioID']}.cog").is_file())
         self.storage_client.upload_file.assert_not_called()
 
     def test_output_symlink_is_rejected_without_uploading_external_data(self):
@@ -403,7 +402,7 @@ class WorkerTests(unittest.TestCase):
     def test_missing_output_and_stale_output_fail(self):
         output = (
             self.root / "output" / "scenarios" / self.job_id
-            / f"{self.output_scenario_id}.cog"
+            / f"{PAYLOAD[0]['ScenarioID']}.cog"
         )
         output.parent.mkdir(parents=True)
         output.write_bytes(b"stale")

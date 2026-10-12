@@ -1,4 +1,5 @@
 import math
+import re
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -14,6 +15,8 @@ class HandFimParameters(ScenarioList):
         if len(set(identifiers)) != len(identifiers):
             raise ValueError("ScenarioID values must be unique within a job")
         for scenario in self.root:
+            if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", scenario.ScenarioID) is None:
+                raise ValueError("ScenarioID must be a safe filename using letters, digits, '.', '_' or '-'")
             for reach in scenario.Reaches:
                 if len(reach.HUC) != 8:
                     raise ValueError("HAND-FIM requires eight-digit HUC identifiers")

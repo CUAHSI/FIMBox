@@ -52,12 +52,8 @@ def hand_fim(
     input_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # User identifiers are metadata, never filenames or glob expressions.
-    internal = scenarios.model_copy(deep=True)
-    for index, scenario in enumerate(internal.root):
-        scenario.ScenarioID = f"{job_id}-{index}"
     scenario_file = input_dir / "scenario.json"
-    scenario_file.write_text(internal.model_dump_json(), encoding="utf-8")
+    scenario_file.write_text(scenarios.model_dump_json(), encoding="utf-8")
 
     logger.info("Starting HAND-FIM job %s", job_id)
     try:
@@ -77,7 +73,7 @@ def hand_fim(
             check=True,
         )
         outputs = []
-        for index, scenario in enumerate(scenarios.root):
+        for scenario in scenarios.root:
             cog = output_dir / f"{scenario.ScenarioID}.cog"
             if not cog.is_file() or cog.stat().st_size == 0:
                 raise RuntimeError(

@@ -18,7 +18,7 @@ from .auth import (
 from .config import settings
 from .models import AuthenticationConfig
 
-router = APIRouter(prefix="/auth", tags=["authentication"])
+router = APIRouter(prefix="/auth", tags=["authentication"], include_in_schema=False)
 
 
 @router.get("/config", response_model=AuthenticationConfig)

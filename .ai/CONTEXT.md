@@ -157,7 +157,10 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
 - **`src/fimbox_api/auth_routes.py`** — Browser login/callback, PKCE form-token
   exchange for Swagger, authenticated session info, and local session logout.
   Public `/auth/config` advertises authentication_enabled; logout in anonymous
-  mode returns 409. HydroShare S3 submissions require configured authentication.
+  mode returns 409. Auth routes are excluded from the live FastAPI OpenAPI
+  schema and `/docs`; their captured `sdk/openapi.json` definitions remain for
+  the generated CLI auth client. HydroShare S3 submissions require configured
+  authentication.
 - **`tests/test_fimbox_api.py`** — Focused `unittest` coverage for API
   validation/queueing, status, removed output routes, cancellation, worker command
   construction, identifier isolation, missing/stale outputs, and failures.

@@ -54,7 +54,7 @@ def __openapi() -> dict[str, Any]:
     if app.openapi_schema is None:
         schema = get_openapi(title=app.title, version=app.version, routes=app.routes)
         for path, path_item in schema["paths"].items():
-            if path.startswith("/jobs") or path == "/auth/session":
+            if path.startswith("/jobs"):
                 for operation in path_item.values():
                     if isinstance(operation, dict) and "security" in operation:
                         operation["security"].append({})

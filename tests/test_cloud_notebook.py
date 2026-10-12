@@ -1,9 +1,11 @@
+import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -68,7 +70,10 @@ class CloudNotebookTests(unittest.TestCase):
                 state = next(states)
                 return httpx.Response(200, json={
                     "job_id": job_id, "status": state,
-                    "result": {"outputs": [], "files": []} if state == "success" else None,
+                    "result": {
+                        "outputs": [],
+                        "files": [{"path": f"{job_id}-0.cog", "size_bytes": 123}],
+                    } if state == "success" else None,
                 })
             return httpx.Response(401, json={"detail": "sensitive-server-detail"})
 
@@ -105,10 +110,15 @@ class CloudNotebookTests(unittest.TestCase):
             ) as saved_token:
                 exec(self.sources["connect"], namespace)
                 saved_token.assert_called_once_with("fimbox", namespace["API_URL"])
-            exec(self.sources["submission"], namespace)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                exec(self.sources["submission"], namespace)
             self.assertEqual(sum(request.method == "POST" for request in requests), 1)
-            exec(self.sources["monitoring"], namespace)
+            with redirect_stdout(output):
+                exec(self.sources["monitoring"], namespace)
             self.assertIsInstance(namespace["final_result"], StoredHandFimResult)
+            self.assertNotIn(job_id, output.getvalue())
+            self.assertIn("0.cog", output.getvalue())
             operation = Mock()
             operation.sync_detailed.return_value = Mock(status_code=401)
             with self.assertRaisesRegex(RuntimeError, "HTTP 401"):

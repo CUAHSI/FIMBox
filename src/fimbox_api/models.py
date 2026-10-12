@@ -27,9 +27,9 @@ class HandFimParameters(ScenarioList):
 
 class OutputDestination(BaseModel):
     output_bucket: str | None = Field(
-        default=None, min_length=1, max_length=255, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+        default="resource", min_length=1, max_length=255, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
     )
-    output_prefix: str = Field(default="", max_length=900)
+    output_prefix: str = Field(max_length=900)
 
     model_config = {"extra": "forbid"}
 

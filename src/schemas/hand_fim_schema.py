@@ -86,18 +86,15 @@ class ScenarioList(RootModel[List[Scenario]]):
 
 
 class HandFimOutput(BaseModel):
-    """Reference to a single generated GeoTIFF output for a scenario."""
+    """Metadata for a single generated scenario output."""
 
     ScenarioID: str
-    geotiff_url: str = Field(
-        ..., description="Location of the generated GeoTIFF output for this scenario."
-    )
 
     model_config = {"extra": "forbid"}
 
 
 class HandFimResult(BaseModel):
-    """Result of a HAND-FIM request: one output GeoTIFF reference per scenario."""
+    """Result of a HAND-FIM request: one output entry per scenario."""
 
     outputs: List[HandFimOutput]
 

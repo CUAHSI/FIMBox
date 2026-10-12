@@ -20,15 +20,12 @@ from fimbox_sdk.api.authentication import (
 )
 from fimbox_sdk.api.default import (
     cancel_job_jobs_job_id_delete,
-    get_job_file_jobs_job_id_files_index_get,
-    get_job_output_jobs_job_id_outputs_index_tif_get,
     get_job_status_jobs_job_id_get,
     health_health_get,
     list_jobs_jobs_get,
     submit_hand_fim_jobs_hand_fim_post,
-    submit_job_jobs_post,
 )
-from fimbox_sdk.models import AuthenticationConfig, JobRequest, Scenario
+from fimbox_sdk.models import AuthenticationConfig, Scenario
 from fimbox_sdk.types import Response
 
 
@@ -231,22 +228,6 @@ def submit(
     )
 
 
-@app.command("submit-envelope")
-@click.option("--body", required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path))
-@click.pass_context
-def submit_envelope(ctx: click.Context, body: Path) -> None:
-    """Submit a JSON envelope containing payload, output_bucket, output_prefix."""
-    payload = __body(body)
-    try:
-        request = JobRequest.from_dict(payload)
-        __scenarios(payload["payload"])
-        if request.to_dict() != payload:
-            raise ValueError
-    except (ValueError, KeyError, TypeError, AttributeError):
-        raise click.ClickException("Body must match the generated JobRequest model.") from None
-    __call(ctx, submit_job_jobs_post.sync_detailed, body=request)
-
-
 @app.command()
 @click.pass_context
 def jobs(ctx: click.Context) -> None:
@@ -260,24 +241,6 @@ def jobs(ctx: click.Context) -> None:
 def status(ctx: click.Context, job_id: UUID) -> None:
     """Get a job's status and output manifest."""
     __call(ctx, get_job_status_jobs_job_id_get.sync_detailed, job_id=job_id)
-
-
-@app.command()
-@click.option("--job-id", required=True, type=click.UUID)
-@click.option("--index", required=True, type=click.IntRange(min=0))
-@click.pass_context
-def output(ctx: click.Context, job_id: UUID, index: int) -> None:
-    """Get a presigned URL for a file in the job's output manifest."""
-    __call(ctx, get_job_file_jobs_job_id_files_index_get.sync_detailed, job_id=job_id, index=index)
-
-
-@app.command("scenario-output")
-@click.option("--job-id", required=True, type=click.UUID)
-@click.option("--index", required=True, type=click.IntRange(min=0))
-@click.pass_context
-def scenario_output(ctx: click.Context, job_id: UUID, index: int) -> None:
-    """Get a presigned URL for a scenario's COG."""
-    __call(ctx, get_job_output_jobs_job_id_outputs_index_tif_get.sync_detailed, job_id=job_id, index=index)
 
 
 @app.command()

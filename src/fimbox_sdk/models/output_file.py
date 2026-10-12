@@ -18,13 +18,11 @@ class OutputFile:
     Attributes:
         path (str):
         size_bytes (int):
-        download_url (str):
         key (None | str | Unset):
     """
 
     path: str
     size_bytes: int
-    download_url: str
     key: None | str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
@@ -32,8 +30,6 @@ class OutputFile:
         path = self.path
 
         size_bytes = self.size_bytes
-
-        download_url = self.download_url
 
         key: None | str | Unset
         if isinstance(self.key, Unset):
@@ -47,7 +43,6 @@ class OutputFile:
             {
                 "path": path,
                 "size_bytes": size_bytes,
-                "download_url": download_url,
             }
         )
         if key is not UNSET:
@@ -62,8 +57,6 @@ class OutputFile:
 
         size_bytes = d.pop("size_bytes")
 
-        download_url = d.pop("download_url")
-
         def _parse_key(data: object) -> None | str | Unset:
             if data is None:
                 return data
@@ -76,7 +69,6 @@ class OutputFile:
         output_file = cls(
             path=path,
             size_bytes=size_bytes,
-            download_url=download_url,
             key=key,
         )
 

@@ -6,13 +6,10 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
-from uuid import UUID, uuid4
-from urllib.parse import parse_qs, urlparse
+from uuid import uuid4
 
-import boto3
 import httpx
-from botocore.exceptions import ClientError, NoCredentialsError
-from botocore.stub import Stubber
+from botocore.exceptions import ClientError
 
 from fastapi.testclient import TestClient
 from kombu.exceptions import OperationalError
@@ -64,40 +61,33 @@ class ApiTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def test_submit_both_request_shapes(self):
-        for route, body in (
-            (HAND_FIM_ROUTE, PAYLOAD),
-            ("/jobs", {"payload": PAYLOAD, **DESTINATION}),
-        ):
-            with self.subTest(route=route), patch.object(tasks.hand_fim, "apply_async") as enqueue:
-                response = self.client.post(route, json=body)
-                self.assertEqual(response.status_code, 202)
-                result = response.json()
-                self.assertEqual(result["status"], "queued")
-                self.assertEqual(result["status_url"], f"/jobs/{result['job_id']}")
-                enqueue.assert_called_once_with(
-                    args=[result["job_id"], PAYLOAD, "fim-output", "data/output", None],
-                    task_id=result["job_id"],
-                    retry=False,
-                )
-                self.track_user_job.assert_called_with("alice", result["job_id"])
-                self.create_job_credentials.assert_called()
-                self.assertNotIn("provider-token", str(enqueue.call_args))
+    def test_submit_scenario_array(self):
+        with patch.object(tasks.hand_fim, "apply_async") as enqueue:
+            response = self.client.post(HAND_FIM_ROUTE, json=PAYLOAD)
+            self.assertEqual(response.status_code, 202)
+            result = response.json()
+            self.assertEqual(result["status"], "queued")
+            self.assertEqual(result["status_url"], f"/jobs/{result['job_id']}")
+            enqueue.assert_called_once_with(
+                args=[result["job_id"], PAYLOAD, "fim-output", "data/output", None],
+                task_id=result["job_id"],
+                retry=False,
+            )
+            self.track_user_job.assert_called_with("alice", result["job_id"])
+            self.create_job_credentials.assert_called()
+            self.assertNotIn("provider-token", str(enqueue.call_args))
 
-    def test_cloud_policy_requires_s3_for_both_submission_routes(self):
+    def test_cloud_policy_requires_s3_for_submission(self):
         with patch.object(main.settings, "require_hydroshare_output", True), patch.object(
             tasks.hand_fim, "apply_async",
         ) as enqueue:
-            for route, body in (("/jobs", {"payload": PAYLOAD}), ("/jobs/hand-fim", PAYLOAD)):
-                response = self.client.post(route, json=body)
-                self.assertEqual(response.status_code, 422)
-                self.assertIn("output_bucket", response.json()["detail"])
+            response = self.client.post("/jobs/hand-fim", json=PAYLOAD)
+            self.assertEqual(response.status_code, 422)
+            self.assertIn("output_bucket", response.json()["detail"])
             enqueue.assert_not_called()
             self.track_user_job.assert_not_called()
             self.create_job_credentials.assert_not_called()
-            self.assertEqual(
-                self.client.post("/jobs", json={"payload": PAYLOAD, **DESTINATION}).status_code, 202,
-            )
+            self.assertEqual(self.client.post(HAND_FIM_ROUTE, json=PAYLOAD).status_code, 202)
             self.create_job_credentials.assert_called_once()
             enqueue.assert_called_once()
 
@@ -106,14 +96,13 @@ class ApiTests(unittest.TestCase):
         with patch.object(main.settings, "hydroshare_client_id", ""), patch.object(
             main.settings, "hydroshare_client_secret", SecretStr(""),
         ), patch.object(tasks.hand_fim, "apply_async") as enqueue:
-            for route, body in (("/jobs/hand-fim", PAYLOAD), ("/jobs", {"payload": PAYLOAD})):
-                response = self.client.post(route, json=body)
-                self.assertEqual(response.status_code, 202, response.text)
-                job_id = response.json()["job_id"]
-                self.track_user_job.assert_called_with(auth.LOCAL_USER_ID, job_id)
-                self.assertEqual(enqueue.call_args.kwargs["args"], [job_id, PAYLOAD, None, "", None])
+            response = self.client.post("/jobs/hand-fim", json=PAYLOAD)
+            self.assertEqual(response.status_code, 202, response.text)
+            job_id = response.json()["job_id"]
+            self.track_user_job.assert_called_with(auth.LOCAL_USER_ID, job_id)
+            self.assertEqual(enqueue.call_args.kwargs["args"], [job_id, PAYLOAD, None, "", None])
             self.assertEqual(self.client.post(HAND_FIM_ROUTE, json=PAYLOAD).status_code, 409)
-            self.assertEqual(enqueue.call_count, 2)
+            self.assertEqual(enqueue.call_count, 1)
             self.create_job_credentials.assert_not_called()
             with patch.object(main.celery_app, "AsyncResult", return_value=Mock(state="PENDING")), patch.object(
                 main, "list_user_jobs", return_value=[job_id],
@@ -126,7 +115,6 @@ class ApiTests(unittest.TestCase):
                 self.assertEqual(self.client.delete(f"/jobs/{job_id}").status_code, 204)
                 revoke.assert_called_once_with(job_id, terminate=False)
                 self.user_has_job.assert_called_with(auth.LOCAL_USER_ID, job_id)
-            self.test_local_file_urls_content_missing_files_and_traversal()
             self.user_has_job.return_value = False
             self.assertEqual(self.client.get(f"/jobs/{job_id}").status_code, 403)
         self.assertEqual(self.client.get("/jobs").status_code, 401)
@@ -178,9 +166,6 @@ class ApiTests(unittest.TestCase):
         with patch.object(storage, "s3_client") as client, patch.object(main.celery_app, "AsyncResult") as result:
             for method, route in (
                 ("GET", f"/jobs/{job_id}"),
-                ("GET", f"/jobs/{job_id}/outputs/0.tif"),
-                ("GET", f"/jobs/{job_id}/files/0"),
-                ("GET", f"/jobs/{job_id}/files/0/content"),
                 ("DELETE", f"/jobs/{job_id}"),
             ):
                 self.assertEqual(self.client.request(method, route).status_code, 403)
@@ -209,115 +194,57 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(self.client.get("/jobs").json(), {"jobs": []})
             results.assert_not_called()
 
-    def test_status_and_presigned_url(self):
+    def test_status_returns_output_metadata(self):
         job_id = str(uuid4())
-        result = {**DESTINATION, "local_output_dir": None, "files": [], "outputs": [{"ScenarioID": "single-reach-scenario", "geotiff_url": f"/jobs/{job_id}/outputs/0.tif"}]}
-        client = Mock()
-        client.generate_presigned_url.return_value = "https://objects.example/signed"
-        with patch.object(storage, "s3_client", return_value=client), patch.object(
+        result = {
+            **DESTINATION, "local_output_dir": None,
+            "files": [{"path": "result.cog", "key": "data/output/result.cog", "size_bytes": 10}],
+            "outputs": [{"ScenarioID": "single-reach-scenario"}],
+        }
+        with patch.object(
             main.celery_app, "AsyncResult", return_value=Mock(state="SUCCESS", result=result)
         ):
             response = self.client.get(f"/jobs/{job_id}")
             self.assertEqual(response.json()["result"], result)
-            response = self.client.get(result["outputs"][0]["geotiff_url"])
-            self.assertEqual(response.json(), {"url": "https://objects.example/signed", "expires_in": 3600})
-            client.generate_presigned_url.assert_called_once_with(
-                "get_object", Params={"Bucket": "fim-output", "Key": f"data/output/{job_id}/0.tif"},
-                ExpiresIn=3600, HttpMethod="GET",
-            )
-            self.assertEqual(self.client.get(f"/jobs/{job_id}/outputs/1.tif").status_code, 404)
-            self.assertEqual(self.client.get(f"/jobs/{job_id}/outputs/-1.tif").status_code, 404)
-            client.head_object.side_effect = ClientError({"Error": {"Code": "404"}}, "HeadObject")
-            self.assertEqual(self.client.get(f"/jobs/{job_id}/outputs/0.tif").status_code, 404)
-            client.head_object.side_effect = NoCredentialsError()
-            self.assertEqual(self.client.get(f"/jobs/{job_id}/outputs/0.tif").status_code, 503)
+
+    def test_output_download_and_envelope_routes_are_removed(self):
+        job_id = str(uuid4())
+        for route in (
+            f"/jobs/{job_id}/outputs/0.tif",
+            f"/jobs/{job_id}/files/0",
+            f"/jobs/{job_id}/files/0/content",
+        ):
+            self.assertEqual(self.client.get(route).status_code, 404)
+        self.assertEqual(self.client.post("/jobs", json={"payload": PAYLOAD}).status_code, 405)
 
     def test_invalid_destination_is_rejected(self):
         with patch.object(tasks.hand_fim, "apply_async") as enqueue:
             for route, body in (
-                ("/jobs", {"payload": PAYLOAD, "output_prefix": "orphan"}),
                 ("/jobs/hand-fim?output_prefix=orphan", PAYLOAD),
-                ("/jobs", {"payload": PAYLOAD, **DESTINATION, "output_bucket": ""}),
+                ("/jobs/hand-fim?output_bucket=&output_prefix=", PAYLOAD),
             ):
                 self.assertEqual(self.client.post(route, json=body).status_code, 422)
             enqueue.assert_not_called()
 
     def test_local_submission_skips_s3_credentials(self):
         with patch.object(tasks.hand_fim, "apply_async") as enqueue:
-            for route, body in (("/jobs", {"payload": PAYLOAD}), ("/jobs/hand-fim", PAYLOAD)):
-                response = self.client.post(route, json=body)
-                self.assertEqual(response.status_code, 202, response.text)
-                self.assertEqual(enqueue.call_args.kwargs["args"][2:], [None, "", None])
+            response = self.client.post("/jobs/hand-fim", json=PAYLOAD)
+            self.assertEqual(response.status_code, 202, response.text)
+            self.assertEqual(enqueue.call_args.kwargs["args"][2:], [None, "", None])
         self.create_job_credentials.assert_not_called()
 
-    def test_max_procs_is_validated_and_queued_for_both_request_shapes(self):
+    def test_max_procs_is_validated_and_queued(self):
         with patch.object(tasks.hand_fim, "apply_async") as enqueue:
-            for route, body in (
-                ("/jobs/hand-fim?max_procs=3", PAYLOAD),
-                ("/jobs", {"payload": PAYLOAD, "max_procs": 3}),
-            ):
-                response = self.client.post(route, json=body)
-                self.assertEqual(response.status_code, 202, response.text)
-                self.assertEqual(enqueue.call_args.kwargs["args"][-1], 3)
+            response = self.client.post("/jobs/hand-fim?max_procs=3", json=PAYLOAD)
+            self.assertEqual(response.status_code, 202, response.text)
+            self.assertEqual(enqueue.call_args.kwargs["args"][-1], 3)
             enqueue.reset_mock()
             for value in (0, -1, "invalid", 1.5):
-                for route, body in (
-                    (f"/jobs/hand-fim?max_procs={value}", PAYLOAD),
-                    ("/jobs", {"payload": PAYLOAD, "max_procs": value}),
-                ):
-                    self.assertEqual(self.client.post(route, json=body).status_code, 422)
+                self.assertEqual(
+                    self.client.post(f"/jobs/hand-fim?max_procs={value}", json=PAYLOAD).status_code,
+                    422,
+                )
             enqueue.assert_not_called()
-
-    def test_local_file_urls_content_missing_files_and_traversal(self):
-        job_id = str(uuid4())
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            output = root / "scenarios" / job_id
-            output.mkdir(parents=True)
-            filename = f"{job_id}-0.cog"
-            (output / filename).write_bytes(b"local-raster")
-            result = {
-                "outputs": [{"ScenarioID": "test", "geotiff_url": f"/jobs/{job_id}/outputs/0.tif"}],
-                "files": [{"path": filename, "size_bytes": 12, "download_url": f"/jobs/{job_id}/files/0"}],
-            }
-            with patch.object(main.settings, "hand_fim_output_dir", root), patch.object(
-                main.celery_app, "AsyncResult", return_value=Mock(state="SUCCESS", result=result),
-            ), patch.object(main, "presign_output") as sign:
-                for route in (f"/jobs/{job_id}/files/0", f"/jobs/{job_id}/outputs/0.tif"):
-                    self.assertEqual(self.client.get(route).json(), {
-                        "url": f"/jobs/{job_id}/files/0/content", "expires_in": 0,
-                    })
-                route = f"/jobs/{job_id}/files/0/content"
-                self.assertEqual(self.client.get(route).content, b"local-raster")
-                (output / filename).unlink()
-                self.assertEqual(self.client.get(route).status_code, 404)
-                result["files"][0]["path"] = "../../outside"
-                (root / "outside").write_bytes(b"secret")
-                self.assertEqual(self.client.get(route).status_code, 404)
-                result["files"][0]["path"] = filename
-                (output / filename).symlink_to(root / "outside")
-                self.assertEqual(self.client.get(route).status_code, 404)
-                sign.assert_not_called()
-
-    def test_file_manifest_and_scenario_download_use_preserved_keys(self):
-        job_id = str(uuid4())
-        key = f"data/output/{job_id}/{job_id}-0.cog"
-        result = {
-            **DESTINATION,
-            "outputs": [{"ScenarioID": "test", "geotiff_url": f"/jobs/{job_id}/outputs/0.tif"}],
-            "files": [{
-                "path": f"{job_id}-0.cog", "key": key, "size_bytes": 10,
-                "download_url": f"/jobs/{job_id}/files/0",
-            }],
-        }
-        with patch.object(main.celery_app, "AsyncResult", return_value=Mock(state="SUCCESS", result=result)), patch.object(
-            main, "presign_output", return_value=("https://signed.example", 60),
-        ) as sign:
-            for route in (f"/jobs/{job_id}/files/0", f"/jobs/{job_id}/outputs/0.tif"):
-                self.assertEqual(self.client.get(route).json(), {"url": "https://signed.example", "expires_in": 60})
-                sign.assert_called_with(UUID(job_id), "fim-output", key)
-            self.assertEqual(self.client.get(f"/jobs/{job_id}/files/-1").status_code, 404)
-            self.assertEqual(self.client.get(f"/jobs/{job_id}/files/1").status_code, 404)
 
     def test_failure_status_and_cancellation(self):
         job_id = str(uuid4())
@@ -331,6 +258,16 @@ class ApiTests(unittest.TestCase):
 
     def test_openapi_uses_scenario_array(self):
         schema = self.client.get("/openapi.json").json()
+        self.assertEqual(set(schema["paths"]["/jobs"]), {"get"})
+        self.assertNotIn("JobRequest", schema["components"]["schemas"])
+        self.assertNotIn("/jobs/{job_id}/outputs/{index}.tif", schema["paths"])
+        self.assertNotIn("/jobs/{job_id}/files/{index}", schema["paths"])
+        self.assertNotIn("/jobs/{job_id}/files/{index}/content", schema["paths"])
+        self.assertEqual(
+            set(schema["components"]["schemas"]["HandFimOutput"]["properties"]),
+            {"ScenarioID"},
+        )
+        self.assertNotIn("download_url", schema["components"]["schemas"]["OutputFile"]["properties"])
         parameters = schema["components"]["schemas"]["HandFimParameters"]
         self.assertEqual(parameters["type"], "array")
         self.assertEqual(parameters["minItems"], 1)
@@ -372,7 +309,7 @@ class WorkerTests(unittest.TestCase):
         with patch.object(tasks.subprocess, "run", side_effect=self.__write_output) as run:
             result = tasks.hand_fim.run(self.job_id, payload, **DESTINATION)
         self.assertEqual(result["outputs"][0]["ScenarioID"], "../../unsafe*[id]")
-        self.assertEqual(result["outputs"][0]["geotiff_url"], f"/jobs/{self.job_id}/outputs/0.tif")
+        self.assertEqual(result["outputs"], [{"ScenarioID": "../../unsafe*[id]"}])
         self.assertEqual(result["output_bucket"], "fim-output")
         self.assertEqual(result["output_prefix"], "data/output")
         self.storage_client.upload_file.assert_called_once_with(
@@ -406,9 +343,9 @@ class WorkerTests(unittest.TestCase):
             {f"{self.job_id}-0.cog", f"{self.job_id}-0.tif", "logs/run.txt"},
         )
         self.assertEqual(self.storage_client.upload_file.call_count, 3)
-        for index, file in enumerate(result["files"]):
+        for file in result["files"]:
             self.assertEqual(file["key"], f"data/output/{self.job_id}/{file['path']}")
-            self.assertEqual(file["download_url"], f"/jobs/{self.job_id}/files/{index}")
+            self.assertNotIn("download_url", file)
         self.assertFalse((output_dir / "stale.txt").exists())
         self.assertTrue((shared / "cache.csv").exists())
 
@@ -484,13 +421,10 @@ class StorageTests(unittest.TestCase):
         self.job_credentials = patcher.start()
         self.addCleanup(patcher.stop)
 
-    def test_prefix_and_root_keys(self):
+    def test_job_specific_output_file_keys(self):
         from uuid import UUID
 
         job_id = UUID("00000000-0000-0000-0000-000000000001")
-        for prefix in ("data/output", "/data/output/"):
-            self.assertEqual(storage.output_key(prefix, job_id, 0), f"data/output/{job_id}/0.tif")
-        self.assertEqual(storage.output_key("", job_id, 0), f"{job_id}/0.tif")
         self.assertEqual(
             storage.output_file_key("/data/output/", job_id, "logs/run.txt"),
             f"data/output/{job_id}/logs/run.txt",
@@ -510,36 +444,6 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(kwargs["aws_access_key_id"], "user:test-access")
         self.assertEqual(kwargs["aws_secret_access_key"], "test-secret")
         self.assertEqual(kwargs["aws_session_token"], "")
-
-    def test_real_sdk_signs_expected_object_without_network(self):
-        client = boto3.client(
-            "s3", region_name="us-east-1", endpoint_url="https://objects.example",
-            aws_access_key_id="test-access-key", aws_secret_access_key="test-secret-key",
-            config=storage.Config(signature_version="s3v4", s3={"addressing_style": "path"}),
-        )
-        with Stubber(client) as stubber, patch.object(storage, "s3_client", return_value=client):
-            stubber.add_response("head_object", {}, {"Bucket": "fim-output", "Key": "data/output/job/0.tif"})
-            url, expires_in = storage.presign_output(uuid4(), "fim-output", "data/output/job/0.tif")
-            self.assertEqual(expires_in, 3600)
-            stubber.assert_no_pending_responses()
-        parsed = urlparse(url)
-        self.assertEqual(parsed.path, "/fim-output/data/output/job/0.tif")
-        query = parse_qs(parsed.query)
-        self.assertEqual(query["X-Amz-Algorithm"], ["AWS4-HMAC-SHA256"])
-        self.assertEqual(query["X-Amz-Expires"], ["3600"])
-        self.assertTrue(query["X-Amz-Signature"][0])
-
-    def test_presign_lifetime_is_capped_by_credentials(self):
-        self.job_credentials.return_value = credentials_fixture()
-        self.job_credentials.side_effect = None
-        self.job_credentials.return_value.expiry = datetime.now(timezone.utc) + timedelta(seconds=120)
-        client = Mock()
-        client.generate_presigned_url.return_value = "https://signed.example"
-        with patch.object(storage, "s3_client", return_value=client):
-            _, expires_in = storage.presign_output(uuid4(), "bucket", "key")
-        self.assertGreater(expires_in, 0)
-        self.assertLessEqual(expires_in, 120)
-        self.assertEqual(client.generate_presigned_url.call_args.kwargs["ExpiresIn"], expires_in)
 
     def test_multibyte_prefix_does_not_exceed_object_key_limit(self):
         with self.assertRaises(ValidationError):

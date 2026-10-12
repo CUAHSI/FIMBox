@@ -27,9 +27,9 @@ making structural changes to the project, so future sessions can rely on it.
   curve interpolation), and `patches/` (files that intentionally override
   upstream `fimserve` modules — see "External dependencies" below).
 - `test-data/` — Sample input data for manual testing.
-- `data/input/`, `data/output/` — Default runtime bind mounts for the API
-  Compose stack; configurable through FIMBOX_INPUT_DIR/FIMBOX_OUTPUT_DIR.
-  Output files live under scenarios/<job_id>/ and are shared read-only with API.
+- `data/input/`, `data/output/` — Default runtime bind mounts for the worker
+  Compose service; configurable through FIMBOX_INPUT_DIR/FIMBOX_OUTPUT_DIR.
+  Output files live under scenarios/<job_id>/; the API returns metadata only.
 - `pixi.toml` / `pixi.lock` / `.pixi/` — Pixi-managed Python environment
   (Python 3.14). Use `pixi install` to set up, `pixi run fimbox` to execute.
   Don't hand-edit `pixi.lock`.

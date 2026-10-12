@@ -6,7 +6,7 @@ import unittest
 from http import HTTPStatus
 from pathlib import Path
 from unittest.mock import patch
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import httpx
 import click
@@ -17,8 +17,8 @@ from pydantic import SecretStr
 import fimbox_cli
 from fimbox_api import auth, main, tasks
 from fimbox_sdk import AuthenticatedClient, Client
-from fimbox_sdk.api.default import get_job_file_jobs_job_id_files_index_get, submit_hand_fim_jobs_hand_fim_post
-from fimbox_sdk.models import JobSubmitted, PresignedOutput, Reach, Scenario
+from fimbox_sdk.api.default import submit_hand_fim_jobs_hand_fim_post
+from fimbox_sdk.models import JobSubmitted, Reach, Scenario
 
 PAYLOAD = [{
     "ScenarioID": "test",
@@ -71,7 +71,11 @@ class SdkCliTests(unittest.TestCase):
         result = self.invoke("--help")
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("submit", result.output)
-        self.assertIn("output", result.output)
+        self.assertNotIn("submit-envelope", result.output)
+        self.assertNotIn("scenario-output", result.output)
+        result = self.invoke("submit-envelope", "--help")
+        self.assertEqual(result.exit_code, 2)
+        self.assertIn("No such command", result.output)
         result = self.invoke("submit", "--help")
         self.assertIn("--output-bucket", result.output)
         self.assertIn("--body", result.output)
@@ -102,21 +106,6 @@ class SdkCliTests(unittest.TestCase):
         self.assertIsInstance(response.parsed, JobSubmitted)
         self.assertEqual(response.parsed.job_id, self.job_id)
         self.assertEqual(self.requests[0].headers["Authorization"], "Bearer sdk-session")
-        self.response = httpx.Response(200, json={"url": "https://s3.test/signed", "expires_in": 60})
-        with AuthenticatedClient(base_url="http://localhost:8000", token="sdk-session") as client:
-            output = get_job_file_jobs_job_id_files_index_get.sync(
-                UUID(self.job_id), 0, client=client,
-            )
-        self.assertIsInstance(output, PresignedOutput)
-        self.assertEqual(output.expires_in, 60)
-
-    def test_envelope_submission(self):
-        envelope = {"payload": PAYLOAD, "output_bucket": "bucket", "output_prefix": ""}
-        self.body.write_text(json.dumps(envelope))
-        result = self.invoke("submit-envelope", "--body", str(self.body))
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(self.requests[-1].url.path, "/jobs")
-        self.assertEqual(json.loads(self.requests[-1].content), envelope)
 
     def test_invalid_input_is_not_silently_discarded_or_submitted(self):
         for payload in ([], {}, [{**PAYLOAD[0], "extra": "not allowed"}], [{"ScenarioID": "missing"}]):
@@ -140,11 +129,8 @@ class SdkCliTests(unittest.TestCase):
         self.assertNotIn("output_bucket", self.requests[-1].url.params)
         result = self.invoke("submit", "--body", str(self.body), "--output-prefix", "orphan")
         self.assertEqual(result.exit_code, 1)
-        self.body.write_text(json.dumps({"payload": PAYLOAD}))
-        result = self.invoke("submit-envelope", "--body", str(self.body))
-        self.assertEqual(result.exit_code, 0, result.output)
 
-    def test_max_procs_cli_and_envelope_use_generated_schema(self):
+    def test_max_procs_cli_uses_generated_schema(self):
         result = self.invoke("submit", "--body", str(self.body), "--max-procs", "4")
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(self.requests[-1].url.params["max_procs"], "4")
@@ -153,21 +139,6 @@ class SdkCliTests(unittest.TestCase):
             result = self.invoke("submit", "--body", str(self.body), "--max-procs", value)
             self.assertEqual(result.exit_code, 2)
         self.assertEqual(len(self.requests), 1)
-        self.body.write_text(json.dumps({"payload": PAYLOAD, "max_procs": 3}))
-        result = self.invoke("submit-envelope", "--body", str(self.body))
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(json.loads(self.requests[-1].content)["max_procs"], 3)
-
-    def test_path_commands_and_presigned_url(self):
-        self.response = httpx.Response(200, json={"url": "https://s3.test/signed", "expires_in": 60})
-        result = self.invoke("output", "--job-id", self.job_id, "--index", "2")
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(self.requests[-1].url.path, f"/jobs/{self.job_id}/files/2")
-        self.assertEqual(json.loads(result.output)["expires_in"], 60)
-        result = self.invoke("scenario-output", "--job-id", self.job_id, "--index", "0")
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(self.requests[-1].url.path, f"/jobs/{self.job_id}/outputs/0.tif")
-        self.assertEqual(len(self.requests), 2, "CLI does not download or forward tokens to S3")
 
     def test_jobs_status_cancel_session_logout_and_health(self):
         responses = [
@@ -316,11 +287,11 @@ class SdkCliTests(unittest.TestCase):
 
     def test_validation_error_and_unexpected_contract(self):
         self.response = httpx.Response(422, json={"detail": [{"loc": ["body"], "msg": "Invalid", "type": "value_error"}]})
-        result = self.invoke("output", "--job-id", self.job_id, "--index", "0")
+        result = self.invoke("jobs")
         self.assertEqual(result.exit_code, 1)
         self.assertIn("HTTP 422", result.output)
-        self.response = httpx.Response(200, json={"not": "a presigned output"})
-        result = self.invoke("output", "--job-id", self.job_id, "--index", "0")
+        self.response = httpx.Response(200, json={"not": "a job list"})
+        result = self.invoke("jobs")
         self.assertEqual(result.exit_code, 1)
         self.assertIn("SDK contract", result.output)
 
@@ -329,7 +300,7 @@ class SdkCliTests(unittest.TestCase):
             result = self.invoke("health")
         self.assertEqual(result.exit_code, 1)
         self.assertIn("Cannot reach the API", result.output)
-        result = self.invoke("output", "--job-id", "invalid", "--index", "-1")
+        result = self.invoke("status", "--job-id", "invalid")
         self.assertEqual(result.exit_code, 2)
         result = self.invoke("--api-url", "http://user:password@localhost", "health")
         self.assertEqual(result.exit_code, 1)

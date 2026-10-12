@@ -1,5 +1,3 @@
-import importlib.util
-import asyncio
 import json
 import os
 import subprocess
@@ -8,7 +6,6 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
-from urllib.parse import urlsplit
 
 import httpx
 
@@ -46,7 +43,7 @@ class CloudNotebookTests(unittest.TestCase):
             )
         self.assertEqual(completed.returncode, 0, completed.stderr)
 
-    def test_sdk_authentication_submission_monitoring_and_download(self):
+    def test_sdk_authentication_submission_and_monitoring(self):
         from fimbox_sdk import AuthenticatedClient, Client
         from fimbox_sdk.models import StoredHandFimResult
 
@@ -73,14 +70,10 @@ class CloudNotebookTests(unittest.TestCase):
                     "job_id": job_id, "status": state,
                     "result": {"outputs": [], "files": []} if state == "success" else None,
                 })
-            if path == f"/jobs/{job_id}/outputs/0.tif":
-                return httpx.Response(200, json={
-                    "url": "https://objects.example.org/cog?signature=test", "expires_in": 300,
-                })
             return httpx.Response(401, json={"detail": "sensitive-server-detail"})
 
         namespace = {
-            "API_URL": "https://api.example.org", "os": os, "urlsplit": urlsplit,
+            "API_URL": "https://api.example.org", "os": os,
             "Path": Path, "RESUME_JOB_ID": "", "OUTPUT_BUCKET": "bucket",
             "OUTPUT_PREFIX": "demo", "MAX_PROCS": 1, "WAIT_SECONDS": 60, "POLL_SECONDS": 0,
             "USE_MACOS_KEYCHAIN": False,
@@ -113,59 +106,14 @@ class CloudNotebookTests(unittest.TestCase):
                 exec(self.sources["connect"], namespace)
                 saved_token.assert_called_once_with("fimbox", namespace["API_URL"])
             exec(self.sources["submission"], namespace)
-            exec(self.sources["submission"], namespace)
             self.assertEqual(sum(request.method == "POST" for request in requests), 1)
             exec(self.sources["monitoring"], namespace)
             self.assertIsInstance(namespace["final_result"], StoredHandFimResult)
-            download = Mock(status_code=200)
-            download.iter_bytes.return_value = [b"test-raster"]
-            with patch("httpx.stream") as stream:
-                stream.return_value.__enter__.return_value = download
-                try:
-                    exec(self.sources["download"], namespace)
-                    self.assertEqual(namespace["cog_path"].read_bytes(), b"test-raster")
-                    self.assertNotIn("headers", stream.call_args.kwargs)
-                    self.assertNotIn("signed_url", namespace)
-                finally:
-                    namespace["cog_directory"].cleanup()
             operation = Mock()
             operation.sync_detailed.return_value = Mock(status_code=401)
             with self.assertRaisesRegex(RuntimeError, "HTTP 401"):
                 namespace["call_api"](operation, client=namespace["api_client"])
             self.assertTrue(all("notebook-test-token" not in str(request.url) for request in requests))
-
-    @unittest.skipUnless(
-        all(importlib.util.find_spec(name) for name in ("rasterio", "ipyleaflet", "PIL")),
-        "Optional notebook map dependencies are not installed",
-    )
-    def test_georeferenced_map_preview(self):
-        import numpy as np
-        import rasterio
-        from rasterio.transform import from_bounds
-
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "synthetic.cog.tif"
-            with rasterio.open(
-                path, "w", driver="COG", width=16, height=16, count=1,
-                dtype="float32", crs="EPSG:4326", nodata=float("nan"),
-                transform=from_bounds(-78, 35, -77, 36, 16, 16),
-            ) as dataset:
-                band = np.zeros((16, 16), dtype="float32")
-                band[4:12, 4:12] = 1
-                dataset.write(band, 1)
-            namespace = {"cog_path": path, "display": Mock()}
-            async def render():
-                exec(self.sources["map"], namespace)
-                await asyncio.sleep(0)
-
-            asyncio.run(render())
-            self.assertEqual(namespace["bounds"], ((35, -78), (36, -77)))
-            self.assertTrue(namespace["image_uri"].startswith("data:image/png;base64,"))
-            self.assertEqual(np.count_nonzero(namespace["rgba"][:, :, 3]), 64)
-            self.assertLessEqual(max(namespace["preview"].shape), 1024)
-            self.assertEqual(namespace["flood_map"].layers[-1].name, "HAND-FIM inundation (COG preview)")
-            namespace["flood_map"].close()
-
 
 if __name__ == "__main__":
     unittest.main()

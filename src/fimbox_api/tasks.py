@@ -86,7 +86,6 @@ def hand_fim(
             outputs.append(
                 HandFimOutput(
                     ScenarioID=scenario.ScenarioID,
-                    geotiff_url=f"/jobs/{job_id}/outputs/{index}.tif",
                 )
             )
         files = []
@@ -108,7 +107,6 @@ def hand_fim(
                 )
             files.append(OutputFile(
                 path=relative_path, key=key, size_bytes=path.stat().st_size,
-                download_url=f"/jobs/{job_id}/files/{len(files)}",
             ))
         logger.info("Completed HAND-FIM job %s", job_id)
         return StoredHandFimResult(

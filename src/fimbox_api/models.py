@@ -51,12 +51,6 @@ class HandFimJobOptions(OutputDestination):
     )
 
 
-class JobRequest(HandFimJobOptions):
-    payload: HandFimParameters
-
-    model_config = {"extra": "forbid"}
-
-
 class JobSubmitted(BaseModel):
     job_id: str
     status: str
@@ -71,7 +65,6 @@ class OutputFile(BaseModel):
     path: str
     key: str | None = None
     size_bytes: int
-    download_url: str
 
 
 class StoredHandFimResult(HandFimResult, OutputDestination):
@@ -79,11 +72,6 @@ class StoredHandFimResult(HandFimResult, OutputDestination):
 
     files: list[OutputFile] = Field(default_factory=list)
     local_output_dir: str | None = None
-
-
-class PresignedOutput(BaseModel):
-    url: str
-    expires_in: int
 
 
 class JobSummary(BaseModel):

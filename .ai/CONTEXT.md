@@ -16,10 +16,10 @@ actual FIM computation using NOAA/OWP's `inundation-mapping` tooling and the
 
 - **`src/fimbox_cli.py`** — Handwritten Click CLI using generated SDK operation
   modules/models, not runtime OpenAPI parsing or handwritten HTTP routes.
-  Commands: submit, submit-envelope, jobs, status, output, scenario-output,
-  cancel, session, logout, health. `--body` reads JSON.
-  `submit --max-procs N` selects per-job concurrency; the envelope accepts
-  max_procs too. Omission uses HAND_FIM_MAX_PROCS (worker default 1).
+  Commands: submit, jobs, status, cancel, session, logout, health. `--body`
+  reads a scenario JSON array.
+  `submit --max-procs N` selects per-job concurrency. Omission uses
+  HAND_FIM_MAX_PROCS (worker default 1).
   `fimbox`/`pixi run fimbox` are the installed console entry points.
   Defaults to `http://localhost:8000`.
   Discovers `/auth/config` via the SDK; local mode uses Client without a token,
@@ -58,16 +58,12 @@ actual FIM computation using NOAA/OWP's `inundation-mapping` tooling and the
   separate Connect cell (no blocking getpass), typed direct submission
   with opt-in USE_MACOS_KEYCHAIN for clipboard/widget issues (native Keychain,
   no plaintext backend; URL matches CLI credential account),
-  using AuthenticatedClient (no CLI subprocess), bounded polling/resume, fresh presigned S3
-  download without bearer forwarding, and rasterio/ipyleaflet COG map preview.
-  Optional rasterio/Pillow/ipyleaflet dependencies are notebook-only.
+  using AuthenticatedClient (no CLI subprocess) and bounded polling/resume.
   Setup reprocesses the kernel's site-package .pth files after editable install
   so SDK imports work without a kernel restart.
-  Displays a WGS84 image overlay up to 1024px, not a full-resolution tile service.
   No saved outputs or live cloud execution during validation.
-- **`tests/test_cloud_notebook.py`** — Cell syntax/editable-import checks, mocked
-  SDK/auth/download workflow, and synthetic COG map test (skips when optional
-  map dependencies are unavailable).
+- **`tests/test_cloud_notebook.py`** — Cell syntax/editable-import checks and
+  mocked SDK/auth/submission/monitoring workflow.
 
 ## Schema (`src/schemas/`)
 
@@ -78,8 +74,8 @@ actual FIM computation using NOAA/OWP's `inundation-mapping` tooling and the
   - `Scenario`: a named (`ScenarioID`) group of `Reach` entries that together
     produce one output GeoTIFF.
   - `ScenarioList`: top-level input payload — a list of `Scenario` objects.
-  - `HandFimOutput` / `HandFimResult`: output payload mapping each `ScenarioID`
-    to a `geotiff_url`.
+  - `HandFimOutput` / `HandFimResult`: output metadata mapping each scenario
+    to its `ScenarioID`.
   All models use `extra = "forbid"` for strict validation.
   Swagger reach examples use the sample HUC/reach pair `03020201` / `8780625`,
   not the former placeholder HUC `12345678`.
@@ -106,53 +102,46 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
   authentication. Partial credentials fail startup, with input values hidden.
   REQUIRE_HYDROSHARE_OUTPUT defaults false locally; Terraform sets it true for
   the API, which fails startup without OAuth credentials and rejects missing
-  output_bucket at either submission route before enqueueing.
+  output_bucket at the submission route before enqueueing.
 - **`src/fimbox_api/celery_app.py`** — JSON-only Celery configuration and
   task discovery, started-state tracking, late acknowledgement, and a
   single-process worker.
 - **`src/fimbox_api/models.py`** — Job response models and request models
   reusing `src/schemas/hand_fim_schema.py`. Adds API-specific unique
   scenario ID, HUC-8, finite streamflow validation, per-job output bucket/prefix,
-  stored destination metadata, and presigned-URL responses.
+  and stored destination metadata.
   Bucket is optional (local default); prefix defaults empty and requires a
   bucket when nonempty. Result includes local_output_dir; local file keys are null.
-  HandFimJobOptions extends output options with optional positive max_procs;
-  JobRequest uses it for envelope submissions, and the direct route for query
-  parameters. Worker revalidates it before execution.
-- **`src/fimbox_api/main.py`** — FastAPI app: `POST /jobs` accepts the
-  template's typed `payload` envelope; `POST /jobs/hand-fim` accepts the
-  scenario array directly with destination query parameters. All job routes
+  HandFimJobOptions extends output options with optional positive max_procs,
+  used as query parameters by the submission route. Worker revalidates it
+  before execution.
+- **`src/fimbox_api/main.py`** — FastAPI app: `POST /jobs/hand-fim` accepts
+  the scenario array with destination query parameters. All job routes
   enforce ownership via a session when configured, or a reserved shared local
   identity without credentials. OpenAPI documents both alternatives consistently
   across modes. Also provides user job listing,
   with JobList/JobSummary objects containing job_id/status (not plain ID
   strings), sharing status normalization with individual job polling,
-  polling, fresh S3 presigned URL responses or authenticated local content URLs,
   queued-job cancellation, public health, and explicit storage/queue errors.
-  Local `/jobs/<uuid>/files/<index>/content` streams files from the read-only
-  shared output mount with ownership and traversal/symlink checks.
 - **`src/fimbox_api/tasks.py`** — Real HAND-FIM Celery task. Revalidates input,
   substitutes safe job-specific internal scenario names, writes the scenario
   JSON, invokes the existing container `scenario` CLI in a subprocess, verifies
   every COG exists, recursively uploads all files from the job-specific
   `/home/output/scenarios/<job_id>/` directory with unchanged relative filenames
-  under `<prefix>/<job_id>/`, and returns a file manifest plus scenario URLs.
+  under `<prefix>/<job_id>/`, and returns a file manifest plus scenario IDs.
   Shared watershed caches and other jobs are excluded. Redelivery clears
-  local job files first. `/jobs/<job_id>/files/<index>` signs any manifest file;
-  scenario endpoints sign the preserved COG key, with legacy-key compatibility
-  for old results without manifests.
+  local job files first.
   Without a bucket, leaves files on the Compose output bind mount, skips
   credential generation/S3 entirely, and returns local output metadata.
   Compose preserves the existing FIMBOX_OUTPUT_DIR bind configuration
-  (default ./data/output relative to the repository root); API mounts the same path read-only.
-- **`src/fimbox_api/storage.py`** — Shared S3 client configuration, safe
-  job-specific object-key construction, object existence checks, and SigV4
-  presigned GET URLs using job-specific temporary credentials. Submissions
+  (default ./data/output relative to the repository root); only the worker mounts it.
+- **`src/fimbox_api/storage.py`** — Shared S3 client configuration and safe
+  job-specific object-key construction using job-specific temporary credentials. Submissions
   exchange the user's HydroShare access token through
   `/hsapi/user/service/accounts/s3/` (`{"expiry": <days>}`), store the returned
-  access/secret/expiry only in Redis, and use them for uploads and signing at
-  `https://s3.hydroshare.org`. No static AWS credential fallback. Signed-URL
-  lifetime is capped by credential expiry. Credential failure prevents enqueue.
+  access/secret/expiry only in Redis, and use them for uploads at
+  `https://s3.hydroshare.org`. No static AWS credential fallback. Credential
+  failure prevents enqueue.
 - **`src/fimbox_api/auth.py`** — HydroShare authorization-code exchange,
   verified user-info identity, Redis-backed opaque sessions with expiry,
   single-use browser-bound OAuth state, and per-user job ownership/tracking.
@@ -167,7 +156,7 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
   Public `/auth/config` advertises authentication_enabled; logout in anonymous
   mode returns 409. HydroShare S3 submissions require configured authentication.
 - **`tests/test_fimbox_api.py`** — Focused `unittest` coverage for API
-  validation/queueing, status/downloads, cancellation, worker command
+  validation/queueing, status, removed output routes, cancellation, worker command
   construction, identifier isolation, missing/stale outputs, and failures.
   The FIM computation subprocess is mocked; these tests do not download data.
 - **`tests/test_fimbox_auth.py`** — OAuth/state/replay, provider failure,

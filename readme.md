@@ -16,12 +16,12 @@ fimbox status --job-id JOB_ID
 ```
 
 No `.env`, OAuth credentials, session token, or keychain setup is needed.
-The worker writes output under `data/output/scenarios/<job_id>/`, shared
-read-only with the API. The initial image build and watershed downloads
-require network access.
+The worker writes output under `data/output/scenarios/<job_id>/`; the API
+returns output metadata but does not mount or serve these files. The initial
+image build and watershed downloads require network access.
 
 With neither OAuth client ID nor secret configured, the server uses a shared
-local identity. Anyone who can reach it can submit, view, download, or cancel
+local identity. Anyone who can reach it can submit, view, or cancel
 local jobs. Compose binds the API to loopback; keep this mode limited to trusted,
 single-user local use. Local jobs remain separate from authenticated users'
 jobs if authentication is enabled later.
@@ -199,8 +199,9 @@ fimbox submit --body test-data/single_reach.json \
 
 Authentication discovery must return `{"authentication_enabled":true}`.
 The CLI links to browser login and saves the resulting FIMBox session token.
-Outputs are uploaded to the supplied HydroShare bucket and prefix; download
-endpoints return presigned URLs. There is no shared local-output mount in Cloud Run.
+Outputs are uploaded to the supplied HydroShare bucket and prefix; the API
+does not provide artifact download endpoints. There is no shared local-output
+mount in Cloud Run.
 
 ### Capacity and lifecycle
 
@@ -405,8 +406,7 @@ credentials, or upload is required. Session authentication and per-user
 ownership apply when OAuth is configured; otherwise jobs use the shared local identity.
 
 Compose uses `FIMBOX_OUTPUT_DIR` (default `./data/output`, resolved relative to
-the root `docker-compose.yml`) as the host bind mount.
-The API mounts the same directory read-only for downloads in either mode.
+the root `docker-compose.yml`) as the worker's host bind mount.
 Set an absolute `FIMBOX_OUTPUT_DIR` to select a different host directory.
 No output path from a job request is used to select an arbitrary filesystem
 location. Job files stay isolated beneath `scenarios/<job_id>/`.
@@ -445,15 +445,15 @@ for the request/response contract.
 Temporary credentials are stored under a job-specific Redis key and fetched
 by the worker at upload time. Neither provider tokens nor S3 credentials are
 sent in Celery task arguments, returned in job results, or written to local
-files. API downloads use the same job credentials. There is **no fallback**
+files. There is **no fallback**
 to static AWS environment credentials or a privileged service account.
 Credential issuance failure returns HTTP 503 without queueing the job.
 
 For S3 output, the caller supplies `output_bucket` and optionally `output_prefix`. The bucket
 and destination HydroShare resource must already exist. Supply the resource's
-S3 bucket and writable prefix, not an arbitrary new bucket. The submitting
-HydroShare user must have write access there; `HeadObject`/`GetObject` are
-also needed for URL issuance/downloads. Output paths append
+S3 bucket and writable prefix, not an arbitrary new bucket. The submitting HydroShare user must have write access there. Retrieve objects
+directly from S3 using the reported keys and your HydroShare permissions.
+Output paths append
 `<job_id>/<relative-file-path>` to your prefix. Job ownership checks do not bypass
 HydroShare resource permissions.
 
@@ -468,24 +468,7 @@ curl --fail -X POST \
   --data-binary @test-data/single_reach.json
 ```
 
-Alternatively, authenticated `POST /jobs` accepts a JSON envelope:
-
-```json
-{
-  "output_bucket": "fim-output",
-  "output_prefix": "data/output",
-  "payload": [
-    {
-      "ScenarioID": "single-reach-scenario",
-      "Reaches": [
-        {"HUC": "03020201", "ReachID": "8780625", "Streamflow": 227}
-      ]
-    }
-  ]
-}
-```
-
-Both routes use the shared Pydantic scenario schema from
+The route uses the shared Pydantic scenario schema from
 [`src/schemas/hand_fim_schema.py`](src/schemas/hand_fim_schema.py). API requests
 also require unique scenario identifiers, eight-digit HUCs, and finite
 nonnegative flows. Invalid requests return HTTP 422 without enqueueing work;
@@ -520,9 +503,9 @@ The `jobs` array now contains objects instead of plain ID strings. Status
 names match the individual job endpoint; the list excludes results and errors.
 Poll
 `GET /jobs/<uuid>` for `queued`, `started`, `success`, `failure`, or
-`revoked`. Only the submitting user can poll, cancel, or obtain output URLs
-(HTTP 403 otherwise). On success, `result` extends the shared `HandFimResult`
-schema with the persisted output destination:
+`revoked`. Only the submitting user can poll or cancel (HTTP 403 otherwise).
+On success, `result` extends the shared `HandFimResult` schema with the
+persisted output destination:
 
 ```json
 {
@@ -530,8 +513,7 @@ schema with the persisted output destination:
   "output_prefix": "data/output",
   "outputs": [
     {
-      "ScenarioID": "single-reach-scenario",
-      "geotiff_url": "/jobs/<uuid>/outputs/0.tif"
+      "ScenarioID": "single-reach-scenario"
     }
   ]
 }
@@ -549,48 +531,15 @@ before the job can succeed. Original scenario IDs remain metadata.
 Failed computation, missing output, or an upload failure fails the job.
 
 Successful results include a `files` manifest alongside `outputs`, with each
-file's relative `path`, S3 `key`, `size_bytes`, and `download_url`
-(`/jobs/<job_id>/files/<index>`). Request that URL with your session token
-for a presigned URL to an uploaded file, or a local authenticated download URL.
-Scenario `geotiff_url` endpoints also work in both modes.
-Existing successful results without a manifest retain their legacy
-`<index>.tif` download behavior.
-
-For local jobs, file/scenario endpoints return:
-
-```json
-{"url": "/jobs/<uuid>/files/0/content", "expires_in": 0}
-```
-
-`expires_in: 0` means this is not a presigned URL. Resolve the URL against
-the API origin and send your FIMBox session token to download it.
-`GET /jobs/<uuid>/files/<index>/content` streams the file, checks ownership,
-and rejects traversal/symlinks. Missing local files return 404.
-Local downloads require the shared output mount and unexpired job metadata.
-The SDK provides `get_local_job_file_jobs_job_id_files_index_content_get`
-with a generated binary `File` response (buffered in memory).
-
-For S3 jobs, request the relative `geotiff_url` with your session token to
-obtain a fresh presigned GET URL as JSON:
-
-```json
-{"url": "https://<storage-endpoint>/<signed-object-url>", "expires_in": 3600}
-```
-
-Follow `url` to download the COG without sending your FIMBox session token to
-the storage service. Treat signed URLs as temporary credentials and do not
-share them. `S3_PRESIGNED_URL_SECONDS` controls validity (default 3600,
-maximum 604800 seconds); the actual returned lifetime is capped by the
-remaining HydroShare S3 credential lifetime.
-Deleted objects return HTTP 404 and signing/storage failures return HTTP 503.
-The API shares the worker's local output bind mount read-only.
+file's relative `path`, S3 `key` when uploaded, and `size_bytes`. The API
+provides job status and metadata only; retrieve artifacts from the configured
+output storage using the reported key or the shared local output directory.
 
 Credentials expire in Redis at the earlier of their provider expiry and
 `RESULT_TTL_SECONDS` after submission. Choose a credential lifetime covering
-queue wait, computation, and the desired download window. A missing/expired
-credential fails worker uploads and returns HTTP 503 for new signed URLs;
+queue wait and computation. A missing/expired credential fails worker uploads;
 there is no automatic refresh. Logout revokes the FIMBox session but does not
-revoke credentials for already-submitted jobs or existing signed URLs.
+revoke credentials for already-submitted jobs.
 The remote service account expires at its requested lifetime; deleting a
 local Redis key on enqueue failure does not delete the remote account.
 
@@ -603,8 +552,7 @@ cannot be interrupted by this single-process Celery worker and return HTTP 409.
 - `FIMBOX_API_PORT` controls the Compose host port (default `8000`).
 - `HAND_FIM_MAX_PROCS` controls parallel FIM computations inside the worker
   (default `1`, must be positive). A job's `max_procs` overrides it: supply
-  `?max_procs=N` on `POST /jobs/hand-fim` or `"max_procs": N` in the
-  `POST /jobs` envelope. Values must be integers greater than zero; omission
+  `?max_procs=N` on `POST /jobs/hand-fim`. Values must be integers greater than zero; omission
   uses the worker setting.
 - `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND`, and
   `CELERY_TASK_DEFAULT_QUEUE` configure the queue for non-Compose deployments.
@@ -613,11 +561,11 @@ cannot be interrupted by this single-process Celery worker and return HTTP 409.
   from redelivering active work. These settings must agree on API and worker.
 - The input/output bind mounts retain watershed data and generated rasters.
   Deleting these host directories deletes datasets. Result metadata expires after its
-  TTL; URL issuance requires unexpired successful result metadata and ownership.
+  TTL; status access requires unexpired successful result metadata and ownership.
   Uploaded objects have independent storage retention.
 - Ownership and per-user job tracking expire `RESULT_TTL_SECONDS` after
   submission. Configure this longer than the maximum queue wait and job
-  duration plus your desired download window. Unknown, expired, and legacy
+  duration plus your desired job-monitoring window. Unknown, expired, and legacy
   unowned job IDs return HTTP 403. There is no durable job registry or
   automatic object cleanup.
 - Use one worker for these shared volumes: the existing FIM tooling shares
@@ -666,17 +614,14 @@ docker compose --env-file /dev/null run --rm --no-deps \
 ### Cloud job notebook
 
 Open [`notebooks/cloud_hand_fim.ipynb`](notebooks/cloud_hand_fim.ipynb) in
-Jupyter or VS Code with a Python kernel. It installs the client and optional
-map dependencies, accepts your cloud API URL and HydroShare bucket, prompts
+Jupyter or VS Code with a Python kernel. It installs the client, accepts your
+cloud API URL and HydroShare bucket, prompts
 for a FIMBox session token in a masked widget field, then validates it in a
 separate Connect cell. Pause to enter the token before continuing; do not use
 Run All on the first pass. It submits directly via the generated Python
-SDK (no CLI subprocess), polls job status,
-and downloads the completed scenario's COG using a fresh presigned URL.
+SDK (no CLI subprocess), and polls job status and output metadata.
 The setup cell refreshes editable-install paths in the running kernel so
 `fimbox_sdk` can be imported immediately after installation.
-An interactive ipyleaflet map displays a bounded, georeferenced raster preview;
-the downloaded COG retains its full resolution.
 
 Submission creates a real, billable cloud job. Use `RESUME_JOB_ID` to monitor
 an existing job after restarting the kernel rather than submitting again.
@@ -702,20 +647,19 @@ flowchart TB
     Discovery --> AuthClient["SDK AuthenticatedClient<br/>Configured server: FIMBox session token"]
     Login["Browser: API /auth/login<br/>HydroShare OAuth"] --> Token["FIMBox session token<br/>Option/env, saved OS keychain, or prompt"]
     Token --> AuthClient
-    Client --> HTTP["Generated SDK HTTP operations<br/>Submit, list, poll, cancel, output URLs"]
+    Client --> HTTP["Generated SDK HTTP operations<br/>Submit, list, poll, cancel"]
     AuthClient --> HTTP
 
     subgraph Local["Local Docker Compose"]
         LocalAPI["FastAPI API<br/>localhost:8000"]
         Redis["Redis<br/>Queue, results, ownership and sessions"]
         Worker["Celery HAND-FIM worker"]
-        Mount["Shared host data/output<br/>API reads files; worker writes files"]
+        Mount["Host data/output<br/>worker writes files"]
         LocalAPI -->|enqueue| Redis
         Redis -->|consume jobs| Worker
         Worker -->|status and result metadata| Redis
         Redis -->|status and result metadata| LocalAPI
         Worker --> Mount
-        Mount -->|download through API| LocalAPI
     end
 
     subgraph Cloud["Google Cloud: provisioned by Terraform"]
@@ -730,11 +674,10 @@ flowchart TB
         CloudWorker -->|status and result metadata| Memorystore
         Memorystore -->|status and result metadata| CloudAPI
         CloudWorker -->|upload artifacts| S3
-        CloudAPI -->|sign output URLs| S3
     end
 
-    HTTP <-->|HTTP JSON and file downloads| LocalAPI
-    HTTP <-->|HTTPS JSON and presigned URL responses| CloudAPI
+    HTTP <-->|HTTP JSON| LocalAPI
+    HTTP <-->|HTTPS JSON| CloudAPI
 ```
 
 The OpenAPI spec is used **during SDK generation**, not downloaded or
@@ -885,29 +828,22 @@ fimbox submit \
   --output-prefix data/output
 ```
 
-`fimbox submit-envelope --body request.json` accepts the `payload`,
-optional `output_bucket`, `output_prefix`, and `max_procs` envelope instead.
-For example: `{"payload": [...], "max_procs": 4}`. The CLI constructs generated
-SDK models, rejects missing or unknown fields rather than silently dropping
-them, and sends them through the generated endpoint. Pydantic validation
-remains server-side. Submission prints JSON containing `job_id` and does not
-wait for computation.
+The CLI constructs generated SDK models, rejects missing or unknown fields
+rather than silently dropping them, and sends them through the generated
+endpoint. Pydantic validation remains server-side. Submission prints JSON
+containing `job_id` and does not wait for computation.
 
 ```bash
 fimbox jobs
 fimbox status --job-id JOB_UUID
-fimbox output --job-id JOB_UUID --index 0
-fimbox scenario-output --job-id JOB_UUID --index 0
 fimbox cancel --job-id JOB_UUID
 fimbox session
 fimbox logout
 fimbox health
 ```
 
-`output` uses the file manifest; `scenario-output` uses the scenario COG link.
-Both print a local authenticated content URL (`expires_in: 0`) or an S3
-presigned URL, without downloading. Send the session token only to the API
-for local downloads, never to S3. Errors exit nonzero. Redirects are not followed, and submissions
+The CLI reports job status and output metadata but does not download files.
+Errors exit nonzero. Redirects are not followed, and submissions
 are not retried. `--timeout` controls HTTP timeout (default 30 seconds).
 Browser login is still performed in the browser; authentication endpoints
 are available in the SDK, not separate CLI login commands.

@@ -20,7 +20,6 @@ class Settings(BaseSettings):
     s3_endpoint_url: str = "https://s3.hydroshare.org"
     s3_region: str = "us-east-1"
     s3_addressing_style: Literal["path", "virtual", "auto"] = "path"
-    s3_presigned_url_seconds: int = Field(default=3600, ge=1, le=604800)
     hydroshare_s3_credentials_url: str = "https://www.hydroshare.org/hsapi/user/service/accounts/s3/"
     hydroshare_s3_credentials_expiry_days: int = Field(default=1, ge=1)
     redis_url: str = "redis://localhost:6379/2"

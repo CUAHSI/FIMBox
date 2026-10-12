@@ -7,8 +7,6 @@ from uuid import UUID
 import boto3
 import httpx
 from botocore.config import Config
-from botocore.exceptions import ClientError
-from fastapi import HTTPException
 from pydantic import BaseModel, Field, SecretStr, ValidationError, field_validator
 
 from .auth import UserSession, get_redis_client
@@ -85,10 +83,6 @@ def __job_credentials(job_id: UUID) -> HydroShareS3Credentials:
         raise StorageCredentialsError("Job S3 credentials are invalid or expired") from None
 
 
-def output_key(prefix: str, job_id: UUID, index: int) -> str:
-    return "/".join(part for part in (prefix.strip("/"), str(job_id), f"{index}.tif") if part)
-
-
 def output_file_key(prefix: str, job_id: UUID, relative_path: str) -> str:
     key = "/".join(
         part for part in (prefix.strip("/"), str(job_id), relative_path) if part
@@ -112,27 +106,3 @@ def s3_client(job_id: UUID):
             s3={"addressing_style": settings.s3_addressing_style},
         ),
     )
-
-
-def presign_output(job_id: UUID, bucket: str, key: str) -> tuple[str, int]:
-    credentials = __job_credentials(job_id)
-    expires_in = min(
-        settings.s3_presigned_url_seconds,
-        math.floor((credentials.expiry - datetime.now(timezone.utc)).total_seconds()),
-    )
-    if expires_in < 1:
-        raise StorageCredentialsError("Job S3 credentials have expired")
-    client = s3_client(job_id)
-    try:
-        client.head_object(Bucket=bucket, Key=key)
-    except ClientError as error:
-        if error.response["Error"]["Code"] in ("404", "NoSuchKey", "NotFound"):
-            raise HTTPException(status_code=404, detail="Output object no longer available") from error
-        raise
-    url = client.generate_presigned_url(
-        "get_object",
-        Params={"Bucket": bucket, "Key": key},
-        ExpiresIn=expires_in,
-        HttpMethod="GET",
-    )
-    return url, expires_in

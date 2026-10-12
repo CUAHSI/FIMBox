@@ -13,12 +13,10 @@ from .health_health_get_response_health_health_get import (
 )
 from .http_validation_error import HTTPValidationError
 from .job_list import JobList
-from .job_request import JobRequest
 from .job_status import JobStatus
 from .job_submitted import JobSubmitted
 from .job_summary import JobSummary
 from .output_file import OutputFile
-from .presigned_output import PresignedOutput
 from .reach import Reach
 from .scenario import Scenario
 from .session_token import SessionToken
@@ -33,12 +31,10 @@ __all__ = (
     "HandFimOutput",
     "HealthHealthGetResponseHealthHealthGet",
     "JobList",
-    "JobRequest",
     "JobStatus",
     "JobSubmitted",
     "JobSummary",
     "OutputFile",
-    "PresignedOutput",
     "Reach",
     "Scenario",
     "SessionToken",

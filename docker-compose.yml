@@ -35,11 +35,8 @@ services:
       HYDROSHARE_S3_CREDENTIALS_EXPIRY_DAYS: ${HYDROSHARE_S3_CREDENTIALS_EXPIRY_DAYS:-1}
       S3_REGION: ${S3_REGION:-us-east-1}
       S3_ADDRESSING_STYLE: ${S3_ADDRESSING_STYLE:-path}
-      S3_PRESIGNED_URL_SECONDS: ${S3_PRESIGNED_URL_SECONDS:-3600}
     ports:
       - "127.0.0.1:${FIMBOX_API_PORT:-8000}:8000"
-    volumes:
-      - "${FIMBOX_OUTPUT_DIR:-./data/output}:/home/output:ro"
     depends_on:
       redis:
         condition: service_healthy

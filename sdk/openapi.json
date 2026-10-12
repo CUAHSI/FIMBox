@@ -283,74 +283,6 @@
         }
       }
     },
-    "/jobs": {
-      "get": {
-        "summary": "List Jobs",
-        "operationId": "list_jobs_jobs_get",
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JobList"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "OAuth2AuthorizationCodeBearer": []
-          },
-          {}
-        ],
-        "description": "Authentication is required only when the server has OAuth credentials configured. See GET /auth/config."
-      },
-      "post": {
-        "summary": "Submit Job",
-        "description": "Submit HAND-FIM using the template's payload envelope.\nAuthentication is required only when the server has OAuth credentials configured. See GET /auth/config.",
-        "operationId": "submit_job_jobs_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/JobRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JobSubmitted"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "OAuth2AuthorizationCodeBearer": []
-          },
-          {}
-        ]
-      }
-    },
     "/jobs/hand-fim": {
       "post": {
         "summary": "Submit Hand Fim",
@@ -447,6 +379,31 @@
         }
       }
     },
+    "/jobs": {
+      "get": {
+        "summary": "List Jobs",
+        "operationId": "list_jobs_jobs_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobList"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2AuthorizationCodeBearer": []
+          },
+          {}
+        ],
+        "description": "Authentication is required only when the server has OAuth credentials configured. See GET /auth/config."
+      }
+    },
     "/jobs/{job_id}": {
       "get": {
         "summary": "Get Job Status",
@@ -518,175 +475,6 @@
         "responses": {
           "204": {
             "description": "Successful Response"
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/jobs/{job_id}/outputs/{index}.tif": {
-      "get": {
-        "summary": "Get Job Output",
-        "operationId": "get_job_output_jobs__job_id__outputs__index__tif_get",
-        "security": [
-          {
-            "OAuth2AuthorizationCodeBearer": []
-          },
-          {}
-        ],
-        "parameters": [
-          {
-            "name": "job_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid",
-              "title": "Job Id"
-            }
-          },
-          {
-            "name": "index",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "title": "Index"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PresignedOutput"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        },
-        "description": "Authentication is required only when the server has OAuth credentials configured. See GET /auth/config."
-      }
-    },
-    "/jobs/{job_id}/files/{index}": {
-      "get": {
-        "summary": "Get Job File",
-        "operationId": "get_job_file_jobs__job_id__files__index__get",
-        "security": [
-          {
-            "OAuth2AuthorizationCodeBearer": []
-          },
-          {}
-        ],
-        "parameters": [
-          {
-            "name": "job_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid",
-              "title": "Job Id"
-            }
-          },
-          {
-            "name": "index",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "title": "Index"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PresignedOutput"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        },
-        "description": "Authentication is required only when the server has OAuth credentials configured. See GET /auth/config."
-      }
-    },
-    "/jobs/{job_id}/files/{index}/content": {
-      "get": {
-        "summary": "Get Local Job File",
-        "description": "Download a local output file; requires the owner's session when auth is enabled.\nAuthentication is required only when the server has OAuth credentials configured. See GET /auth/config.",
-        "operationId": "get_local_job_file_jobs__job_id__files__index__content_get",
-        "security": [
-          {
-            "OAuth2AuthorizationCodeBearer": []
-          },
-          {}
-        ],
-        "parameters": [
-          {
-            "name": "job_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid",
-              "title": "Job Id"
-            }
-          },
-          {
-            "name": "index",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "title": "Index"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/octet-stream": {
-                "schema": {
-                  "type": "string",
-                  "format": "binary"
-                }
-              }
-            }
           },
           "422": {
             "description": "Validation Error",
@@ -772,21 +560,15 @@
           "ScenarioID": {
             "type": "string",
             "title": "Scenarioid"
-          },
-          "geotiff_url": {
-            "type": "string",
-            "title": "Geotiff Url",
-            "description": "Location of the generated GeoTIFF output for this scenario."
           }
         },
         "additionalProperties": false,
         "type": "object",
         "required": [
-          "ScenarioID",
-          "geotiff_url"
+          "ScenarioID"
         ],
         "title": "HandFimOutput",
-        "description": "Reference to a single generated GeoTIFF output for a scenario."
+        "description": "Metadata for a single generated scenario output."
       },
       "HandFimParameters": {
         "items": {
@@ -812,52 +594,6 @@
           "jobs"
         ],
         "title": "JobList"
-      },
-      "JobRequest": {
-        "properties": {
-          "output_bucket": {
-            "anyOf": [
-              {
-                "type": "string",
-                "maxLength": 255,
-                "minLength": 1,
-                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Output Bucket"
-          },
-          "output_prefix": {
-            "type": "string",
-            "maxLength": 900,
-            "title": "Output Prefix",
-            "default": ""
-          },
-          "max_procs": {
-            "anyOf": [
-              {
-                "type": "integer",
-                "minimum": 1.0
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Max Procs",
-            "description": "Max concurrent HAND-FIM processes; omit to use the worker's HAND_FIM_MAX_PROCS (default 1)."
-          },
-          "payload": {
-            "$ref": "#/components/schemas/HandFimParameters"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "payload"
-        ],
-        "title": "JobRequest"
       },
       "JobStatus": {
         "properties": {
@@ -959,37 +695,14 @@
           "size_bytes": {
             "type": "integer",
             "title": "Size Bytes"
-          },
-          "download_url": {
-            "type": "string",
-            "title": "Download Url"
           }
         },
         "type": "object",
         "required": [
           "path",
-          "size_bytes",
-          "download_url"
+          "size_bytes"
         ],
         "title": "OutputFile"
-      },
-      "PresignedOutput": {
-        "properties": {
-          "url": {
-            "type": "string",
-            "title": "Url"
-          },
-          "expires_in": {
-            "type": "integer",
-            "title": "Expires In"
-          }
-        },
-        "type": "object",
-        "required": [
-          "url",
-          "expires_in"
-        ],
-        "title": "PresignedOutput"
       },
       "Reach": {
         "properties": {

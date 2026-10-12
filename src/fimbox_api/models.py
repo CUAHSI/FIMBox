@@ -54,6 +54,10 @@ class HandFimJobOptions(OutputDestination):
     )
 
 
+class HandFimJobRequest(HandFimJobOptions):
+    scenarios: HandFimParameters
+
+
 class JobSubmitted(BaseModel):
     job_id: str
     status: str

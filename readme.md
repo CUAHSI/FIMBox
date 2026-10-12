@@ -454,19 +454,19 @@ For S3 output, the caller supplies `output_bucket` and optionally `output_prefix
 and destination HydroShare resource must already exist. Supply the resource's
 S3 bucket and writable prefix, not an arbitrary new bucket. The submitting HydroShare user must have write access there. Retrieve objects
 directly from S3 using the reported keys and your HydroShare permissions.
-Output paths append
-`<job_id>/<relative-file-path>` to your prefix. Job ownership checks do not bypass
+Output keys use `<output_prefix>/<relative-file-path>`; uploading to an existing
+key overwrites that object. Job ownership checks do not bypass
 HydroShare resource permissions.
 
-Submit the existing scenario JSON array as the request body with destination
-query parameters (an empty prefix explicitly selects the bucket root):
+Submit a JSON object containing the scenario array and destination options (an
+empty prefix explicitly selects the bucket root):
 
 ```bash
 curl --fail -X POST \
-  'http://localhost:8000/jobs/hand-fim?output_bucket=fim-output&output_prefix=data/output' \
+  'http://localhost:8000/jobs/hand-fim' \
   -H "Authorization: Bearer $FIMBOX_SESSION_TOKEN" \
   -H 'Content-Type: application/json' \
-  --data-binary @test-data/single_reach.json
+  --data '{"scenarios":[{"ScenarioID":"single-reach-scenario","Reaches":[{"HUC":"03020201","ReachID":"8780625","Streamflow":227}]}],"output_bucket":"fim-output","output_prefix":"data/output"}'
 ```
 
 The route uses the shared Pydantic scenario schema from
@@ -552,9 +552,9 @@ cannot be interrupted by this single-process Celery worker and return HTTP 409.
 
 - `FIMBOX_API_PORT` controls the Compose host port (default `8000`).
 - `HAND_FIM_MAX_PROCS` controls parallel FIM computations inside the worker
-  (default `1`, must be positive). A job's `max_procs` overrides it: supply
-  `?max_procs=N` on `POST /jobs/hand-fim`. Values must be integers greater than zero; omission
-  uses the worker setting.
+  (default `1`, must be positive). A job's `max_procs` overrides it: include
+  `"max_procs": N` in the `POST /jobs/hand-fim` JSON body. Values must be
+  integers greater than zero; omission uses the worker setting.
 - `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND`, and
   `CELERY_TASK_DEFAULT_QUEUE` configure the queue for non-Compose deployments.
 - `RESULT_TTL_SECONDS` and `VISIBILITY_TIMEOUT_SECONDS` default to 86400
@@ -738,7 +738,7 @@ import os
 import httpx
 from fimbox_sdk import AuthenticatedClient
 from fimbox_sdk.api.default import submit_hand_fim_jobs_hand_fim_post
-from fimbox_sdk.models import JobSubmitted, Reach, Scenario
+from fimbox_sdk.models import HandFimJobRequest, JobSubmitted, Reach, Scenario
 
 with AuthenticatedClient(
     base_url="http://localhost:8000",
@@ -748,12 +748,14 @@ with AuthenticatedClient(
 ) as client:
     response = submit_hand_fim_jobs_hand_fim_post.sync_detailed(
         client=client,
-        body=[Scenario(
-            scenario_id="single-reach",
-            reaches=[Reach(huc="03020201", reach_id="8780625", streamflow=7)],
-        )],
-        output_bucket="YOUR_HYDROSHARE_BUCKET",
-        output_prefix="data/output",
+        body=HandFimJobRequest(
+            scenarios=[Scenario(
+                scenario_id="single-reach",
+                reaches=[Reach(huc="03020201", reach_id="8780625", streamflow=7)],
+            )],
+            output_bucket="YOUR_HYDROSHARE_BUCKET",
+            output_prefix="data/output",
+        ),
     )
     if response.status_code != 202 or not isinstance(response.parsed, JobSubmitted):
         raise RuntimeError(f"Submission failed: HTTP {response.status_code}")
@@ -821,8 +823,8 @@ fimbox submit --body test-data/single_reach.json --max-procs 4
 ```
 
 `--max-procs` must be a positive integer. If omitted, the worker uses
-`HAND_FIM_MAX_PROCS` (default 1). The generated SDK submission functions accept
-`max_procs` too; concurrency applies inside one job, not to Celery worker count.
+`HAND_FIM_MAX_PROCS` (default 1). The generated SDK submission request model
+accepts `max_procs` too; concurrency applies inside one job, not to Celery worker count.
 
 This defaults to the Compose-mounted output directory. To opt into S3:
 

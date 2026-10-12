@@ -211,7 +211,7 @@ class AuthTests(unittest.TestCase):
             ("GET", "/jobs", None),
             ("GET", f"/jobs/{job_id}", None),
             ("DELETE", f"/jobs/{job_id}", None),
-            ("POST", "/jobs/hand-fim?output_bucket=bucket&output_prefix=out", []),
+            ("POST", "/jobs/hand-fim", {"scenarios": []}),
         ]
         for method, route, payload in routes:
             self.assertEqual(self.client.request(method, route, json=payload).status_code, 401)

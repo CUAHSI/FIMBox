@@ -25,7 +25,7 @@ from fimbox_sdk.api.default import (
     list_jobs_jobs_get,
     submit_hand_fim_jobs_hand_fim_post,
 )
-from fimbox_sdk.models import AuthenticationConfig, Scenario
+from fimbox_sdk.models import AuthenticationConfig, HandFimJobRequest, Scenario
 from fimbox_sdk.types import Response
 
 
@@ -223,8 +223,12 @@ def submit(
         raise click.ClickException("--output-prefix requires --output-bucket.")
     __call(
         ctx, submit_hand_fim_jobs_hand_fim_post.sync_detailed,
-        body=__scenarios(__body(body)), output_bucket=output_bucket, output_prefix=output_prefix,
-        max_procs=max_procs,
+        body=HandFimJobRequest(
+            scenarios=__scenarios(__body(body)),
+            output_bucket=output_bucket,
+            output_prefix=output_prefix,
+            max_procs=max_procs,
+        ),
     )
 
 

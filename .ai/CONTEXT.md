@@ -116,10 +116,10 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
   Bucket is optional (local default); prefix defaults empty and requires a
   bucket when nonempty. Result includes local_output_dir; local file keys are null.
   HandFimJobOptions extends output options with optional positive max_procs,
-  used as query parameters by the submission route. Worker revalidates it
-  before execution.
+  included alongside scenarios in the submission JSON body. Worker revalidates
+  it before execution.
 - **`src/fimbox_api/main.py`** — FastAPI app: `POST /jobs/hand-fim` accepts
-  the scenario array with destination query parameters. All job routes
+  a JSON object containing scenarios and job options. All job routes
   enforce ownership via a session when configured, or a reserved shared local
   identity without credentials. OpenAPI documents both alternatives consistently
   across modes. Also provides user job listing,

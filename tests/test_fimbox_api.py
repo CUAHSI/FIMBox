@@ -26,7 +26,8 @@ PAYLOAD = [
     }
 ]
 DESTINATION = {"output_bucket": "fim-output", "output_prefix": "data/output"}
-HAND_FIM_ROUTE = "/jobs/hand-fim?output_bucket=fim-output&output_prefix=data/output"
+SUBMISSION = {"scenarios": PAYLOAD, **DESTINATION}
+HAND_FIM_ROUTE = "/jobs/hand-fim"
 
 def credentials_fixture():
     return storage.HydroShareS3Credentials(
@@ -61,9 +62,11 @@ class ApiTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def test_submit_scenario_array(self):
+    def test_submit_scenarios_and_options_in_payload(self):
+        operation = main.app.openapi()["paths"]["/jobs/hand-fim"]["post"]
+        self.assertNotIn("parameters", operation)
         with patch.object(tasks.hand_fim, "apply_async") as enqueue:
-            response = self.client.post(HAND_FIM_ROUTE, json=PAYLOAD)
+            response = self.client.post(HAND_FIM_ROUTE, json=SUBMISSION)
             self.assertEqual(response.status_code, 202)
             result = response.json()
             self.assertEqual(result["status"], "queued")
@@ -81,13 +84,13 @@ class ApiTests(unittest.TestCase):
         with patch.object(main.settings, "require_hydroshare_output", True), patch.object(
             tasks.hand_fim, "apply_async",
         ) as enqueue:
-            response = self.client.post("/jobs/hand-fim", json=PAYLOAD)
+            response = self.client.post("/jobs/hand-fim", json={"scenarios": PAYLOAD})
             self.assertEqual(response.status_code, 422)
             self.assertIn("output_bucket", response.json()["detail"])
             enqueue.assert_not_called()
             self.track_user_job.assert_not_called()
             self.create_job_credentials.assert_not_called()
-            self.assertEqual(self.client.post(HAND_FIM_ROUTE, json=PAYLOAD).status_code, 202)
+            self.assertEqual(self.client.post(HAND_FIM_ROUTE, json=SUBMISSION).status_code, 202)
             self.create_job_credentials.assert_called_once()
             enqueue.assert_called_once()
 
@@ -96,12 +99,12 @@ class ApiTests(unittest.TestCase):
         with patch.object(main.settings, "hydroshare_client_id", ""), patch.object(
             main.settings, "hydroshare_client_secret", SecretStr(""),
         ), patch.object(tasks.hand_fim, "apply_async") as enqueue:
-            response = self.client.post("/jobs/hand-fim", json=PAYLOAD)
+            response = self.client.post("/jobs/hand-fim", json={"scenarios": PAYLOAD})
             self.assertEqual(response.status_code, 202, response.text)
             job_id = response.json()["job_id"]
             self.track_user_job.assert_called_with(auth.LOCAL_USER_ID, job_id)
             self.assertEqual(enqueue.call_args.kwargs["args"], [job_id, PAYLOAD, None, "", None])
-            self.assertEqual(self.client.post(HAND_FIM_ROUTE, json=PAYLOAD).status_code, 409)
+            self.assertEqual(self.client.post(HAND_FIM_ROUTE, json=SUBMISSION).status_code, 409)
             self.assertEqual(enqueue.call_count, 1)
             self.create_job_credentials.assert_not_called()
             with patch.object(main.celery_app, "AsyncResult", return_value=Mock(state="PENDING")), patch.object(
@@ -122,15 +125,17 @@ class ApiTests(unittest.TestCase):
     def test_invalid_payloads_never_enqueue(self):
         bad_reach = {"HUC": "03020201", "ReachID": "8780625", "Streamflow": -1}
         payloads = [
-            [],
-            [{"ScenarioID": "bad", "Reaches": []}],
-            [{**PAYLOAD[0], "ScenarioID": "../../unsafe"}],
-            [{"ScenarioID": "bad", "Reaches": [bad_reach]}],
-            [{"ScenarioID": "bad", "Reaches": [{**bad_reach, "Streamflow": 1, "HUC": "123"}]}],
-            [{**PAYLOAD[0], "unexpected": True}],
-            PAYLOAD * 2,
-            {"duration": 1},
-        ]
+            {"scenarios": scenarios}
+            for scenarios in (
+                [],
+                [{"ScenarioID": "bad", "Reaches": []}],
+                [{**PAYLOAD[0], "ScenarioID": "../../unsafe"}],
+                [{"ScenarioID": "bad", "Reaches": [bad_reach]}],
+                [{"ScenarioID": "bad", "Reaches": [{**bad_reach, "Streamflow": 1, "HUC": "123"}]}],
+                [{**PAYLOAD[0], "unexpected": True}],
+                PAYLOAD * 2,
+            )
+        ] + [{}, {"duration": 1}]
         with patch.object(tasks.hand_fim, "apply_async") as enqueue:
             for payload in payloads:
                 with self.subTest(payload=payload):
@@ -148,7 +153,7 @@ class ApiTests(unittest.TestCase):
 
     def test_broker_failure_is_503(self):
         with patch.object(tasks.hand_fim, "apply_async", side_effect=OperationalError("offline")):
-            response = self.client.post(HAND_FIM_ROUTE, json=PAYLOAD)
+            response = self.client.post(HAND_FIM_ROUTE, json=SUBMISSION)
         self.assertEqual(response.status_code, 503)
         self.untrack_user_job.assert_called_once()
         self.delete_job_credentials.assert_called_once()
@@ -156,7 +161,7 @@ class ApiTests(unittest.TestCase):
     def test_credential_failure_never_enqueues(self):
         self.create_job_credentials.side_effect = storage.StorageCredentialsError("Credential exchange failed")
         with patch.object(tasks.hand_fim, "apply_async") as enqueue:
-            response = self.client.post(HAND_FIM_ROUTE, json=PAYLOAD)
+            response = self.client.post(HAND_FIM_ROUTE, json=SUBMISSION)
         self.assertEqual(response.status_code, 503)
         enqueue.assert_not_called()
         self.track_user_job.assert_not_called()
@@ -220,29 +225,33 @@ class ApiTests(unittest.TestCase):
 
     def test_invalid_destination_is_rejected(self):
         with patch.object(tasks.hand_fim, "apply_async") as enqueue:
-            for route, body in (
-                ("/jobs/hand-fim?output_prefix=orphan", PAYLOAD),
-                ("/jobs/hand-fim?output_bucket=&output_prefix=", PAYLOAD),
+            for body in (
+                {"scenarios": PAYLOAD, "output_prefix": "orphan"},
+                {"scenarios": PAYLOAD, "output_bucket": ""},
             ):
-                self.assertEqual(self.client.post(route, json=body).status_code, 422)
+                self.assertEqual(self.client.post(HAND_FIM_ROUTE, json=body).status_code, 422)
             enqueue.assert_not_called()
 
     def test_local_submission_skips_s3_credentials(self):
         with patch.object(tasks.hand_fim, "apply_async") as enqueue:
-            response = self.client.post("/jobs/hand-fim", json=PAYLOAD)
+            response = self.client.post("/jobs/hand-fim", json={"scenarios": PAYLOAD})
             self.assertEqual(response.status_code, 202, response.text)
             self.assertEqual(enqueue.call_args.kwargs["args"][2:], [None, "", None])
         self.create_job_credentials.assert_not_called()
 
     def test_max_procs_is_validated_and_queued(self):
         with patch.object(tasks.hand_fim, "apply_async") as enqueue:
-            response = self.client.post("/jobs/hand-fim?max_procs=3", json=PAYLOAD)
+            response = self.client.post(
+                HAND_FIM_ROUTE, json={"scenarios": PAYLOAD, "max_procs": 3}
+            )
             self.assertEqual(response.status_code, 202, response.text)
             self.assertEqual(enqueue.call_args.kwargs["args"][-1], 3)
             enqueue.reset_mock()
             for value in (0, -1, "invalid", 1.5):
                 self.assertEqual(
-                    self.client.post(f"/jobs/hand-fim?max_procs={value}", json=PAYLOAD).status_code,
+                    self.client.post(
+                        HAND_FIM_ROUTE, json={"scenarios": PAYLOAD, "max_procs": value}
+                    ).status_code,
                     422,
                 )
             enqueue.assert_not_called()

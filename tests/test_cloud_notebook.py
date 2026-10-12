@@ -63,8 +63,9 @@ class CloudNotebookTests(unittest.TestCase):
             if path == "/auth/session":
                 return httpx.Response(200, json={"user_id": "test", "expires_at": 9999999999})
             if path == "/jobs/hand-fim":
-                self.assertEqual(json.loads(request.content)[0]["Reaches"][0]["HUC"], "03020201")
-                self.assertEqual(request.url.params["max_procs"], "1")
+                body = json.loads(request.content)
+                self.assertEqual(body["scenarios"][0]["Reaches"][0]["HUC"], "03020201")
+                self.assertEqual(body["max_procs"], 1)
                 return httpx.Response(202, json={"job_id": job_id, "status": "queued", "status_url": f"/jobs/{job_id}"})
             if path == f"/jobs/{job_id}":
                 state = next(states)

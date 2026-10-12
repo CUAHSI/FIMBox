@@ -18,7 +18,7 @@ import fimbox_cli
 from fimbox_api import auth, main, tasks
 from fimbox_sdk import AuthenticatedClient, Client
 from fimbox_sdk.api.default import submit_hand_fim_jobs_hand_fim_post
-from fimbox_sdk.models import JobSubmitted, Reach, Scenario
+from fimbox_sdk.models import HandFimJobRequest, JobSubmitted, Reach, Scenario
 
 PAYLOAD = [{
     "ScenarioID": "test",
@@ -92,15 +92,23 @@ class SdkCliTests(unittest.TestCase):
         request = self.requests[0]
         self.assertEqual(request.url.path, "/jobs/hand-fim")
         self.assertEqual(request.method, "POST")
-        self.assertEqual(dict(request.url.params), {"output_bucket": "bucket", "output_prefix": "data/output"})
-        self.assertEqual(json.loads(request.content), PAYLOAD)
+        self.assertEqual(dict(request.url.params), {})
+        self.assertEqual(json.loads(request.content), {
+            "scenarios": PAYLOAD,
+            "output_bucket": "bucket",
+            "output_prefix": "data/output",
+            "max_procs": None,
+        })
         self.assertEqual(request.headers["Authorization"], "Bearer test-session")
 
     def test_generated_sdk_returns_typed_results(self):
         scenario = Scenario(scenario_id="test", reaches=[Reach(huc="03020201", reach_id="8780625", streamflow=7)])
         with AuthenticatedClient(base_url="http://localhost:8000", token="sdk-session") as client:
             response = submit_hand_fim_jobs_hand_fim_post.sync_detailed(
-                client=client, body=[scenario], output_bucket="bucket", output_prefix="output",
+                client=client,
+                body=HandFimJobRequest(
+                    scenarios=[scenario], output_bucket="bucket", output_prefix="output",
+                ),
             )
         self.assertEqual(response.status_code, HTTPStatus.ACCEPTED)
         self.assertIsInstance(response.parsed, JobSubmitted)
@@ -126,14 +134,20 @@ class SdkCliTests(unittest.TestCase):
     def test_submit_defaults_to_local_output(self):
         result = self.invoke("submit", "--body", str(self.body))
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertNotIn("output_bucket", self.requests[-1].url.params)
+        self.assertEqual(dict(self.requests[-1].url.params), {})
+        self.assertEqual(json.loads(self.requests[-1].content), {
+            "scenarios": PAYLOAD,
+            "output_bucket": None,
+            "output_prefix": "",
+            "max_procs": None,
+        })
         result = self.invoke("submit", "--body", str(self.body), "--output-prefix", "orphan")
         self.assertEqual(result.exit_code, 1)
 
     def test_max_procs_cli_uses_generated_schema(self):
         result = self.invoke("submit", "--body", str(self.body), "--max-procs", "4")
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(self.requests[-1].url.params["max_procs"], "4")
+        self.assertEqual(json.loads(self.requests[-1].content)["max_procs"], 4)
         self.assertEqual(len(self.requests), 1)
         for value in ("0", "-1", "1.5"):
             result = self.invoke("submit", "--body", str(self.body), "--max-procs", value)
@@ -207,7 +221,12 @@ class SdkCliTests(unittest.TestCase):
         result = self.invoke("submit", "--body", str(self.body), token="")
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertNotIn("authorization", self.requests[-1].headers)
-        self.assertEqual(json.loads(self.requests[-1].content), PAYLOAD)
+        self.assertEqual(json.loads(self.requests[-1].content), {
+            "scenarios": PAYLOAD,
+            "output_bucket": None,
+            "output_prefix": "",
+            "max_procs": None,
+        })
         self.credential_store.get_password.assert_not_called()
 
     def test_auth_mode_is_discovered_from_generated_public_endpoint(self):
@@ -328,8 +347,11 @@ class SdkIntegrationTests(unittest.TestCase):
             client = AuthenticatedClient(base_url="http://testserver", token="session")
             client.set_httpx_client(http_client)
             response = submit_hand_fim_jobs_hand_fim_post.sync_detailed(
-                client=client, body=[Scenario.from_dict(PAYLOAD[0])],
-                output_bucket="bucket", output_prefix="output",
+                client=client,
+                body=HandFimJobRequest(
+                    scenarios=[Scenario.from_dict(PAYLOAD[0])],
+                    output_bucket="bucket", output_prefix="output",
+                ),
             )
             self.assertEqual(response.status_code, 202)
             self.assertIsInstance(response.parsed, JobSubmitted)
@@ -388,8 +410,11 @@ class SdkIntegrationTests(unittest.TestCase):
             )
             async with client:
                 return await submit_hand_fim_jobs_hand_fim_post.asyncio(
-                    client=client, body=[Scenario.from_dict(PAYLOAD[0])],
-                    output_bucket="bucket", output_prefix="output",
+                    client=client,
+                    body=HandFimJobRequest(
+                        scenarios=[Scenario.from_dict(PAYLOAD[0])],
+                        output_bucket="bucket", output_prefix="output",
+                    ),
                 )
 
         result = asyncio.run(run())

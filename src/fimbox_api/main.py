@@ -3,7 +3,7 @@ from typing import Annotated, Any
 from uuid import UUID, uuid4
 
 from botocore.exceptions import BotoCoreError, ClientError
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.openapi.utils import get_openapi
 from kombu.exceptions import KombuError
@@ -21,8 +21,9 @@ from .auth_routes import router as auth_router
 from .celery_app import celery_app
 from .config import settings
 from .models import (
-    HandFimParameters,
     HandFimJobOptions,
+    HandFimJobRequest,
+    HandFimParameters,
     JobList,
     JobSummary,
     JobStatus,
@@ -128,12 +129,11 @@ def __submit_hand_fim(
 
 @app.post("/jobs/hand-fim", status_code=202, response_model=JobSubmitted)
 def submit_hand_fim(
-    body: HandFimParameters,
-    destination: Annotated[HandFimJobOptions, Query()],
+    body: HandFimJobRequest,
     session: AuthenticatedSession,
 ) -> JobSubmitted:
-    """Submit the scenario JSON array directly, without an envelope."""
-    return __submit_hand_fim(body, destination, session)
+    """Submit a HAND-FIM job with scenarios and options in the JSON body."""
+    return __submit_hand_fim(body.scenarios, body, session)
 
 
 @app.get("/jobs", response_model=JobList)

@@ -286,74 +286,17 @@
     "/jobs/hand-fim": {
       "post": {
         "summary": "Submit Hand Fim",
-        "description": "Submit the scenario JSON array directly, without an envelope.\nAuthentication is required only when the server has OAuth credentials configured. See GET /auth/config.",
+        "description": "Submit a HAND-FIM job with scenarios and options in the JSON body.\nAuthentication is required only when the server has OAuth credentials configured. See GET /auth/config.",
         "operationId": "submit_hand_fim_jobs_hand_fim_post",
-        "security": [
-          {
-            "OAuth2AuthorizationCodeBearer": []
-          },
-          {}
-        ],
-        "parameters": [
-          {
-            "name": "output_bucket",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 255,
-                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Output Bucket"
-            }
-          },
-          {
-            "name": "output_prefix",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "maxLength": 900,
-              "default": "",
-              "title": "Output Prefix"
-            }
-          },
-          {
-            "name": "max_procs",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "integer",
-                  "minimum": 1
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Max concurrent HAND-FIM processes; omit to use the worker's HAND_FIM_MAX_PROCS (default 1).",
-              "title": "Max Procs"
-            },
-            "description": "Max concurrent HAND-FIM processes; omit to use the worker's HAND_FIM_MAX_PROCS (default 1)."
-          }
-        ],
         "requestBody": {
-          "required": true,
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/HandFimParameters"
+                "$ref": "#/components/schemas/HandFimJobRequest"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "202": {
@@ -376,7 +319,13 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "OAuth2AuthorizationCodeBearer": []
+          },
+          {}
+        ]
       }
     },
     "/jobs": {
@@ -897,6 +846,52 @@
           "type"
         ],
         "title": "ValidationError"
+      },
+      "HandFimJobRequest": {
+        "properties": {
+          "output_bucket": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Bucket"
+          },
+          "output_prefix": {
+            "type": "string",
+            "maxLength": 900,
+            "title": "Output Prefix",
+            "default": ""
+          },
+          "max_procs": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Procs",
+            "description": "Max concurrent HAND-FIM processes; omit to use the worker's HAND_FIM_MAX_PROCS (default 1)."
+          },
+          "scenarios": {
+            "$ref": "#/components/schemas/HandFimParameters"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "scenarios"
+        ],
+        "title": "HandFimJobRequest"
       }
     },
     "securitySchemes": {

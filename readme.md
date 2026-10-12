@@ -9,6 +9,7 @@ docker compose up --build
 In another terminal, from the repository root (Python 3.10+):
 
 ```bash
+pixi run sdk-generate
 python -m pip install .
 fimbox submit --body test-data/single_reach.json
 fimbox jobs
@@ -36,7 +37,7 @@ The API and HAND-FIM worker use **separate images** from this repository.
 **This deployment always requires HydroShare authentication and S3 output.**
 The API gets both OAuth credentials from Secret Manager and
 `REQUIRE_HYDROSHARE_OUTPUT=true`. Missing credentials prevent startup.
-Both submission endpoints reject jobs without `output_bucket` before
+The submission endpoint rejects jobs without `output_bucket` before
 credential exchange or enqueueing. The endpoint is publicly reachable for
 browser OAuth, but job access is protected by FIMBox sessions and ownership.
 The worker gets per-job temporary S3 credentials from Redis, not OAuth client
@@ -596,6 +597,7 @@ access:
 
 ```bash
 python -m pip install -r docker/api/requirements-test.txt
+pixi run sdk-generate
 PYTHONPATH=src python -m unittest discover -s tests -v
 ```
 
@@ -687,24 +689,27 @@ discovered at runtime, independently of the captured spec. Local Compose can
 also enable HydroShare authentication and optional S3 output; Terraform
 requires both authentication and S3 output.
 
-The `fimbox` distribution includes the generated [`fimbox_sdk`](src/fimbox_sdk)
-Python package and an SDK-backed `fimbox` console command. It is generated
-locally with [openapi-python-client](https://github.com/openapi-generators/openapi-python-client)
+The `fimbox` distribution includes the locally generated Python SDK and an
+SDK-backed `fimbox` console command. The generated `src/fimbox_sdk/` directory
+is gitignored and is not committed; generate it locally with
+[openapi-python-client](https://github.com/openapi-generators/openapi-python-client)
 0.28.0 from [`sdk/openapi.json`](sdk/openapi.json). Generation does not send the
 API spec to a hosted service. The SDK provides typed models and synchronous and
 asynchronous methods for every API endpoint, including authentication.
-Generated files should not be hand-edited.
+Generated files should not be hand-edited or added to the repository.
 
-Install from the repository root (Python 3.10+):
+Generate and install from the repository root (Python 3.10+):
 
 ```bash
+pixi run sdk-generate
 python -m pip install .
 fimbox --help
 ```
 
-For editable development, use `python -m pip install -e .`. This installs only
-client dependencies, not FastAPI, Celery, Redis, or Docker. No generator is
-required at runtime. The CLI works from any directory and help works offline.
+For editable development, generate the SDK first, then use
+`python -m pip install -e .`. This installs only client dependencies, not
+FastAPI, Celery, Redis, or Docker. The generator is not required at runtime
+after generation and installation. The CLI works from any directory and help works offline.
 The package has not been published to PyPI; `pip install fimbox` is not the
 installation command for this repository.
 
@@ -849,7 +854,8 @@ Browser login is still performed in the browser; authentication endpoints
 are available in the SDK, not separate CLI login commands.
 
 `pixi install` installs the same editable distribution, and
-`pixi run fimbox ...` runs the installed console command.
+`pixi run fimbox ...` runs the installed console command. Generate the ignored
+SDK first with `pixi run sdk-generate`.
 
 ### Regenerating the SDK
 
@@ -860,8 +866,9 @@ curl --fail http://localhost:8000/openapi.json -o sdk/openapi.json
 pixi run sdk-generate
 ```
 
-This task requires `uv` and overwrites **only** `src/fimbox_sdk`, not the
-handwritten CLI. To generate without Pixi/uv:
+This task requires `uv` and writes **only** the gitignored `src/fimbox_sdk/`,
+not the handwritten CLI. Generate the SDK before installing the package or
+running tests that import it. To generate without Pixi/uv:
 
 ```bash
 python -m pip install '.[codegen]'
@@ -873,8 +880,10 @@ alternatives before rendering. This preserves Swagger authorization support
 while generating job operations that accept either client type. The captured
 contract is identical in local and authenticated deployments.
 
-Commit the spec and generated files together. Stable API operation IDs preserve
-SDK imports; changes to operation signatures may require related CLI updates.
+Commit the API spec and generator configuration; generated SDK files are
+excluded from version control. Stable API operation IDs preserve SDK imports;
+changes to operation signatures may require related CLI updates. For a fresh
+checkout, run SDK generation before tests or CLI/package installation.
 The regression suite checks that the captured spec matches the source API,
 all endpoints are generated, SDK response models parse, and CLI submission
 uses the generated client:

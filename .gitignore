@@ -231,6 +231,9 @@ input/*
 output/*
 data/*
 
+# Locally generated Python SDK
+/src/fimbox_sdk/
+
 # Terraform local state, credentials, plans, and provider downloads
 terraform/.terraform/
 *.tfstate

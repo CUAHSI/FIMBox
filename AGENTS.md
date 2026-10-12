@@ -16,8 +16,9 @@ making structural changes to the project, so future sessions can rely on it.
 
 - `src/fimbox_cli.py` — Installable SDK-backed Click CLI. Run with `fimbox`
   after `python -m pip install .`, or `pixi run fimbox`.
-- `src/fimbox_sdk/` — Generated sync/async Python client and attrs models.
-  Do not hand-edit; regenerate with `pixi run sdk-generate`.
+- `src/fimbox_sdk/` — Locally generated, gitignored sync/async Python client
+  and attrs models. Generate from `sdk/openapi.json` with `pixi run sdk-generate`;
+  do not add generated files to the repository.
 - `src/fimbox_api/` — FastAPI service, HydroShare sessions, Celery worker,
   local/S3 output handling, and Pydantic job schemas.
 - `src/schemas/hand_fim_schema.py` — Shared scenario models used by API/worker.

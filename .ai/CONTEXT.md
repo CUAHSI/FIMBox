@@ -33,20 +33,23 @@ actual FIM computation using NOAA/OWP's `inundation-mapping` tooling and the
   No plaintext credential files, Docker subprocesses, or API server imports.
   Help does not require a server. CLI rejects fields dropped by generated
   models and surfaces HTTP/transport/contract errors without retries.
-- **`src/fimbox_sdk/`** — Generated, do not hand-edit. Local
-  openapi-python-client 0.28.0 generates Client/AuthenticatedClient, attrs models,
-  sync/async operation modules, errors and response types for every endpoint.
+- **`src/fimbox_sdk/`** — Locally generated and gitignored; do not hand-edit or
+  commit. Local openapi-python-client 0.28.0 generates Client/AuthenticatedClient,
+  attrs models, sync/async operation modules, errors and response types for every endpoint.
   Module names derive from FastAPI operation IDs. Dependencies: httpx, attrs,
   python-dateutil, typing-extensions. No server imports.
 - **`sdk/openapi.json`**, **`sdk/generator.yaml`** — Captured API contract
-  and local generator config. `pixi run sdk-generate` regenerates only the SDK.
+  and local generator config. `pixi run sdk-generate` creates the ignored SDK
+  directory from the spec.
 - **`sdk/generate.py`** — Local generation driver for pinned generator 0.28.
   Corrects its parsed optional-security flag before template rendering, so
   job operations accept Client or AuthenticatedClient without changing the
   captured spec or hand-editing generated files. Warnings/errors fail generation.
+  Run it before installing the CLI, importing its generated client, or running
+  tests that exercise the SDK.
 - **`pyproject.toml`**, **`MANIFEST.in`** — Installable `fimbox` distribution:
-  only fimbox_sdk and fimbox_cli, with fimbox console entry point. Python 3.10+.
-  Does not package server modules. Optional codegen dependency
+  packages the locally generated fimbox_sdk and fimbox_cli, with fimbox console
+  entry point. Python 3.10+. Does not package server modules. Optional codegen dependency
   pins generator; spec/config included in source distribution.
 - **`tests/test_fimbox_cli.py`** — SDK/CLI regression tests with mock HTTP,
   typed sync/async responses, source-spec parity, and submission through FastAPI.

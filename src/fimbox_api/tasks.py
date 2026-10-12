@@ -78,7 +78,7 @@ def hand_fim(
         )
         outputs = []
         for index, scenario in enumerate(scenarios.root):
-            cog = output_dir / f"{job_id}-{index}.cog"
+            cog = output_dir / f"{scenario.ScenarioID}.cog"
             if not cog.is_file() or cog.stat().st_size == 0:
                 raise RuntimeError(
                     f"HAND-FIM produced no COG for scenario {scenario.ScenarioID!r}"

@@ -282,6 +282,7 @@ class WorkerTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
         self.job_id = str(uuid4())
+        self.output_scenario_id = PAYLOAD[0]["ScenarioID"]
         patcher = patch.object(tasks, "s3_client")
         self.storage_client = patcher.start().return_value
         self.addCleanup(patcher.stop)
@@ -300,21 +301,29 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(scenario["ScenarioID"], f"{self.job_id}-0")
         self.assertEqual(scenario["Reaches"], PAYLOAD[0]["Reaches"])
         self.assertTrue(kwargs["check"])
-        output = self.root / "output" / "scenarios" / self.job_id / f"{self.job_id}-0.cog"
+        output = (
+            self.root / "output" / "scenarios" / self.job_id
+            / f"{self.output_scenario_id}.cog"
+        )
         output.write_bytes(b"test-cog")
         return subprocess.CompletedProcess(command, 0)
 
     def test_executes_scenario_and_preserves_original_identifier(self):
-        payload = [{**PAYLOAD[0], "ScenarioID": "../../unsafe*[id]"}]
+        self.output_scenario_id = "original-scenario-id"
+        payload = [{**PAYLOAD[0], "ScenarioID": self.output_scenario_id}]
         with patch.object(tasks.subprocess, "run", side_effect=self.__write_output) as run:
             result = tasks.hand_fim.run(self.job_id, payload, **DESTINATION)
-        self.assertEqual(result["outputs"][0]["ScenarioID"], "../../unsafe*[id]")
-        self.assertEqual(result["outputs"], [{"ScenarioID": "../../unsafe*[id]"}])
+        output_path = (
+            self.root / "output" / "scenarios" / self.job_id
+            / f"{self.output_scenario_id}.cog"
+        )
+        self.assertEqual(result["outputs"][0]["ScenarioID"], self.output_scenario_id)
+        self.assertEqual(result["outputs"], [{"ScenarioID": self.output_scenario_id}])
         self.assertEqual(result["output_bucket"], "fim-output")
         self.assertEqual(result["output_prefix"], "data/output")
         self.storage_client.upload_file.assert_called_once_with(
-            str(self.root / "output" / "scenarios" / self.job_id / f"{self.job_id}-0.cog"),
-            "fim-output", f"data/output/{self.job_id}/{self.job_id}-0.cog",
+            str(output_path),
+            "fim-output", f"data/output/{self.job_id}/{self.output_scenario_id}.cog",
             ExtraArgs={"ContentType": "image/tiff"},
         )
         self.assertEqual(run.call_args.args[0][-3:], [
@@ -340,7 +349,7 @@ class WorkerTests(unittest.TestCase):
             result = tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION)
         self.assertEqual(
             {file["path"] for file in result["files"]},
-            {f"{self.job_id}-0.cog", f"{self.job_id}-0.tif", "logs/run.txt"},
+            {f"{self.output_scenario_id}.cog", f"{self.job_id}-0.tif", "logs/run.txt"},
         )
         self.assertEqual(self.storage_client.upload_file.call_count, 3)
         for file in result["files"]:
@@ -372,7 +381,7 @@ class WorkerTests(unittest.TestCase):
         self.assertIsNone(result["files"][0]["key"])
         output_dir = self.root / "output" / "scenarios" / self.job_id
         self.assertEqual(result["local_output_dir"], str(output_dir))
-        self.assertTrue((output_dir / f"{self.job_id}-0.cog").is_file())
+        self.assertTrue((output_dir / f"{self.output_scenario_id}.cog").is_file())
         self.storage_client.upload_file.assert_not_called()
 
     def test_output_symlink_is_rejected_without_uploading_external_data(self):
@@ -392,7 +401,10 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(external.read_text(), "not a job output")
 
     def test_missing_output_and_stale_output_fail(self):
-        output = self.root / "output" / "scenarios" / self.job_id / f"{self.job_id}-0.cog"
+        output = (
+            self.root / "output" / "scenarios" / self.job_id
+            / f"{self.output_scenario_id}.cog"
+        )
         output.parent.mkdir(parents=True)
         output.write_bytes(b"stale")
         with patch.object(tasks.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)):

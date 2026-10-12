@@ -1,0 +1,29 @@
+project_id  = "YOUR_GCP_PROJECT"
+region      = "us-central1"
+name_prefix = "fimbox"
+environment = "dev"
+
+# Supplying both manages Secret Manager versions and stores credentials in state.
+# Leave null to populate secret versions outside Terraform instead.
+hydroshare_client_id     = null
+hydroshare_client_secret = null
+s3_endpoint_url         = "https://s3.hydroshare.org"
+
+# First apply creates infrastructure only. Push images and populate secrets next.
+deploy_services = false
+api_image       = ""
+worker_image    = ""
+
+# Replace with the deployed api_url output (or a configured HTTPS custom domain),
+# register both callbacks at HydroShare, and apply again before logging in.
+public_api_url = "https://configure-before-login.invalid"
+
+api_min_instances   = 0
+api_max_instances   = 5
+api_concurrency     = 80
+api_timeout_seconds = 60
+
+worker_cpu          = "4"
+worker_memory       = "16Gi"
+hand_fim_max_procs  = 1
+result_ttl_seconds = 86400

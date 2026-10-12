@@ -249,7 +249,7 @@
       "HandFimResult": {
         "type": "object",
         "title": "HandFimResult",
-        "description": "Result of a HAND-FIM request: one output GeoTIFF reference per scenario.",
+        "description": "Result of a HAND-FIM request: one output entry per scenario.",
         "properties": {
           "outputs": {
             "type": "array",
@@ -260,16 +260,10 @@
                 "ScenarioID": {
                   "type": "string",
                   "title": "Scenario Id"
-                },
-                "geotiff_url": {
-                  "type": "string",
-                  "title": "Geotiff Url",
-                  "description": "Location of the generated GeoTIFF output for this scenario."
                 }
               },
               "required": [
-                "ScenarioID",
-                "geotiff_url"
+                "ScenarioID"
               ],
               "additionalProperties": false
             }

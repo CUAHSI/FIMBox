@@ -636,6 +636,9 @@ def generate_scenario_fim(
                 )
             )
 
+        for future in futures:
+            future.result()
+
     print("----------------------------------")
     print("COMPLETED GENERATING FIM SCENARIOS")
     print("----------------------------------")
@@ -662,8 +665,7 @@ def generate_scenario_fim(
             huc_inundation_dir = Path(f"/home/output/flood_{huc}/{huc}_inundation")
             candidates = sorted(huc_inundation_dir.glob(f"**/{label}*_inundation.tif"))
             if not candidates:
-                print(f"  ! No output raster found for {label}, skipping.")
-                continue
+                raise RuntimeError(f"No output raster found for {label}")
             raw_tifs.append((label, candidates[0]))
 
         if not raw_tifs:

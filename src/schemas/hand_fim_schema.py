@@ -25,7 +25,7 @@ class Reach(BaseModel):
             "corresponding to the input data. Used to locate the "
             "necessary input HAND and rating curve datasets."
         ),
-        examples=["12345678"],
+        examples=["03020201"],
     )
     ReachID: str = Field(
         ...,
@@ -35,7 +35,7 @@ class Reach(BaseModel):
             "input data. Used to process HAND-FIM for the location of "
             "interest."
         ),
-        examples=["9821264"],
+        examples=["8780625"],
     )
     Streamflow: float = Field(
         ...,
@@ -45,7 +45,7 @@ class Reach(BaseModel):
             "input for the HAND-FIM method. Determines the extent of "
             "flooding in the inundation mapping process."
         ),
-        examples=[300.1],
+        examples=[227],
     )
 
     model_config = {"extra": "forbid"}
@@ -86,18 +86,15 @@ class ScenarioList(RootModel[List[Scenario]]):
 
 
 class HandFimOutput(BaseModel):
-    """Reference to a single generated GeoTIFF output for a scenario."""
+    """Metadata for a single generated scenario output."""
 
     ScenarioID: str
-    geotiff_url: str = Field(
-        ..., description="Location of the generated GeoTIFF output for this scenario."
-    )
 
     model_config = {"extra": "forbid"}
 
 
 class HandFimResult(BaseModel):
-    """Result of a HAND-FIM request: one output GeoTIFF reference per scenario."""
+    """Result of a HAND-FIM request: one output entry per scenario."""
 
     outputs: List[HandFimOutput]
 

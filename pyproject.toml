@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fimbox"
+version = "0.1.0"
+description = "Generated Python SDK and CLI for the FIMBox HAND-FIM API"
+readme = "readme.md"
+requires-python = ">=3.10"
+dependencies = [
+    "httpx>=0.28.1,<0.29",
+    "attrs>=25.3,<26",
+    "python-dateutil>=2.8,<3",
+    "click>=8.1,<9",
+    "typing-extensions>=4.12,<5",
+    "keyring>=25.6,<26",
+]
+
+[project.scripts]
+fimbox = "fimbox_cli:app"
+
+[project.optional-dependencies]
+codegen = ["openapi-python-client==0.28.0"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = ["fimbox_cli"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["fimbox_sdk*"]

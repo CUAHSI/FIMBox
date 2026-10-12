@@ -1,0 +1,3 @@
+include sdk/openapi.json
+include sdk/generator.yaml
+include sdk/generate.py

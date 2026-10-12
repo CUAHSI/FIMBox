@@ -123,6 +123,7 @@ def runfim(code_dir, output_dir, HUC_code, data_dir, label="", depth=False):
                 shutil.rmtree(temp_dir)
         else:
             print(f"Failed to complete inundation mapping for {HUC_code}.", flush=True)
+            raise subprocess.CalledProcessError(returncode, Command)
 
     finally:
         os.chdir(original_dir)

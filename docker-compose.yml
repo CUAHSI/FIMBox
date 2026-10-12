@@ -1,0 +1,65 @@
+name: fimbox
+
+services:
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/api/Dockerfile
+    env_file:
+      - path: .env
+        required: false
+        format: raw
+    environment:
+      APP_ROLE: api
+      REDIS_URL: redis://redis:6379/2
+      HYDROSHARE_OAUTH_AUTHORIZE_URL: ${HYDROSHARE_OAUTH_AUTHORIZE_URL:-https://www.hydroshare.org/o/authorize/}
+      HYDROSHARE_OAUTH_TOKEN_URL: ${HYDROSHARE_OAUTH_TOKEN_URL:-https://www.hydroshare.org/o/token/}
+      HYDROSHARE_USERINFO_URL: ${HYDROSHARE_USERINFO_URL:-https://www.hydroshare.org/hsapi/userInfo/}
+      HYDROSHARE_OAUTH_REDIRECT_URI: ${HYDROSHARE_OAUTH_REDIRECT_URI:-http://localhost:8000/auth/callback}
+      SWAGGER_OAUTH_REDIRECT_URI: ${SWAGGER_OAUTH_REDIRECT_URI:-http://localhost:8000/docs/oauth2-redirect}
+      HYDROSHARE_SCOPE: ${HYDROSHARE_SCOPE:-read write}
+      SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-86400}
+      OAUTH_STATE_COOKIE_SECURE: ${OAUTH_STATE_COOKIE_SECURE:-false}
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-https://s3.hydroshare.org}
+      HYDROSHARE_S3_CREDENTIALS_URL: ${HYDROSHARE_S3_CREDENTIALS_URL:-https://www.hydroshare.org/hsapi/user/service/accounts/s3/}
+      HYDROSHARE_S3_CREDENTIALS_EXPIRY_DAYS: ${HYDROSHARE_S3_CREDENTIALS_EXPIRY_DAYS:-1}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_ADDRESSING_STYLE: ${S3_ADDRESSING_STYLE:-path}
+    ports:
+      - "127.0.0.1:${FIMBOX_API_PORT:-8000}:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  worker:
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: docker/api/worker.Dockerfile
+    environment:
+      APP_ROLE: worker
+      REDIS_URL: redis://redis:6379/2
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      HAND_FIM_MAX_PROCS: ${HAND_FIM_MAX_PROCS:-1}
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-https://s3.hydroshare.org}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_ADDRESSING_STYLE: ${S3_ADDRESSING_STYLE:-path}
+    volumes:
+      - "${FIMBOX_INPUT_DIR:-./data/input}:/home/data/inputs"
+      - "${FIMBOX_OUTPUT_DIR:-./data/output}:/home/output"
+    ulimits:
+      stack: 67108864
+    depends_on:
+      redis:
+        condition: service_healthy

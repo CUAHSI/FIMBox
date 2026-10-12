@@ -322,7 +322,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(result["output_prefix"], "data/output")
         self.storage_client.upload_file.assert_called_once_with(
             str(output_path),
-            "fim-output", f"data/output/{self.job_id}/{PAYLOAD[0]['ScenarioID']}.cog",
+            "fim-output", f"data/output/{PAYLOAD[0]['ScenarioID']}.cog",
             ExtraArgs={"ContentType": "image/tiff"},
         )
         self.assertEqual(run.call_args.args[0][-3:], [
@@ -352,7 +352,7 @@ class WorkerTests(unittest.TestCase):
         )
         self.assertEqual(self.storage_client.upload_file.call_count, 3)
         for file in result["files"]:
-            self.assertEqual(file["key"], f"data/output/{self.job_id}/{file['path']}")
+            self.assertEqual(file["key"], f"data/output/{file['path']}")
             self.assertNotIn("download_url", file)
         self.assertFalse((output_dir / "stale.txt").exists())
         self.assertTrue((shared / "cache.csv").exists())
@@ -432,16 +432,13 @@ class StorageTests(unittest.TestCase):
         self.job_credentials = patcher.start()
         self.addCleanup(patcher.stop)
 
-    def test_job_specific_output_file_keys(self):
-        from uuid import UUID
-
-        job_id = UUID("00000000-0000-0000-0000-000000000001")
+    def test_output_file_keys_use_prefix_and_relative_path(self):
         self.assertEqual(
-            storage.output_file_key("/data/output/", job_id, "logs/run.txt"),
-            f"data/output/{job_id}/logs/run.txt",
+            storage.output_file_key("/data/output/", "logs/run.txt"),
+            "data/output/logs/run.txt",
         )
         with self.assertRaisesRegex(storage.StorageCredentialsError, "1024"):
-            storage.output_file_key("prefix", job_id, "x" * 1024)
+            storage.output_file_key("prefix", "x" * 1024)
 
     def test_s3_compatible_client_configuration(self):
         with patch.object(storage.boto3, "client") as client, patch.object(

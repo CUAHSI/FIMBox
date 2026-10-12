@@ -83,9 +83,9 @@ def __job_credentials(job_id: UUID) -> HydroShareS3Credentials:
         raise StorageCredentialsError("Job S3 credentials are invalid or expired") from None
 
 
-def output_file_key(prefix: str, job_id: UUID, relative_path: str) -> str:
+def output_file_key(prefix: str, relative_path: str) -> str:
     key = "/".join(
-        part for part in (prefix.strip("/"), str(job_id), relative_path) if part
+        part for part in (prefix.strip("/"), relative_path) if part
     )
     if len(key.encode("utf-8")) > 1024:
         raise StorageCredentialsError("Output object key exceeds 1024 UTF-8 bytes")

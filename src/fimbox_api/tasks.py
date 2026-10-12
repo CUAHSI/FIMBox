@@ -89,7 +89,7 @@ def hand_fim(
         for path in __output_files(output_dir):
             relative_path = path.relative_to(output_dir).as_posix()
             key = (
-                output_file_key(destination.output_prefix, UUID(job_id), relative_path)
+                output_file_key(destination.output_prefix, relative_path)
                 if destination.output_bucket is not None else None
             )
             content_type = (

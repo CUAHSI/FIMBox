@@ -131,7 +131,8 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
   JSON, invokes the existing container `scenario` CLI in a subprocess, verifies
   every COG exists, recursively uploads all files from the job-specific
   `/home/output/scenarios/<job_id>/` directory with unchanged relative filenames
-  under `<prefix>/<job_id>/`, and returns a file manifest plus scenario IDs.
+  under `<prefix>/`, overwriting existing S3 objects with matching keys, and
+  returns a file manifest plus scenario IDs.
   Shared watershed caches and other jobs are excluded. Redelivery clears
   local job files first.
   Without a bucket, leaves files on the Compose output bind mount, skips
@@ -139,7 +140,7 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
   Compose preserves the existing FIMBOX_OUTPUT_DIR bind configuration
   (default ./data/output relative to the repository root); only the worker mounts it.
 - **`src/fimbox_api/storage.py`** — Shared S3 client configuration and safe
-  job-specific object-key construction using job-specific temporary credentials. Submissions
+  prefix-relative object-key construction using job-specific temporary credentials. Submissions
   exchange the user's HydroShare access token through
   `/hsapi/user/service/accounts/s3/` (`{"expiry": <days>}`), store the returned
   access/secret/expiry only in Redis, and use them for uploads at

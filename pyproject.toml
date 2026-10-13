@@ -25,7 +25,7 @@ codegen = ["openapi-python-client==0.28.0"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-py-modules = ["fimbox_cli"]
+py-modules = ["fimbox_cli", "fimbox_login"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

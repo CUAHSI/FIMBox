@@ -1,18 +1,74 @@
 import json
 import os
+import re
 import time
 import unittest
+from copy import copy
+from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
 import httpx
 from fastapi.testclient import TestClient
+from fastapi.openapi.utils import get_openapi
 from pydantic import SecretStr, ValidationError
-from redis.exceptions import ConnectionError
+from redis.exceptions import ConnectionError, WatchError
 
 from fimbox_api import auth, main
 from fimbox_api.config import Settings
+from fimbox_api import device_auth
+
+
+class RedisPipeline:
+    """Exercise queued writes against the existing in-memory Redis mock."""
+
+    def __init__(self, values):
+        self.values = values
+        self.commands = []
+        self.conflicts = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.commands.clear()
+
+    def watch(self, key):
+        self.commands.clear()
+
+    def get(self, key):
+        return self.values.get(key)
+
+    def multi(self):
+        pass
+
+    def set(self, key, value, **kwargs):
+        self.commands.append(("set", key, value))
+        assert kwargs == {"keepttl": True}
+
+    def incr(self, key):
+        self.commands.append(("incr", key, None))
+
+    def expire(self, key, seconds):
+        self.commands.append(("expire", key, seconds))
+
+    def execute(self):
+        if self.conflicts:
+            self.conflicts -= 1
+            raise WatchError()
+        results = []
+        for command, key, value in self.commands:
+            if command == "set":
+                self.values[key] = value
+                results.append(True)
+            elif command == "incr":
+                self.values[key] = int(self.values.get(key, 0)) + 1
+                results.append(self.values[key])
+            else:
+                results.append(True)
+        self.commands.clear()
+        return results
 
 
 class AuthTests(unittest.TestCase):
@@ -28,6 +84,10 @@ class AuthTests(unittest.TestCase):
         patcher = patch.object(auth, "get_redis_client", return_value=self.redis)
         patcher.start()
         self.addCleanup(patcher.stop)
+        patcher = patch.object(device_auth, "get_redis_client", return_value=self.redis)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.pipeline = RedisPipeline(self.values)
         for name, value in (
             ("hydroshare_client_id", "test-client"),
             ("hydroshare_client_secret", SecretStr("test-secret")),
@@ -69,6 +129,223 @@ class AuthTests(unittest.TestCase):
         self.assertEqual(
             self.client.get("/auth/config").json(), {"authentication_enabled": True},
         )
+
+    def __device_start(self):
+        self.redis.pipeline.return_value = self.pipeline
+        response = self.client.post("/auth/device/start")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        started = response.json()
+        browser_code, secret = started["device_code"].split(".")
+        self.assertNotIn(secret, started["verification_uri"])
+        self.assertEqual(started["interval"], 5)
+        self.assertEqual(started["expires_in"], 600)
+        self.assertNotIn(secret, str(self.values))
+        return started, browser_code
+
+    def __device_approve(self, browser_code):
+        page = self.client.get("/auth/device/verify", params={"code": browser_code})
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("only if you started", page.text)
+        self.assertIn("frame-ancestors 'none'", page.headers["content-security-policy"])
+        csrf = re.search(r'name="csrf" value="([^"]+)"', page.text).group(1)
+        response = self.client.post(
+            "/auth/device/verify", data={"code": browser_code, "csrf": csrf},
+            follow_redirects=False,
+        )
+        self.assertEqual(response.status_code, 302)
+        return parse_qs(urlparse(response.headers["location"]).query)["state"][0]
+
+    def test_device_browser_approval_and_one_time_sdk_retrieval(self):
+        started, browser_code = self.__device_start()
+        state = self.__device_approve(browser_code)
+        self.__provider()
+        response = self.client.get("/auth/callback", params={"code": "auth-code", "state": state})
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Authorization complete", response.text)
+        self.assertNotIn("access_token", response.text)
+        record = json.loads(self.values[device_auth.DEVICE_PREFIX + browser_code])
+        session_token = record["token"]["access_token"]
+        self.assertNotIn(session_token, response.text)
+        self.assertNotIn(session_token, response.headers.get("location", ""))
+        self.pipeline.conflicts = 1
+        poll = self.client.post("/auth/device/poll", json={"device_code": started["device_code"]})
+        self.assertEqual(poll.status_code, 200)
+        self.assertEqual(poll.json()["status"], "authorized")
+        self.assertEqual(poll.json()["token"]["access_token"], session_token)
+        self.assertEqual(poll.headers["cache-control"], "no-store")
+        self.assertNotIn(session_token, self.values[device_auth.DEVICE_PREFIX + browser_code])
+        self.assertEqual(
+            self.client.get("/auth/session", headers={"Authorization": "Bearer " + session_token}).status_code, 200,
+        )
+        self.assertEqual(self.client.post(
+            "/auth/device/poll", json={"device_code": started["device_code"]},
+        ).status_code, 410)
+        self.client.cookies.set(auth.STATE_COOKIE, state)
+        self.assertEqual(self.client.get(
+            "/auth/callback", params={"code": "auth-code", "state": state},
+        ).status_code, 400)
+
+    def test_device_pending_secret_validation_and_poll_rate(self):
+        started, browser_code = self.__device_start()
+        wrong = browser_code + "." + "x" * 43
+        self.assertEqual(self.client.post("/auth/device/poll", json={"device_code": wrong}).status_code, 400)
+        self.assertEqual(self.client.post("/auth/device/poll", json={"device_code": browser_code}).status_code, 422)
+        poll = self.client.post("/auth/device/poll", json={"device_code": started["device_code"]})
+        self.assertEqual(poll.json(), {"status": "pending", "token": None})
+        limited = self.client.post("/auth/device/poll", json={"device_code": started["device_code"]})
+        self.assertEqual(limited.status_code, 429)
+        self.assertEqual(limited.headers["retry-after"], "5")
+        self.assertEqual(limited.headers["cache-control"], "no-store")
+        with patch.object(device_auth.time, "time", return_value=time.time() + 6):
+            self.assertEqual(self.client.post(
+                "/auth/device/poll", json={"device_code": started["device_code"]},
+            ).status_code, 200)
+
+    def test_device_sdk_contract_matches_routes(self):
+        spec = json.loads((Path(__file__).resolve().parents[1] / "sdk/openapi.json").read_text())
+        routes = [
+            copy(route) for route in main.app.routes
+            if getattr(route, "path", "") in ("/auth/device/start", "/auth/device/poll", "/auth/callback")
+        ]
+        for route in routes:
+            route.include_in_schema = True
+        schema = get_openapi(title=main.app.title, version=main.app.version, routes=routes)
+        for path, operations in schema["paths"].items():
+            self.assertEqual(spec["paths"][path], operations)
+        for name, model in schema["components"]["schemas"].items():
+            self.assertEqual(spec["components"]["schemas"][name], model)
+
+    def test_device_denial_and_invalid_callback_state(self):
+        started, browser_code = self.__device_start()
+        state = self.__device_approve(browser_code)
+        self.assertEqual(self.client.get(
+            "/auth/callback", params={"error": "access_denied", "state": "invalid"},
+        ).status_code, 400)
+        response = self.client.get("/auth/callback", params={"error": "access_denied", "state": state})
+        self.assertIn("Authorization denied", response.text)
+        poll = self.client.post("/auth/device/poll", json={"device_code": started["device_code"]})
+        self.assertEqual(poll.json(), {"status": "denied", "token": None})
+        self.assertEqual(self.client.post(
+            "/auth/device/poll", json={"device_code": started["device_code"]},
+        ).status_code, 410)
+
+    def test_device_expiry_and_confirmation_csrf(self):
+        started, browser_code = self.__device_start()
+        self.assertEqual(self.client.post(
+            "/auth/device/verify", data={"code": browser_code, "csrf": "bad"}, follow_redirects=False,
+        ).status_code, 400)
+        self.assertEqual(self.client.get("/auth/device/verify", params={"code": '<script>'}).status_code, 400)
+        with patch.object(device_auth.time, "time", return_value=time.time() + 601):
+            self.assertEqual(self.client.post(
+                "/auth/device/poll", json={"device_code": started["device_code"]},
+            ).status_code, 410)
+        self.values.pop(device_auth.DEVICE_PREFIX + browser_code)
+        self.assertEqual(self.client.post(
+            "/auth/device/poll", json={"device_code": started["device_code"]},
+        ).status_code, 410)
+
+    def test_device_start_rate_limit_and_anonymous_mode(self):
+        self.redis.pipeline.return_value = self.pipeline
+        for _ in range(30):
+            self.assertEqual(self.client.post("/auth/device/start").status_code, 200)
+        self.assertEqual(self.client.post("/auth/device/start").status_code, 429)
+        with patch.object(auth.settings, "hydroshare_client_id", ""), patch.object(
+            auth.settings, "hydroshare_client_secret", SecretStr(""),
+        ):
+            self.assertEqual(self.client.post("/auth/device/start").status_code, 409)
+
+    def test_device_callback_expiry_revokes_unclaimed_session(self):
+        started, browser_code = self.__device_start()
+        state = self.__device_approve(browser_code)
+        self.__provider()
+        self.values.pop(device_auth.DEVICE_PREFIX + browser_code)
+        self.assertEqual(self.client.get(
+            "/auth/callback", params={"code": "auth-code", "state": state},
+        ).status_code, 410)
+        self.assertFalse(any(key.startswith(auth.SESSION_PREFIX) for key in self.values))
+
+    def test_device_provider_failure_is_reported_to_sdk(self):
+        started, browser_code = self.__device_start()
+        state = self.__device_approve(browser_code)
+        provider = self.__provider()
+        provider.post.return_value = httpx.Response(
+            401, json={"error": "invalid_client"}, request=httpx.Request("POST", "https://provider.example"),
+        )
+        with self.assertLogs("fimbox_api.auth", level="ERROR"):
+            response = self.client.get("/auth/callback", params={"code": "auth-code", "state": state})
+        self.assertEqual(response.status_code, 502)
+        poll = self.client.post("/auth/device/poll", json={"device_code": started["device_code"]})
+        self.assertEqual(poll.json(), {"status": "failed", "token": None})
+
+    def test_device_callback_is_bound_to_original_transaction(self):
+        first, browser_code = self.__device_start()
+        second, _ = self.__device_start()
+        state = self.__device_approve(browser_code)
+        self.__provider()
+        self.client.get("/auth/callback", params={"code": "auth-code", "state": state})
+        self.assertEqual(self.client.post(
+            "/auth/device/poll", json={"device_code": second["device_code"]},
+        ).json()["status"], "pending")
+        self.assertEqual(self.client.post(
+            "/auth/device/poll", json={"device_code": first["device_code"]},
+        ).json()["status"], "authorized")
+
+    def test_device_cannot_restart_approval_or_return_expired_session(self):
+        started, browser_code = self.__device_start()
+        state = self.__device_approve(browser_code)
+        page = self.client.get("/auth/device/verify", params={"code": browser_code})
+        csrf = re.search(r'name="csrf" value="([^"]+)"', page.text).group(1)
+        self.assertEqual(self.client.post(
+            "/auth/device/verify", data={"code": browser_code, "csrf": csrf}, follow_redirects=False,
+        ).status_code, 409)
+        self.__provider()
+        with patch.object(auth.settings, "session_ttl_seconds", 2):
+            self.client.get("/auth/callback", params={"code": "auth-code", "state": state})
+        with patch.object(device_auth.time, "time", return_value=time.time() + 6):
+            self.assertEqual(self.client.post(
+                "/auth/device/poll", json={"device_code": started["device_code"]},
+            ).status_code, 410)
+
+    def test_generated_sdk_helper_completes_browser_login_end_to_end(self):
+        from fimbox_login import begin_login
+        from fimbox_sdk import Client
+
+        self.redis.pipeline.return_value = self.pipeline
+        started = {}
+
+        def respond(request):
+            if request.url.path == "/auth/device/start":
+                response = self.client.post(request.url.path)
+                started.update(response.json())
+            else:
+                browser_code = started["device_code"].split(".")[0]
+                state = self.__device_approve(browser_code)
+                browser = self.client.get("/auth/callback", params={"code": "auth-code", "state": state})
+                self.assertIn("Authorization complete", browser.text)
+                response = self.client.post(request.url.path, json=json.loads(request.content))
+            return httpx.Response(response.status_code, json=response.json(), headers=response.headers)
+
+        http = httpx.Client(base_url="http://localhost:8000", transport=httpx.MockTransport(respond), timeout=30)
+        self.addCleanup(http.close)
+        self.__provider()
+        client = Client(base_url="http://localhost:8000").set_httpx_client(http)
+        login = begin_login(client)
+        token = login.wait()
+        self.assertEqual(self.client.get(
+            "/auth/session", headers={"Authorization": "Bearer " + token},
+        ).json()["user_id"], "alice")
+
+    def test_device_conflict_retry_limit_and_redis_failure_are_explicit(self):
+        started, browser_code = self.__device_start()
+        self.pipeline.conflicts = 5
+        with self.assertLogs("fimbox_api.device_auth", level="ERROR"):
+            response = self.client.post("/auth/device/poll", json={"device_code": started["device_code"]})
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(json.loads(self.values[device_auth.DEVICE_PREFIX + browser_code])["status"], "pending")
+        self.redis.pipeline.side_effect = ConnectionError("unavailable")
+        with self.assertLogs("fimbox_api.main", level="ERROR"):
+            self.assertEqual(self.client.post("/auth/device/start").status_code, 503)
 
     def test_partial_oauth_configuration_fails_without_disclosing_inputs(self):
         with patch.dict(os.environ, {}, clear=True):

@@ -59,6 +59,19 @@ class CloudNotebookTests(unittest.TestCase):
             if path == "/auth/config":
                 self.assertNotIn("authorization", request.headers)
                 return httpx.Response(200, json={"authentication_enabled": True})
+            if path == "/auth/device/start":
+                return httpx.Response(200, json={
+                    "device_code": "b" * 43 + "." + "s" * 43,
+                    "verification_uri": "https://api.example.org/auth/device/verify?code=" + "b" * 43,
+                    "expires_in": 600, "interval": 5,
+                })
+            if path == "/auth/device/poll":
+                self.assertNotIn("authorization", request.headers)
+                return httpx.Response(200, json={
+                    "status": "authorized",
+                    "token": {"access_token": "notebook-test-token", "token_type": "bearer",
+                              "expires_in": 600, "user_id": "test", "scope": "read"},
+                })
             self.assertEqual(request.headers["authorization"], "Bearer notebook-test-token")
             if path == "/auth/session":
                 return httpx.Response(200, json={"user_id": "test", "expires_at": 9999999999})
@@ -82,7 +95,6 @@ class CloudNotebookTests(unittest.TestCase):
             "API_URL": "https://api.example.org", "os": os,
             "Path": Path, "RESUME_JOB_ID": "", "OUTPUT_BUCKET": "bucket",
             "OUTPUT_PREFIX": "demo", "MAX_PROCS": 1, "WAIT_SECONDS": 60, "POLL_SECONDS": 0,
-            "USE_MACOS_KEYCHAIN": False,
         }
         imports = self.sources["dependencies"].split("from fimbox_sdk import", 1)[1]
         exec("from fimbox_sdk import" + imports, namespace)
@@ -98,23 +110,12 @@ class CloudNotebookTests(unittest.TestCase):
             AuthenticatedClient, "get_httpx_client", return_value=authenticated_http,
         ), patch.dict("os.environ", {"FIMBOX_SESSION_TOKEN": ""}), patch("IPython.display.display"):
             exec(self.sources["authentication"], namespace)
-            self.addCleanup(namespace["token_input"].close)
-            with self.assertRaisesRegex(ValueError, "masked field"):
-                exec(self.sources["connect"], namespace)
-            namespace["token_input"].value = "notebook-test-token"
+            self.assertEqual(namespace["session_token"], "notebook-test-token")
             exec(self.sources["connect"], namespace)
-            self.assertEqual(namespace["token_input"].value, "")
-            namespace["USE_MACOS_KEYCHAIN"] = True
-            namespace["api_client"] = None
-            with patch("sys.platform", "darwin"), patch(
-                "keyring.backends.macOS.Keyring.get_password", return_value="notebook-test-token",
-            ) as saved_token:
-                exec(self.sources["connect"], namespace)
-                saved_token.assert_called_once_with("fimbox", namespace["API_URL"])
             output = io.StringIO()
             with redirect_stdout(output):
                 exec(self.sources["submission"], namespace)
-            self.assertEqual(sum(request.method == "POST" for request in requests), 1)
+            self.assertEqual(sum(request.url.path == "/jobs/hand-fim" for request in requests), 1)
             with redirect_stdout(output):
                 exec(self.sources["monitoring"], namespace)
             self.assertIsInstance(namespace["final_result"], StoredHandFimResult)
@@ -125,6 +126,30 @@ class CloudNotebookTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "HTTP 401"):
                 namespace["call_api"](operation, client=namespace["api_client"])
             self.assertTrue(all("notebook-test-token" not in str(request.url) for request in requests))
+
+    def test_no_saved_outputs_or_credential_widgets(self):
+        for cell in self.notebook["cells"]:
+            if cell["cell_type"] == "code":
+                self.assertEqual(cell["outputs"], [])
+                self.assertIsNone(cell["execution_count"])
+        self.assertNotIn("token_input", self.sources["authentication"])
+
+    def test_environment_token_bypasses_browser_login(self):
+        from fimbox_sdk import Client
+        namespace = {"API_URL": "https://api.example.org", "os": os}
+        imports = self.sources["dependencies"].split("from fimbox_sdk import", 1)[1]
+        exec("from fimbox_sdk import" + imports, namespace)
+        transport = httpx.MockTransport(lambda request: httpx.Response(200, json={"authentication_enabled": True}))
+        http = httpx.Client(transport=transport, base_url=namespace["API_URL"])
+        self.addCleanup(http.close)
+        with patch.object(
+            Client, "get_httpx_client", return_value=http,
+        ), patch.dict("os.environ", {"FIMBOX_SESSION_TOKEN": "saved-session"}), patch(
+            "fimbox_login.begin_login",
+        ) as begin:
+            exec(self.sources["authentication"], namespace)
+        begin.assert_not_called()
+        self.assertEqual(namespace["session_token"], "saved-session")
 
 if __name__ == "__main__":
     unittest.main()

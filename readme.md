@@ -613,14 +613,72 @@ docker compose --env-file /dev/null run --rm --no-deps \
 
 ## Installable Python SDK and CLI
 
+### Browser-assisted SDK login
+
+The handwritten `fimbox_login` helper uses generated SDK operations to receive a
+FIMBox session token automatically after browser authorization. It works with
+local applications and remote notebook kernels; no localhost listener or
+HydroShare client secret is needed in your code.
+
+```python
+import httpx
+from fimbox_login import begin_login
+from fimbox_sdk import Client, AuthenticatedClient
+
+API_URL = "https://YOUR-CLOUD-RUN-ENDPOINT"
+with Client(base_url=API_URL, timeout=httpx.Timeout(30), follow_redirects=False) as public:
+    login = begin_login(public)
+    print(login.authorization_url)  # Safe: contains no polling secret or session token.
+    # Open this link, confirm you initiated the login, and authorize with HydroShare.
+    session_token = login.wait(timeout=600)
+
+with AuthenticatedClient(base_url=API_URL, token=session_token, timeout=httpx.Timeout(30)) as client:
+    # Use generated SDK operations with this client.
+    pass
+```
+
+In a notebook, display the link before calling `wait()`; do not display the
+transaction, token, authentication responses, or client. `wait()` raises
+explicit errors on denial, provider failure, expired/consumed transactions,
+transport failures, or malformed responses. Its waiting deadline is bounded by
+the transaction lifetime, with individual requests bounded by the client's HTTP
+timeout. Start a new login after any interrupted or failed token retrieval;
+retrieval is deliberately not retried after network errors.
+
+`POST /auth/device/start` returns a ten-minute transaction and verification
+link. The browser link contains only a public transaction identifier, not the
+private retrieval secret. The browser requires an explicit CSRF-protected
+confirmation before starting the existing HydroShare OAuth flow. OAuth state
+and its HttpOnly cookie bind the callback to that transaction. The callback
+shows only completion/denial; the SDK retrieves the FIMBox token via
+`POST /auth/device/poll` with the private code in the JSON body. Redis stores only
+a hash of the retrieval secret and atomically consumes successful handoffs.
+Pending tokens remain in server-side Redis only until handoff/transaction expiry.
+Responses prohibit caching; session tokens and polling secrets never appear in
+redirect URLs. These SDK endpoints remain excluded from Swagger, like the
+existing auth endpoints, but are captured in `sdk/openapi.json`.
+
+Polling is limited to once every five seconds per transaction (HTTP 429 with
+`Retry-After`); starting logins is limited to 30 attempts per client address,
+reset after 60 seconds without another attempt. Clients behind a shared proxy
+may share that start limit. HTTPS is required by the helper except on loopback
+development hosts, and redirects must be disabled. Keep
+`OAUTH_STATE_COOKIE_SECURE=true` in production. Only approve links you generated
+yourself, never links sent by someone else.
+
+Redeploy the API and regenerate/reinstall the client before using this flow.
+The existing `/auth/callback` OAuth registration does not change. Manual browser
+login, Swagger PKCE, CLI token entry/keychain storage, and environment tokens
+remain supported. The helper does not persist credentials to disk or keychain.
+
 ### Cloud job notebook
 
 Open [`notebooks/cloud_hand_fim.ipynb`](notebooks/cloud_hand_fim.ipynb) in
 Jupyter or VS Code with a Python kernel. It installs the client, accepts your
-cloud API URL and HydroShare bucket, prompts
-for a FIMBox session token in a masked widget field, then validates it in a
-separate Connect cell. Pause to enter the token before continuing; do not use
-Run All on the first pass. It submits directly via the generated Python
+cloud API URL and HydroShare bucket, displays the browser authorization link,
+and polls for the token automatically. Click the link while the authentication
+cell waits, then run the separate Connect cell to validate the session.
+It submits directly via the generated Python
 SDK (no CLI subprocess), and polls job status and output metadata.
 The setup cell refreshes editable-install paths in the running kernel so
 `fimbox_sdk` can be imported immediately after installation.

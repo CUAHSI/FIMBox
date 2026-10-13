@@ -38,6 +38,15 @@ actual FIM computation using NOAA/OWP's `inundation-mapping` tooling and the
   attrs models, sync/async operation modules, errors and response types for every endpoint.
   Module names derive from FastAPI operation IDs. Dependencies: httpx, attrs,
   python-dateutil, typing-extensions. No server imports.
+- **`src/fimbox_login.py`** — Packaged handwritten browser-assisted SDK helper.
+  `begin_login(Client)` returns an opaque BrowserLogin; display its public
+  authorization_url, then `wait()` to retrieve a FIMBox session token once.
+  Uses generated start/poll endpoints, HTTPS except loopback, no redirects,
+  finite HTTP timeout, bounded polling/slow-down, and explicit sanitized errors.
+  Never persists credentials; remote notebook kernels are supported.
+- **`tests/test_fimbox_login.py`** — Mock-transport helper regressions for
+  pending/authorized/denied/failed, slow-down, deadlines, invalid responses,
+  origin/redirect restrictions, and credential-safe errors.
 - **`sdk/openapi.json`**, **`sdk/generator.yaml`** — Captured API contract
   and local generator config. `pixi run sdk-generate` creates the ignored SDK
   directory from the spec.
@@ -48,7 +57,7 @@ actual FIM computation using NOAA/OWP's `inundation-mapping` tooling and the
   Run it before installing the CLI, importing its generated client, or running
   tests that exercise the SDK.
 - **`pyproject.toml`**, **`MANIFEST.in`** — Installable `fimbox` distribution:
-  packages the locally generated fimbox_sdk and fimbox_cli, with fimbox console
+  packages the locally generated fimbox_sdk, fimbox_cli, and fimbox_login, with fimbox console
   entry point. Python 3.10+. Does not package server modules. Optional codegen dependency
   pins generator; spec/config included in source distribution.
 - **`tests/test_fimbox_cli.py`** — SDK/CLI regression tests with mock HTTP,
@@ -57,10 +66,8 @@ actual FIM computation using NOAA/OWP's `inundation-mapping` tooling and the
 ## Cloud example notebook (`notebooks/`)
 
 - **`notebooks/cloud_hand_fim.ipynb`** — User-run generated SDK example: HTTPS API
-  configuration, SDK auth discovery/masked ipywidgets.Password token input,
-  separate Connect cell (no blocking getpass), typed direct submission
-  with opt-in USE_MACOS_KEYCHAIN for clipboard/widget issues (native Keychain,
-  no plaintext backend; URL matches CLI credential account),
+  configuration, SDK auth discovery and browser-assisted polling via fimbox_login,
+  separate Connect cell, typed direct submission,
   using AuthenticatedClient (no CLI subprocess) and bounded polling/resume.
   Setup reprocesses the kernel's site-package .pth files after editable install
   so SDK imports work without a kernel restart.
@@ -126,6 +133,8 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
   with JobList/JobSummary objects containing job_id/status (not plain ID
   strings), sharing status normalization with individual job polling,
   queued-job cancellation, public health, and explicit storage/queue errors.
+  Login-response middleware prevents caching/referrer leakage for device routes
+  and OAuth callbacks, including error and validation responses.
 - **`src/fimbox_api/tasks.py`** — Real HAND-FIM Celery task. Revalidates input,
   substitutes safe job-specific internal scenario names, writes the scenario
   JSON, invokes the existing container `scenario` CLI in a subprocess, verifies
@@ -162,12 +171,20 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
   schema and `/docs`; their captured `sdk/openapi.json` definitions remain for
   the generated CLI auth client. HydroShare S3 submissions require configured
   authentication.
+- **`src/fimbox_api/device_auth.py`** — SDK login transactions with ten-minute
+  TTLs, separate public browser code/private hashed polling secret, start/poll
+  rate limits, explicit browser CSRF confirmation, OAuth-state-bound completion,
+  and Redis WATCH/MULTI one-time token consumption preserving TTL. SDK start/poll
+  endpoints are captured in the SDK spec but excluded from live OpenAPI.
+  Device callbacks show HTML without credentials; legacy callbacks return JSON.
 - **`tests/test_fimbox_api.py`** — Focused `unittest` coverage for API
   validation/queueing, status, removed output routes, cancellation, worker command
   construction, identifier isolation, missing/stale outputs, and failures.
   The FIM computation subprocess is mocked; these tests do not download data.
 - **`tests/test_fimbox_auth.py`** — OAuth/state/replay, provider failure,
-  session expiry/logout, route authentication, PKCE, and ownership tests.
+  session expiry/logout, route authentication, PKCE, ownership, and device
+  login tests (secret/state/CSRF binding, expiry, rate limits, atomic retry/replay,
+  generated-SDK end-to-end handoff, and captured auth contract parity).
 - **`tests/test_container_scenario.py`** — Container-only regression tests
   that load the real `entry.py` and mock computation/downloads to prove that
   future failures and missing HUC rasters propagate. Skipped on the host.

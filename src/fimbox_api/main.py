@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Annotated, Any
 from uuid import UUID, uuid4
 
@@ -49,6 +50,17 @@ app = FastAPI(
 )
 app.include_router(auth_router)
 AuthenticatedSession = Annotated[UserSession, Depends(get_authenticated_session)]
+
+
+@app.middleware("http")
+async def protect_login_responses(
+    request: Request, call_next: Callable[[Request], Awaitable[Response]],
+) -> Response:
+    response = await call_next(request)
+    if request.url.path.startswith("/auth/device/") or request.url.path == "/auth/callback":
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Referrer-Policy"] = "no-referrer"
+    return response
 
 
 def __openapi() -> dict[str, Any]:

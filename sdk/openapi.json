@@ -149,11 +149,16 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Session JSON for manual login; HTML completion for SDK browser transactions",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/SessionToken"
+                }
+              },
+              "text/html": {
+                "schema": {
+                  "type": "string"
                 }
               }
             }
@@ -424,6 +429,89 @@
         "responses": {
           "204": {
             "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/device/start": {
+      "post": {
+        "tags": [
+          "authentication"
+        ],
+        "summary": "Begin Device Login",
+        "operationId": "begin_device_login_auth_device_start_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceLoginStarted"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Authentication disabled"
+          },
+          "429": {
+            "description": "Login attempt rate exceeded; see Retry-After"
+          },
+          "503": {
+            "description": "Login store unavailable"
+          }
+        }
+      }
+    },
+    "/auth/device/poll": {
+      "post": {
+        "tags": [
+          "authentication"
+        ],
+        "summary": "Poll Device Session",
+        "operationId": "poll_device_session_auth_device_poll_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeviceLoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceLoginPoll"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid transaction or retrieval secret"
+          },
+          "410": {
+            "description": "Expired or consumed transaction/session"
+          },
+          "429": {
+            "description": "Poll interval exceeded; see Retry-After"
+          },
+          "503": {
+            "description": "Login store unavailable or transaction busy"
           },
           "422": {
             "description": "Validation Error",
@@ -892,6 +980,80 @@
           "scenarios"
         ],
         "title": "HandFimJobRequest"
+      },
+      "DeviceLoginPoll": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "authorized",
+              "denied",
+              "failed"
+            ],
+            "title": "Status"
+          },
+          "token": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SessionToken"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "title": "DeviceLoginPoll"
+      },
+      "DeviceLoginRequest": {
+        "properties": {
+          "device_code": {
+            "type": "string",
+            "maxLength": 87,
+            "minLength": 87,
+            "format": "password",
+            "title": "Device Code",
+            "writeOnly": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "device_code"
+        ],
+        "title": "DeviceLoginRequest"
+      },
+      "DeviceLoginStarted": {
+        "properties": {
+          "device_code": {
+            "type": "string",
+            "title": "Device Code"
+          },
+          "verification_uri": {
+            "type": "string",
+            "title": "Verification Uri"
+          },
+          "expires_in": {
+            "type": "integer",
+            "title": "Expires In"
+          },
+          "interval": {
+            "type": "integer",
+            "title": "Interval"
+          }
+        },
+        "type": "object",
+        "required": [
+          "device_code",
+          "verification_uri",
+          "expires_in",
+          "interval"
+        ],
+        "title": "DeviceLoginStarted"
       }
     },
     "securitySchemes": {

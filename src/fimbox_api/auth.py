@@ -69,11 +69,16 @@ def __require_oauth_configuration() -> None:
         raise HTTPException(status_code=503, detail="HydroShare OAuth is not configured")
 
 
-def create_oauth_authorization_redirect(scope: str | None = None) -> tuple[str, str]:
+def create_oauth_authorization_redirect(
+    scope: str | None = None, device_browser_code: str | None = None,
+) -> tuple[str, str]:
     __require_oauth_configuration()
     state = secrets.token_urlsafe(32)
     requested_scope = scope or settings.hydroshare_scope
-    get_redis_client().setex(AUTH_STATE_PREFIX + state, STATE_TTL_SECONDS, requested_scope)
+    get_redis_client().setex(
+        AUTH_STATE_PREFIX + state, STATE_TTL_SECONDS,
+        json.dumps({"scope": requested_scope, "device_browser_code": device_browser_code}),
+    )
     query = urlencode({
         "response_type": "code",
         "client_id": settings.hydroshare_client_id,
@@ -179,12 +184,20 @@ def issue_user_session_from_authorization_code(
     )
 
 
-def complete_oauth_authorization(code: str, state: str, cookie_state: str | None) -> SessionToken:
+def consume_oauth_state(state: str, cookie_state: str | None) -> str | None:
     if not state or not cookie_state or not secrets.compare_digest(state, cookie_state):
         raise HTTPException(status_code=400, detail="Invalid OAuth state")
-    scope = get_redis_client().getdel(AUTH_STATE_PREFIX + state)
-    if scope is None:
+    stored = get_redis_client().getdel(AUTH_STATE_PREFIX + state)
+    if stored is None:
         raise HTTPException(status_code=400, detail="Invalid or expired OAuth state")
+    # Existing browser transactions issued before deployment stored only scope.
+    if not stored.startswith("{"):
+        return None
+    return json.loads(stored)["device_browser_code"]
+
+
+def complete_oauth_authorization(code: str, state: str, cookie_state: str | None) -> SessionToken:
+    consume_oauth_state(state, cookie_state)
     return issue_user_session_from_authorization_code(
         code=code, redirect_uri=settings.hydroshare_oauth_redirect_uri,
     )

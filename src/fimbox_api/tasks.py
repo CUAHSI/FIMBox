@@ -65,6 +65,21 @@ def __run_scenario(command: list[str], job_id: str) -> None:
         raise subprocess.CalledProcessError(return_code, command)
 
 
+def __reject_existing_s3_keys(client: Any, bucket: str, keys: list[str]) -> None:
+    for key in keys:
+        try:
+            client.head_object(Bucket=bucket, Key=key)
+        except ClientError as error:
+            code = error.response.get("Error", {}).get("Code")
+            if code in {"404", "NoSuchKey", "NotFound"}:
+                continue
+            raise
+        raise RuntimeError(
+            f"S3 output object s3://{bucket}/{key} already exists; "
+            "resubmit with overwrite=true to replace it"
+        )
+
+
 @celery_app.task(name="fimbox_api.tasks.hand_fim")
 def hand_fim(
     job_id: str,
@@ -72,12 +87,14 @@ def hand_fim(
     output_bucket: str | None = None,
     output_prefix: str = "",
     max_procs: int | None = None,
+    overwrite: bool = False,
 ) -> dict[str, Any]:
     """Run the container scenario command and upload its job-specific output tree."""
     job_id = str(UUID(job_id))
     scenarios = HandFimParameters.model_validate(payload)
     destination = HandFimJobOptions(
-        output_bucket=output_bucket, output_prefix=output_prefix, max_procs=max_procs,
+        output_bucket=output_bucket, output_prefix=output_prefix,
+        max_procs=max_procs, overwrite=overwrite,
     )
     input_dir = settings.hand_fim_input_dir / "jobs" / job_id
     output_dir = settings.hand_fim_output_dir / "scenarios" / job_id
@@ -118,7 +135,20 @@ def hand_fim(
             )
         files = []
         client = s3_client(UUID(job_id)) if destination.output_bucket is not None else None
-        for path in __output_files(output_dir):
+        output_paths = __output_files(output_dir)
+        if client is not None and not destination.overwrite:
+            __reject_existing_s3_keys(
+                client,
+                destination.output_bucket,
+                [
+                    output_file_key(
+                        destination.output_prefix,
+                        path.relative_to(output_dir).as_posix(),
+                    )
+                    for path in output_paths
+                ],
+            )
+        for path in output_paths:
             relative_path = path.relative_to(output_dir).as_posix()
             key = (
                 output_file_key(destination.output_prefix, relative_path)
@@ -140,7 +170,8 @@ def hand_fim(
         append_job_log(job_id, "HAND-FIM job completed.\n")
         return StoredHandFimResult(
             outputs=outputs, files=files,
-            local_output_dir=str(output_dir), **destination.model_dump(exclude={"max_procs"}),
+            local_output_dir=str(output_dir),
+            **destination.model_dump(exclude={"max_procs", "overwrite"}),
         ).model_dump(mode="json")
     except (
         OSError, subprocess.CalledProcessError, RuntimeError,

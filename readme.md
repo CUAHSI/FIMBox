@@ -454,9 +454,12 @@ For S3 output, the caller supplies `output_bucket` and optionally `output_prefix
 and destination HydroShare resource must already exist. Supply the resource's
 S3 bucket and writable prefix, not an arbitrary new bucket. The submitting HydroShare user must have write access there. Retrieve objects
 directly from S3 using the reported keys and your HydroShare permissions.
-Output keys use `<output_prefix>/<relative-file-path>`; uploading to an existing
-key overwrites that object. Job ownership checks do not bypass
-HydroShare resource permissions.
+Output keys use `<output_prefix>/<relative-file-path>`. The submission option
+`overwrite` defaults to `false`; if any output key already exists, the job fails
+before uploading files. Set `overwrite` to `true` to replace existing objects
+with matching keys. With overwrite disabled, the S3 credentials must also allow
+checking target object metadata. Job ownership checks do not bypass HydroShare
+resource permissions.
 
 Submit a JSON object containing the scenario array and destination options (an
 empty prefix explicitly selects the bucket root):
@@ -466,7 +469,7 @@ curl --fail -X POST \
   'http://localhost:8000/jobs/hand-fim' \
   -H "Authorization: Bearer $FIMBOX_SESSION_TOKEN" \
   -H 'Content-Type: application/json' \
-  --data '{"scenarios":[{"ScenarioID":"single-reach-scenario","Reaches":[{"HUC":"03020201","ReachID":"8780625","Streamflow":227}]}],"output_bucket":"fim-output","output_prefix":"data/output"}'
+  --data '{"scenarios":[{"ScenarioID":"single-reach-scenario","Reaches":[{"HUC":"03020201","ReachID":"8780625","Streamflow":227}]}],"output_bucket":"fim-output","output_prefix":"data/output","overwrite":true}'
 ```
 
 The route uses the shared Pydantic scenario schema from
@@ -534,6 +537,9 @@ and subdirectories:
 This includes `.tif`, `.cog`, and any other generated files, without renaming
 them. Shared watershed caches and previous jobs elsewhere in `/home/output`
 are excluded. Redelivered jobs clear their local output files before computing.
+By default, if any target key already exists, the worker fails the job before
+uploading output files. Set the submission option `overwrite=true` to replace
+conflicting objects during the final upload.
 The existing scenario command still must produce a nonempty COG per scenario
 before the job can succeed. Original scenario IDs remain metadata.
 Failed computation, missing output, or an upload failure fails the job.
@@ -897,8 +903,12 @@ This defaults to the Compose-mounted output directory. To opt into S3:
 fimbox submit \
   --body test-data/single_reach.json \
   --output-bucket YOUR_HYDROSHARE_BUCKET \
-  --output-prefix data/output
+  --output-prefix data/output \
+  --overwrite
 ```
+
+S3 uploads fail if any target key already exists unless `--overwrite` is
+specified. The JSON API and SDK option is `overwrite` (default `false`).
 
 The CLI constructs generated SDK models, rejects missing or unknown fields
 rather than silently dropping them, and sends them through the generated

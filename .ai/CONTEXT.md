@@ -123,8 +123,8 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
   Bucket is optional (local default); prefix defaults empty and requires a
   bucket when nonempty. Result includes local_output_dir; local file keys are null.
   HandFimJobOptions extends output options with optional positive max_procs,
-  included alongside scenarios in the submission JSON body. Worker revalidates
-  it before execution.
+  and an overwrite flag defaulting false, included alongside scenarios in the
+  submission JSON body. Worker revalidates options before execution.
 - **`src/fimbox_api/main.py`** — FastAPI app: `POST /jobs/hand-fim` accepts
   a JSON object containing scenarios and job options. All job routes
   enforce ownership via a session when configured, or a reserved shared local
@@ -141,9 +141,9 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
   JSON, invokes the existing container `scenario` CLI in a subprocess, verifies
   every COG exists, recursively uploads all files from the job-specific
   `/home/output/scenarios/<job_id>/` directory with unchanged relative filenames
-  under `<prefix>/`, overwriting existing S3 objects with matching keys, streams
-  subprocess output to expiring Redis job logs, and returns a file manifest plus
-  scenario IDs.
+  under `<prefix>/`; conflicting keys fail before uploads unless overwrite is
+  enabled. It streams subprocess output to expiring Redis job logs and returns a
+  file manifest plus scenario IDs.
   Shared watershed caches and other jobs are excluded. Redelivery clears
   local job files first.
   Without a bucket, leaves files on the Compose output bind mount, skips

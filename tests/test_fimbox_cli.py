@@ -78,13 +78,14 @@ class SdkCliTests(unittest.TestCase):
         self.assertIn("No such command", result.output)
         result = self.invoke("submit", "--help")
         self.assertIn("--output-bucket", result.output)
+        self.assertIn("--overwrite", result.output)
         self.assertIn("--body", result.output)
         self.assertEqual(self.requests, [])
 
     def test_cli_uses_generated_endpoint_and_models(self):
         result = self.invoke(
             "submit", "--body", str(self.body),
-            "--output-bucket", "bucket", "--output-prefix", "data/output",
+            "--output-bucket", "bucket", "--output-prefix", "data/output", "--overwrite",
         )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(json.loads(result.output)["job_id"], self.job_id)
@@ -98,6 +99,7 @@ class SdkCliTests(unittest.TestCase):
             "output_bucket": "bucket",
             "output_prefix": "data/output",
             "max_procs": None,
+            "overwrite": True,
         })
         self.assertEqual(request.headers["Authorization"], "Bearer test-session")
 
@@ -140,6 +142,7 @@ class SdkCliTests(unittest.TestCase):
             "output_bucket": None,
             "output_prefix": "",
             "max_procs": None,
+            "overwrite": False,
         })
         result = self.invoke("submit", "--body", str(self.body), "--output-prefix", "orphan")
         self.assertEqual(result.exit_code, 1)
@@ -226,6 +229,7 @@ class SdkCliTests(unittest.TestCase):
             "output_bucket": None,
             "output_prefix": "",
             "max_procs": None,
+            "overwrite": False,
         })
         self.credential_store.get_password.assert_not_called()
 
@@ -356,7 +360,7 @@ class SdkIntegrationTests(unittest.TestCase):
             self.assertEqual(response.status_code, 202)
             self.assertIsInstance(response.parsed, JobSubmitted)
             enqueue.assert_called_once_with(
-                args=[response.parsed.job_id, PAYLOAD, "bucket", "output", None],
+                args=[response.parsed.job_id, PAYLOAD, "bucket", "output", None, False],
                 task_id=response.parsed.job_id, retry=False,
             )
 

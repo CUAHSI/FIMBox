@@ -213,10 +213,12 @@ def app(ctx: click.Context, api_url: str, session_token: str | None, timeout: fl
 @click.option("--output-prefix", default="", help="S3 key prefix; requires --output-bucket.")
 @click.option("--max-procs", type=click.IntRange(min=1), default=None,
               help="Max concurrent HAND-FIM processes; defaults to the worker configuration (1).")
+@click.option("--overwrite/--no-overwrite", default=False, show_default=True,
+              help="Replace existing S3 objects with matching output keys.")
 @click.pass_context
 def submit(
     ctx: click.Context, body: Path, output_bucket: str | None,
-    output_prefix: str, max_procs: int | None,
+    output_prefix: str, max_procs: int | None, overwrite: bool,
 ) -> None:
     """Submit a scenario JSON array; print the queued job ID without waiting."""
     if output_bucket is None and output_prefix:
@@ -228,6 +230,7 @@ def submit(
             output_bucket=output_bucket,
             output_prefix=output_prefix,
             max_procs=max_procs,
+            overwrite=overwrite,
         ),
     )
 

@@ -1019,13 +1019,13 @@
                 "type": "null"
               }
             ],
-            "title": "Output Bucket"
+            "title": "Output Bucket",
+            "default": "resource"
           },
           "output_prefix": {
             "type": "string",
             "maxLength": 900,
-            "title": "Output Prefix",
-            "default": ""
+            "title": "Output Prefix"
           },
           "max_procs": {
             "anyOf": [
@@ -1040,6 +1040,12 @@
             "title": "Max Procs",
             "description": "Max concurrent HAND-FIM processes; omit to use the worker's HAND_FIM_MAX_PROCS (default 1)."
           },
+          "overwrite": {
+            "type": "boolean",
+            "title": "Overwrite",
+            "description": "Replace existing S3 objects with matching output keys; by default, conflicting keys fail the job.",
+            "default": false
+          },
           "scenarios": {
             "$ref": "#/components/schemas/HandFimParameters"
           }
@@ -1047,6 +1053,7 @@
         "additionalProperties": false,
         "type": "object",
         "required": [
+          "output_prefix",
           "scenarios"
         ],
         "title": "HandFimJobRequest"

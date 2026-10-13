@@ -52,6 +52,10 @@ class HandFimJobOptions(OutputDestination):
         default=None, ge=1,
         description="Max concurrent HAND-FIM processes; omit to use the worker's HAND_FIM_MAX_PROCS (default 1).",
     )
+    overwrite: bool = Field(
+        default=False,
+        description="Replace existing S3 objects with matching output keys; by default, conflicting keys fail the job.",
+    )
 
 
 class HandFimJobRequest(HandFimJobOptions):

@@ -73,13 +73,21 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(result["status"], "queued")
             self.assertEqual(result["status_url"], f"/jobs/{result['job_id']}")
             enqueue.assert_called_once_with(
-                args=[result["job_id"], PAYLOAD, "fim-output", "data/output", None],
+                args=[result["job_id"], PAYLOAD, "fim-output", "data/output", None, False],
                 task_id=result["job_id"],
                 retry=False,
             )
             self.track_user_job.assert_called_with("alice", result["job_id"])
             self.create_job_credentials.assert_called()
             self.assertNotIn("provider-token", str(enqueue.call_args))
+
+    def test_submit_forwards_overwrite_option(self):
+        with patch.object(tasks.hand_fim, "apply_async") as enqueue:
+            response = self.client.post(
+                HAND_FIM_ROUTE, json={**SUBMISSION, "overwrite": True},
+            )
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(enqueue.call_args.kwargs["args"][-1], True)
 
     def test_cloud_policy_requires_s3_for_submission(self):
         with patch.object(main.settings, "require_hydroshare_output", True), patch.object(
@@ -104,7 +112,7 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(response.status_code, 202, response.text)
             job_id = response.json()["job_id"]
             self.track_user_job.assert_called_with(auth.LOCAL_USER_ID, job_id)
-            self.assertEqual(enqueue.call_args.kwargs["args"], [job_id, PAYLOAD, None, "", None])
+            self.assertEqual(enqueue.call_args.kwargs["args"], [job_id, PAYLOAD, None, "", None, False])
             self.assertEqual(self.client.post(HAND_FIM_ROUTE, json=SUBMISSION).status_code, 409)
             self.assertEqual(enqueue.call_count, 1)
             self.create_job_credentials.assert_not_called()
@@ -287,7 +295,7 @@ class ApiTests(unittest.TestCase):
         with patch.object(tasks.hand_fim, "apply_async") as enqueue:
             response = self.client.post("/jobs/hand-fim", json={"scenarios": PAYLOAD})
             self.assertEqual(response.status_code, 202, response.text)
-            self.assertEqual(enqueue.call_args.kwargs["args"][2:], [None, "", None])
+            self.assertEqual(enqueue.call_args.kwargs["args"][2:], [None, "", None, False])
         self.create_job_credentials.assert_not_called()
 
     def test_max_procs_is_validated_and_queued(self):
@@ -296,7 +304,7 @@ class ApiTests(unittest.TestCase):
                 HAND_FIM_ROUTE, json={"scenarios": PAYLOAD, "max_procs": 3}
             )
             self.assertEqual(response.status_code, 202, response.text)
-            self.assertEqual(enqueue.call_args.kwargs["args"][-1], 3)
+            self.assertEqual(enqueue.call_args.kwargs["args"][-2], 3)
             enqueue.reset_mock()
             for value in (0, -1, "invalid", 1.5):
                 self.assertEqual(
@@ -347,6 +355,9 @@ class WorkerTests(unittest.TestCase):
         patcher = patch.object(tasks, "s3_client")
         self.storage_client = patcher.start().return_value
         self.addCleanup(patcher.stop)
+        self.storage_client.head_object.side_effect = ClientError(
+            {"Error": {"Code": "404"}}, "HeadObject"
+        )
         for name, value in (
             ("hand_fim_input_dir", self.root / "input"),
             ("hand_fim_output_dir", self.root / "output"),
@@ -425,6 +436,28 @@ class WorkerTests(unittest.TestCase):
             self.assertNotIn("download_url", file)
         self.assertFalse((output_dir / "stale.txt").exists())
         self.assertTrue((shared / "cache.csv").exists())
+
+    def test_existing_s3_object_fails_without_overwrite(self):
+        self.storage_client.head_object.side_effect = None
+        self.storage_client.head_object.return_value = {}
+        with patch.object(tasks.subprocess, "Popen", side_effect=self.__spawn):
+            with self.assertRaisesRegex(RuntimeError, "already exists.*overwrite=true"):
+                tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION)
+        self.storage_client.head_object.assert_called_once_with(
+            Bucket="fim-output", Key=f"data/output/{PAYLOAD[0]['ScenarioID']}.cog",
+        )
+        self.storage_client.upload_file.assert_not_called()
+
+    def test_overwrite_replaces_existing_s3_object(self):
+        self.storage_client.head_object.return_value = {}
+        with patch.object(tasks.subprocess, "Popen", side_effect=self.__spawn):
+            result = tasks.hand_fim.run(
+                self.job_id, PAYLOAD, **DESTINATION, overwrite=True,
+            )
+        self.storage_client.head_object.assert_not_called()
+        self.storage_client.upload_file.assert_called_once()
+        self.assertEqual(result["output_bucket"], "fim-output")
+        self.assertNotIn("overwrite", result)
 
     def test_subprocess_failure_propagates(self):
         with patch.object(

@@ -126,6 +126,7 @@ def __submit_hand_fim(
                 destination.output_bucket,
                 destination.output_prefix,
                 destination.max_procs,
+                destination.overwrite,
             ],
             task_id=job_id,
             retry=False,

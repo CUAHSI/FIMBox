@@ -525,6 +525,76 @@
           }
         }
       }
+    },
+    "/jobs/{job_id}/logs": {
+      "get": {
+        "summary": "Get Job Logs",
+        "description": "Poll a job's worker output, continuing from the returned next_offset.\nAuthentication is required only when the server has OAuth credentials configured. See GET /auth/config.",
+        "operationId": "get_job_logs_jobs__job_id__logs_get",
+        "security": [
+          {
+            "OAuth2AuthorizationCodeBearer": []
+          },
+          {}
+        ],
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Job Id"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "max_bytes",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1048576,
+              "minimum": 4,
+              "default": 65536,
+              "title": "Max Bytes"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobLogs"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1054,6 +1124,34 @@
           "interval"
         ],
         "title": "DeviceLoginStarted"
+      },
+      "JobLogs": {
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "title": "Job Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "logs": {
+            "type": "string",
+            "title": "Logs"
+          },
+          "next_offset": {
+            "type": "integer",
+            "title": "Next Offset"
+          }
+        },
+        "type": "object",
+        "required": [
+          "job_id",
+          "status",
+          "logs",
+          "next_offset"
+        ],
+        "title": "JobLogs"
       }
     },
     "securitySchemes": {

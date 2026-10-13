@@ -1,3 +1,4 @@
+import io
 import json
 import subprocess
 import tempfile
@@ -15,7 +16,7 @@ from fastapi.testclient import TestClient
 from kombu.exceptions import OperationalError
 from pydantic import SecretStr, ValidationError
 
-from fimbox_api import auth, main, storage, tasks
+from fimbox_api import auth, job_logs, main, storage, tasks
 from fimbox_api.models import HandFimParameters, OutputDestination
 
 
@@ -172,11 +173,61 @@ class ApiTests(unittest.TestCase):
         with patch.object(storage, "s3_client") as client, patch.object(main.celery_app, "AsyncResult") as result:
             for method, route in (
                 ("GET", f"/jobs/{job_id}"),
+                ("GET", f"/jobs/{job_id}/logs"),
                 ("DELETE", f"/jobs/{job_id}"),
             ):
                 self.assertEqual(self.client.request(method, route).status_code, 403)
             client.assert_not_called()
             result.assert_not_called()
+
+    def test_poll_job_logs_returns_status_and_next_offset(self):
+        job_id = str(uuid4())
+        with patch.object(main, "read_job_logs", return_value=("worker output\n", 14)) as read_logs, patch.object(
+            main.celery_app, "AsyncResult", return_value=Mock(state="STARTED"),
+        ):
+            response = self.client.get(f"/jobs/{job_id}/logs?offset=5&max_bytes=20")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {
+            "job_id": job_id,
+            "status": "started",
+            "logs": "worker output\n",
+            "next_offset": 14,
+        })
+        read_logs.assert_called_once_with(job_id, 5, 20)
+
+    def test_job_logs_reject_invalid_offsets_and_limits(self):
+        job_id = str(uuid4())
+        for query in ("offset=-1", "max_bytes=3", "max_bytes=1048577"):
+            with self.subTest(query=query):
+                self.assertEqual(
+                    self.client.get(f"/jobs/{job_id}/logs?{query}").status_code,
+                    422,
+                )
+
+    def test_job_logs_read_utf8_chunks_without_splitting_characters(self):
+        client = Mock()
+        client.strlen.return_value = len("hé\n".encode("utf-8"))
+        client.getrange.side_effect = [
+            "hé\n".encode("utf-8")[:2],
+            "hé\n".encode("utf-8")[1:],
+        ]
+        with patch.object(job_logs, "get_redis_client", return_value=client) as get_client:
+            first = job_logs.read_job_logs(str(uuid4()), 0, 2)
+            second = job_logs.read_job_logs(str(uuid4()), first[1], 4)
+        self.assertEqual(first, ("h", 1))
+        self.assertEqual(second, ("é\n", 4))
+        self.assertEqual(client.getrange.call_count, 2)
+        get_client.assert_called_with(decode_responses=False)
+
+    def test_other_users_cannot_read_job_logs(self):
+        self.user_has_job.return_value = False
+        job_id = str(uuid4())
+        with patch.object(main, "read_job_logs") as read_logs, patch.object(
+            main.celery_app, "AsyncResult",
+        ) as result:
+            self.assertEqual(self.client.get(f"/jobs/{job_id}/logs").status_code, 403)
+        read_logs.assert_not_called()
+        result.assert_not_called()
 
     def test_list_jobs_for_authenticated_user(self):
         states = {
@@ -304,6 +355,11 @@ class WorkerTests(unittest.TestCase):
             patcher = patch.object(tasks.settings, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        for name in ("clear_job_logs", "append_job_log"):
+            patcher = patch.object(tasks, name)
+            mock = patcher.start()
+            setattr(self, name, mock)
+            self.addCleanup(patcher.stop)
 
     def __write_output(self, command, **kwargs):
         source = Path(command[3])
@@ -316,10 +372,13 @@ class WorkerTests(unittest.TestCase):
             / f"{scenario['ScenarioID']}.cog"
         )
         output.write_bytes(b"test-cog")
-        return subprocess.CompletedProcess(command, 0)
+
+    def __spawn(self, command, **_kwargs):
+        self.__write_output(command, check=True)
+        return Mock(stdout=io.StringIO("worker output\n"), wait=Mock(return_value=0))
 
     def test_executes_scenario_and_preserves_original_identifier(self):
-        with patch.object(tasks.subprocess, "run", side_effect=self.__write_output) as run:
+        with patch.object(tasks.subprocess, "Popen", side_effect=self.__spawn) as run:
             result = tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION)
         output_path = (
             self.root / "output" / "scenarios" / self.job_id
@@ -337,6 +396,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(run.call_args.args[0][-3:], [
             str(self.root / "input" / "jobs" / self.job_id / "scenario.json"), "1", self.job_id,
         ])
+        self.append_job_log.assert_any_call(self.job_id, "worker output\n")
 
     def test_uploads_all_job_files_preserving_paths_and_excluding_shared_data(self):
         output_dir = self.root / "output" / "scenarios" / self.job_id
@@ -347,13 +407,13 @@ class WorkerTests(unittest.TestCase):
         (shared / "cache.csv").write_text("shared data")
 
         def compute(command, **kwargs):
-            self.__write_output(command, **kwargs)
+            self.__write_output(command, check=True)
             (output_dir / "logs").mkdir()
             (output_dir / "logs" / "run.txt").write_text("log")
             (output_dir / f"{PAYLOAD[0]['ScenarioID']}.tif").write_bytes(b"raster")
-            return subprocess.CompletedProcess(command, 0)
+            return Mock(stdout=io.StringIO("worker output\n"), wait=Mock(return_value=0))
 
-        with patch.object(tasks.subprocess, "run", side_effect=compute):
+        with patch.object(tasks.subprocess, "Popen", side_effect=compute):
             result = tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION)
         self.assertEqual(
             {file["path"] for file in result["files"]},
@@ -367,23 +427,26 @@ class WorkerTests(unittest.TestCase):
         self.assertTrue((shared / "cache.csv").exists())
 
     def test_subprocess_failure_propagates(self):
-        with patch.object(tasks.subprocess, "run", side_effect=subprocess.CalledProcessError(1, "scenario")):
+        with patch.object(
+            tasks.subprocess, "Popen",
+            return_value=Mock(stdout=io.StringIO("failed\n"), wait=Mock(return_value=1)),
+        ):
             with self.assertRaises(subprocess.CalledProcessError):
                 tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION)
 
     def test_max_procs_reaches_container_and_uses_worker_default_when_omitted(self):
         with patch.object(tasks.settings, "hand_fim_max_procs", 2):
             for max_procs, expected in ((None, "2"), (4, "4")):
-                with patch.object(tasks.subprocess, "run", side_effect=self.__write_output) as run:
+                with patch.object(tasks.subprocess, "Popen", side_effect=self.__spawn) as run:
                     tasks.hand_fim.run(self.job_id, PAYLOAD, max_procs=max_procs)
                 self.assertEqual(run.call_args.args[0][-2], expected)
-        with patch.object(tasks.subprocess, "run") as run:
+        with patch.object(tasks.subprocess, "Popen") as run:
             with self.assertRaises(ValidationError):
                 tasks.hand_fim.run(self.job_id, PAYLOAD, max_procs=0)
             run.assert_not_called()
 
     def test_local_outputs_stay_on_mount_without_s3_client(self):
-        with patch.object(tasks.subprocess, "run", side_effect=self.__write_output):
+        with patch.object(tasks.subprocess, "Popen", side_effect=self.__spawn):
             result = tasks.hand_fim.run(self.job_id, PAYLOAD)
         self.assertIsNone(result["output_bucket"])
         self.assertIsNone(result["files"][0]["key"])
@@ -397,12 +460,12 @@ class WorkerTests(unittest.TestCase):
         external.write_text("not a job output")
 
         def compute(command, **kwargs):
-            self.__write_output(command, **kwargs)
+            self.__write_output(command, check=True)
             output_dir = self.root / "output" / "scenarios" / self.job_id
             (output_dir / "linked.txt").symlink_to(external)
-            return subprocess.CompletedProcess(command, 0)
+            return Mock(stdout=io.StringIO("worker output\n"), wait=Mock(return_value=0))
 
-        with patch.object(tasks.subprocess, "run", side_effect=compute):
+        with patch.object(tasks.subprocess, "Popen", side_effect=compute):
             with self.assertRaisesRegex(RuntimeError, "symbolic link"):
                 tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION)
         self.storage_client.upload_file.assert_not_called()
@@ -415,13 +478,16 @@ class WorkerTests(unittest.TestCase):
         )
         output.parent.mkdir(parents=True)
         output.write_bytes(b"stale")
-        with patch.object(tasks.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)):
+        with patch.object(
+            tasks.subprocess, "Popen",
+            return_value=Mock(stdout=io.StringIO(), wait=Mock(return_value=0)),
+        ):
             with self.assertRaisesRegex(RuntimeError, "produced no COG"):
                 tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION)
         self.assertFalse(output.exists())
 
     def test_worker_revalidates_before_execution(self):
-        with patch.object(tasks.subprocess, "run") as run:
+        with patch.object(tasks.subprocess, "Popen") as run:
             with self.assertRaises(ValidationError):
                 tasks.hand_fim.run(self.job_id, [], **DESTINATION)
             run.assert_not_called()
@@ -430,7 +496,7 @@ class WorkerTests(unittest.TestCase):
         self.storage_client.upload_file.side_effect = ClientError(
             {"Error": {"Code": "AccessDenied"}}, "PutObject"
         )
-        with patch.object(tasks.subprocess, "run", side_effect=self.__write_output):
+        with patch.object(tasks.subprocess, "Popen", side_effect=self.__spawn):
             with self.assertRaises(ClientError):
                 tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION)
 

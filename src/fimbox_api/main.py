@@ -4,7 +4,7 @@ from typing import Annotated, Any
 from uuid import UUID, uuid4
 
 from botocore.exceptions import BotoCoreError, ClientError
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.openapi.utils import get_openapi
 from kombu.exceptions import KombuError
@@ -25,6 +25,7 @@ from .models import (
     HandFimJobOptions,
     HandFimJobRequest,
     HandFimParameters,
+    JobLogs,
     JobList,
     JobSummary,
     JobStatus,
@@ -35,6 +36,7 @@ from .storage import (
     create_job_credentials,
     delete_job_credentials,
 )
+from .job_logs import read_job_logs
 from .tasks import hand_fim
 
 logger = logging.getLogger(__name__)
@@ -185,6 +187,25 @@ def get_job_status(job_id: UUID, session: AuthenticatedSession) -> JobStatus:
     if state == "SUCCESS":
         return JobStatus(job_id=str(job_id), status=status, result=result.result)
     return JobStatus(job_id=str(job_id), status=status)
+
+
+@app.get("/jobs/{job_id}/logs", response_model=JobLogs)
+def get_job_logs(
+    job_id: UUID,
+    session: AuthenticatedSession,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    max_bytes: Annotated[int, Query(ge=4, le=1_048_576)] = 65_536,
+) -> JobLogs:
+    """Poll a job's worker output, continuing from the returned next_offset."""
+    __require_job_owner(job_id, session)
+    result = celery_app.AsyncResult(str(job_id))
+    logs, next_offset = read_job_logs(str(job_id), offset, max_bytes)
+    return JobLogs(
+        job_id=str(job_id),
+        status=__job_status(result.state),
+        logs=logs,
+        next_offset=next_offset,
+    )
 
 
 @app.delete("/jobs/{job_id}", status_code=204, response_class=Response)

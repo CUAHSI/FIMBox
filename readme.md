@@ -520,6 +520,13 @@ persisted output destination:
 }
 ```
 
+Poll `GET /jobs/<uuid>/logs?offset=0` to read worker output while a job runs.
+The response includes the job `status`, a `logs` text chunk, and `next_offset`;
+use that returned byte offset on the next request to fetch only new output.
+Chunks default to 64 KiB; `max_bytes` can be set from 4 bytes through 1 MiB.
+Only the submitting user can read logs. Logs are kept in Redis until the job
+result expires (`RESULT_TTL_SECONDS`).
+
 For S3 jobs, the worker recursively uploads **all files in this job's output directory**
 (`/home/output/scenarios/<job_id>/` in the container), preserving filenames
 and subdirectories:

@@ -93,3 +93,10 @@ class JobList(BaseModel):
 class JobStatus(JobSummary):
     result: StoredHandFimResult | None = None
     error: str | None = None
+
+
+class JobLogs(BaseModel):
+    job_id: str
+    status: str
+    logs: str
+    next_offset: int

@@ -132,7 +132,8 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
   across modes. Also provides user job listing,
   with JobList/JobSummary objects containing job_id/status (not plain ID
   strings), sharing status normalization with individual job polling,
-  queued-job cancellation, public health, and explicit storage/queue errors.
+  byte-offset worker-log polling, queued-job cancellation, public health, and
+  explicit storage/queue errors.
   Login-response middleware prevents caching/referrer leakage for device routes
   and OAuth callbacks, including error and validation responses.
 - **`src/fimbox_api/tasks.py`** — Real HAND-FIM Celery task. Revalidates input,
@@ -140,8 +141,9 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
   JSON, invokes the existing container `scenario` CLI in a subprocess, verifies
   every COG exists, recursively uploads all files from the job-specific
   `/home/output/scenarios/<job_id>/` directory with unchanged relative filenames
-  under `<prefix>/`, overwriting existing S3 objects with matching keys, and
-  returns a file manifest plus scenario IDs.
+  under `<prefix>/`, overwriting existing S3 objects with matching keys, streams
+  subprocess output to expiring Redis job logs, and returns a file manifest plus
+  scenario IDs.
   Shared watershed caches and other jobs are excluded. Redelivery clears
   local job files first.
   Without a bucket, leaves files on the Compose output bind mount, skips
@@ -155,6 +157,8 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
   access/secret/expiry only in Redis, and use them for uploads at
   `https://s3.hydroshare.org`. No static AWS credential fallback. Credential
   failure prevents enqueue.
+- **`src/fimbox_api/job_logs.py`** — Redis-backed append, clear, and byte-offset
+  reads for expiring worker logs exposed by `GET /jobs/{job_id}/logs`.
 - **`src/fimbox_api/auth.py`** — HydroShare authorization-code exchange,
   verified user-info identity, Redis-backed opaque sessions with expiry,
   single-use browser-bound OAuth state, and per-user job ownership/tracking.

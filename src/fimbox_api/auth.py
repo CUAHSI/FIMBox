@@ -55,8 +55,8 @@ class HydroShareToken(BaseModel):
     scope: str | None = None
 
 
-def get_redis_client() -> redis.Redis:
-    return redis.Redis.from_url(settings.redis_url, decode_responses=True)
+def get_redis_client(*, decode_responses: bool = True) -> redis.Redis:
+    return redis.Redis.from_url(settings.redis_url, decode_responses=decode_responses)
 
 
 def __session_key(token: str) -> str:

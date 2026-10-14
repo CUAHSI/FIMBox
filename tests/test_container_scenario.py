@@ -2,6 +2,7 @@ import importlib.util
 import io
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -67,6 +68,8 @@ class ContainerScenarioTests(unittest.TestCase):
             run_fim, "load_dotenv"
         ), patch.object(run_fim.os.path, "exists", return_value=True), patch.object(
             run_fim.subprocess, "Popen", return_value=process
+        ), patch.object(run_fim.shutil, "rmtree"), patch.object(
+            run_fim.os, "makedirs",
         ), patch.object(sys, "path", [*sys.path]):
             with self.assertRaises(subprocess.CalledProcessError) as raised:
                 run_fim.runfim(
@@ -74,6 +77,37 @@ class ContainerScenarioTests(unittest.TestCase):
                     "12345678", "/tmp/flows.csv", label="regression",
                 )
         self.assertEqual(raised.exception.returncode, 1)
+
+    def test_single_huc_removes_intermediate_directory_after_moving_raster(self):
+        self.scenarios[0]["Reaches"] = self.scenarios[0]["Reaches"][:1]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            label_dir = (
+                root / "flood_03020201" / "03020201_inundation"
+                / "regression__03020201"
+            )
+            label_dir.mkdir(parents=True)
+            (label_dir / "regression__03020201_inundation.tif").write_bytes(b"raster")
+            (label_dir / "mapping.log").write_text("progress")
+            cache = root / "flood_03020201" / "03020201"
+            cache.mkdir()
+
+            def output_path(value):
+                path = Path(value)
+                if path.is_relative_to("/home/output"):
+                    return root / path.relative_to("/home/output")
+                return path
+
+            with patch.object(self.entry, "Path", side_effect=output_path), patch.object(
+                self.entry, "__clean_fim_geotiff",
+            ), patch.object(self.entry, "__convert_to_cog"):
+                self.entry.generate_scenario_fim(Path("scenario.json"), 1, "job")
+            self.assertFalse(label_dir.exists())
+            self.assertEqual(
+                (root / "scenarios" / "job" / "regression.tif").read_bytes(),
+                b"raster",
+            )
+            self.assertTrue(cache.is_dir())
 
 
 if __name__ == "__main__":

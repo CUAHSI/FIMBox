@@ -3,6 +3,7 @@ import sys
 import glob
 import shutil
 import subprocess
+from pathlib import Path
 from dotenv import load_dotenv
 
 from .datadownload import setup_directories
@@ -26,6 +27,9 @@ def runfim(code_dir, output_dir, HUC_code, data_dir, label="", depth=False):
         sys.path.append(code_dir)
 
         HUC_code = str(HUC_code)
+        for name in (HUC_code, label):
+            if name and (name in (".", "..") or "/" in name or "\\" in name):
+                raise ValueError("HUC and label must be single directory names")
         HUC_dir = os.path.join(output_dir, f"flood_{HUC_code}")
         csv_path = data_dir
 
@@ -35,8 +39,23 @@ def runfim(code_dir, output_dir, HUC_code, data_dir, label="", depth=False):
         print("Inundation directory:", inundation_dir, flush=True)
         print("TEMP directory:", temp_dir, flush=True)
 
-        if not os.path.exists(temp_dir):
-            os.makedirs(temp_dir)
+        for directory in (
+            Path(HUC_dir), Path(HUC_dir) / f"{HUC_code}_inundation",
+            Path(inundation_dir), Path(temp_dir),
+        ):
+            if directory.is_symlink():
+                raise RuntimeError(f"Run output directory is a symbolic link: {directory}")
+        # A persistent worker can retain scratch files after a failed run.
+        # Clear only this run's scratch directory and matching final rasters.
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+        for suffix in ("inundation", "depth"):
+            previous_output = Path(inundation_dir) / f"{discharge_basename}_{suffix}.tif"
+            if previous_output.is_symlink():
+                raise RuntimeError(f"Run output raster is a symbolic link: {previous_output}")
+            if previous_output.exists():
+                previous_output.unlink()
+        os.makedirs(temp_dir, exist_ok=True)
 
         inundation_file = os.path.join(temp_dir, f"{discharge_basename}_inundation.tif")
         # `stdbuf -oL -eL` forces line-buffering at the OS level for this

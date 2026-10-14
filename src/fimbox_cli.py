@@ -209,7 +209,7 @@ def app(ctx: click.Context, api_url: str, session_token: str | None, timeout: fl
 
 @app.command()
 @click.option("--body", required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path))
-@click.option("--output-bucket", default=None, help="Optional S3 bucket; omit to keep output on the container mount.")
+@click.option("--output-bucket", default=None, help="S3 bucket for retaining output; without it, only metadata survives job cleanup.")
 @click.option("--output-prefix", default="", help="S3 key prefix; requires --output-bucket.")
 @click.option("--max-procs", type=click.IntRange(min=1), default=None,
               help="Max concurrent HAND-FIM processes; defaults to the worker configuration (1).")

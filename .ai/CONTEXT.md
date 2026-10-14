@@ -144,10 +144,13 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
   under `<prefix>/`; conflicting keys fail before uploads unless overwrite is
   enabled. It streams subprocess output to expiring Redis job logs and returns a
   file manifest plus scenario IDs.
-  Shared watershed caches and other jobs are excluded. Redelivery clears
-  local job files first.
-  Without a bucket, leaves files on the Compose output bind mount, skips
-  credential generation/S3 entirely, and returns local output metadata.
+  Uploads exclude watershed caches and other jobs. A finally block removes the
+  job input directory (including TMPDIR), flow files, referenced flood_<HUC>
+  download/intermediate trees, and final job output directory on success/failure.
+  Cleanup attempts every path and reports failures explicitly; symlink targets
+  are not followed. Only one worker may use a shared filesystem.
+  Without a bucket, skips credentials/S3 and retains metadata only.
+  All results have local_output_dir=null; S3 artifacts survive cleanup.
   Compose preserves the existing FIMBOX_OUTPUT_DIR bind configuration
   (default ./data/output relative to the repository root); only the worker mounts it.
 - **`src/fimbox_api/storage.py`** — Shared S3 client configuration and safe
@@ -189,6 +192,9 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
   session expiry/logout, route authentication, PKCE, ownership, and device
   login tests (secret/state/CSRF binding, expiry, rate limits, atomic retry/replay,
   generated-SDK end-to-end handoff, and captured auth contract parity).
+- **`tests/test_run_fim_cleanup.py`** — Host-runnable tests loading the patched
+  mapping wrapper with mocked scientific computation. Cover repeated-run scratch
+  cleanup, preserving HUC caches/sibling outputs, and rejecting unsafe paths.
 - **`tests/test_container_scenario.py`** — Container-only regression tests
   that load the real `entry.py` and mock computation/downloads to prove that
   future failures and missing HUC rasters propagate. Skipped on the host.
@@ -268,6 +274,9 @@ single worker per shared watershed cache. `pixi run api` runs FastAPI only.
     file (both share the `{label}` prefix) — this avoids picking the wrong
     file and avoids "no output raster found" false negatives if `runFIM.py`'s
     output layout ever changes.
+    Successful single-HUC runs remove the intermediate label directory even
+    after moving its raster into the final scenario directory; cleanup errors
+    propagate rather than leaving silent scratch-file buildup.
   - `clean` — Standalone command to clean previously generated FIM GeoTIFFs.
   - Helper internals: `__crop_data` (crop raster to nonzero bounding box),
     `__clean_fim_geotiff` (binarize FIM raster: >0 → 1, else NaN, then crop),
@@ -284,6 +293,10 @@ single worker per shared watershed cache. `pixi run api` runs FastAPI only.
   same HUC without mosaic outputs colliding — see inline comment dated 06/21/25).
   Nonzero mapping subprocess exits raise `CalledProcessError` so the original
   computation failure propagates through scenario futures.
+  Before computing, clears this run's `temp/` and matching inundation/depth
+  rasters from previous attempts. Preserves downloaded HUC data, sibling labels,
+  and final scenario outputs; rejects traversal labels and symlink output
+  directories before cleanup.
   `runOWPHANDFIM()` is a simpler wrapper that globs discharge CSVs
   for a HUC and calls `runfim` for each. This patched file is applied via
   `COPY patches/runFIM.py /home/code/FIMServ/src/fimserve/runFIM.py` in the

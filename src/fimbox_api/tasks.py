@@ -1,6 +1,8 @@
 import logging
 import mimetypes
 import os
+import shutil
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -46,15 +48,23 @@ def __run_scenario(command: list[str], job_id: str) -> None:
         encoding="utf-8",
         errors="replace",
         bufsize=1,
-        env={**os.environ, "PYTHONUNBUFFERED": "1"},
+        env={
+            **os.environ, "PYTHONUNBUFFERED": "1",
+            "TMPDIR": str(settings.hand_fim_input_dir / "jobs" / job_id / "tmp"),
+        },
+        start_new_session=True,
     )
     try:
         if process.stdout is None:
             raise RuntimeError("HAND-FIM subprocess output is unavailable")
         for line in process.stdout:
             append_job_log(job_id, line)
-    except RedisError:
-        process.terminate()
+    except (RedisError, OSError, RuntimeError):
+        # Stop mapping descendants too, before removing files they may be writing.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            logger.debug("HAND-FIM job %s subprocess group already exited", job_id)
         process.wait()
         raise
     finally:
@@ -80,6 +90,49 @@ def __reject_existing_s3_keys(client: Any, bucket: str, keys: list[str]) -> None
         )
 
 
+def __remove_job_path(root: Path, path: Path) -> None:
+    for parent in path.relative_to(root).parents:
+        directory = root / parent
+        if directory.is_symlink():
+            raise RuntimeError(f"Job cleanup parent is a symbolic link: {directory}")
+    if path.is_symlink():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+    elif path.exists():
+        path.unlink()
+
+
+def __cleanup_job(job_id: str, scenarios: HandFimParameters) -> None:
+    input_root = settings.hand_fim_input_dir
+    output_root = settings.hand_fim_output_dir
+    paths = [
+        (input_root, input_root / "jobs" / job_id),
+        (output_root, output_root / "scenarios" / job_id),
+    ]
+    hucs = set()
+    for scenario in scenarios.root:
+        for reach in scenario.Reaches:
+            hucs.add(reach.HUC)
+            paths.append((
+                input_root,
+                input_root / f"{scenario.ScenarioID}__{reach.HUC}",
+            ))
+    paths.extend(
+        (output_root, output_root / f"flood_{huc}") for huc in sorted(hucs)
+    )
+    errors = []
+    for root, path in dict.fromkeys(paths):
+        try:
+            __remove_job_path(root, path)
+        except (OSError, RuntimeError) as error:
+            logger.exception("Failed to clean HAND-FIM job %s path %s", job_id, path)
+            errors.append(str(error))
+    if errors:
+        raise RuntimeError("HAND-FIM job cleanup failed: " + "; ".join(errors))
+    logger.info("Removed HAND-FIM job %s inputs, downloads, and outputs", job_id)
+
+
 @celery_app.task(name="fimbox_api.tasks.hand_fim")
 def hand_fim(
     job_id: str,
@@ -98,11 +151,11 @@ def hand_fim(
     )
     input_dir = settings.hand_fim_input_dir / "jobs" / job_id
     output_dir = settings.hand_fim_output_dir / "scenarios" / job_id
-    input_dir.mkdir(parents=True, exist_ok=True)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
     scenario_file = input_dir / "scenario.json"
     try:
+        input_dir.mkdir(parents=True, exist_ok=True)
+        (input_dir / "tmp").mkdir(exist_ok=True)
+        output_dir.mkdir(parents=True, exist_ok=True)
         clear_job_logs(job_id)
         append_job_log(job_id, "Starting HAND-FIM job.\n")
         scenario_file.write_text(scenarios.model_dump_json(), encoding="utf-8")
@@ -166,11 +219,11 @@ def hand_fim(
             files.append(OutputFile(
                 path=relative_path, key=key, size_bytes=path.stat().st_size,
             ))
-        logger.info("Completed HAND-FIM job %s", job_id)
-        append_job_log(job_id, "HAND-FIM job completed.\n")
+        logger.info("Prepared HAND-FIM job %s outputs; cleaning local files", job_id)
+        append_job_log(job_id, "HAND-FIM outputs prepared; cleaning local files.\n")
         return StoredHandFimResult(
             outputs=outputs, files=files,
-            local_output_dir=str(output_dir),
+            local_output_dir=None,
             **destination.model_dump(exclude={"max_procs", "overwrite"}),
         ).model_dump(mode="json")
     except (
@@ -180,3 +233,5 @@ def hand_fim(
     ):
         logger.exception("HAND-FIM job %s failed", job_id)
         raise
+    finally:
+        __cleanup_job(job_id, scenarios)

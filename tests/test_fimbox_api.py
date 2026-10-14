@@ -1,5 +1,6 @@
 import io
 import json
+import signal
 import subprocess
 import tempfile
 import time
@@ -15,6 +16,7 @@ from botocore.exceptions import ClientError
 from fastapi.testclient import TestClient
 from kombu.exceptions import OperationalError
 from pydantic import SecretStr, ValidationError
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from fimbox_api import auth, job_logs, main, storage, tasks
 from fimbox_api.models import HandFimParameters, OutputDestination
@@ -408,6 +410,10 @@ class WorkerTests(unittest.TestCase):
             str(self.root / "input" / "jobs" / self.job_id / "scenario.json"), "1", self.job_id,
         ])
         self.append_job_log.assert_any_call(self.job_id, "worker output\n")
+        self.assertEqual(
+            run.call_args.kwargs["env"]["TMPDIR"],
+            str(self.root / "input" / "jobs" / self.job_id / "tmp"),
+        )
 
     def test_uploads_all_job_files_preserving_paths_and_excluding_shared_data(self):
         output_dir = self.root / "output" / "scenarios" / self.job_id
@@ -435,7 +441,7 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(file["key"], f"data/output/{file['path']}")
             self.assertNotIn("download_url", file)
         self.assertFalse((output_dir / "stale.txt").exists())
-        self.assertTrue((shared / "cache.csv").exists())
+        self.assertFalse(shared.exists())
 
     def test_existing_s3_object_fails_without_overwrite(self):
         self.storage_client.head_object.side_effect = None
@@ -447,6 +453,7 @@ class WorkerTests(unittest.TestCase):
             Bucket="fim-output", Key=f"data/output/{PAYLOAD[0]['ScenarioID']}.cog",
         )
         self.storage_client.upload_file.assert_not_called()
+        self.assertFalse((self.root / "output" / "scenarios" / self.job_id).exists())
 
     def test_overwrite_replaces_existing_s3_object(self):
         self.storage_client.head_object.return_value = {}
@@ -478,15 +485,111 @@ class WorkerTests(unittest.TestCase):
                 tasks.hand_fim.run(self.job_id, PAYLOAD, max_procs=0)
             run.assert_not_called()
 
-    def test_local_outputs_stay_on_mount_without_s3_client(self):
+    def test_local_outputs_are_removed_without_s3_client(self):
         with patch.object(tasks.subprocess, "Popen", side_effect=self.__spawn):
             result = tasks.hand_fim.run(self.job_id, PAYLOAD)
         self.assertIsNone(result["output_bucket"])
         self.assertIsNone(result["files"][0]["key"])
         output_dir = self.root / "output" / "scenarios" / self.job_id
-        self.assertEqual(result["local_output_dir"], str(output_dir))
-        self.assertTrue((output_dir / f"{PAYLOAD[0]['ScenarioID']}.cog").is_file())
+        self.assertIsNone(result["local_output_dir"])
+        self.assertFalse(output_dir.exists())
         self.storage_client.upload_file.assert_not_called()
+
+    def test_job_removes_all_work_files_on_success_and_failure(self):
+        for failure in (False, True):
+            with self.subTest(failure=failure):
+                output_dir = self.root / "output" / "scenarios" / self.job_id
+                input_dir = self.root / "input" / "jobs" / self.job_id
+                flood = self.root / "output" / "flood_03020201"
+                flow = self.root / "input" / "single-reach-scenario__03020201"
+                unrelated = self.root / "output" / "scenarios" / "other-job"
+                unrelated.mkdir(parents=True, exist_ok=True)
+                (unrelated / "result.cog").write_bytes(b"other output")
+
+                def compute(command, **kwargs):
+                    self.__write_output(command, check=True)
+                    flood.mkdir()
+                    (flood / "cache.csv").write_text("downloaded data")
+                    flow.write_text("feature_id,discharge")
+                    (Path(kwargs["env"]["TMPDIR"]) / "scratch.bin").write_bytes(b"scratch")
+                    return Mock(
+                        stdout=io.StringIO("computing\n"),
+                        wait=Mock(return_value=1 if failure else 0),
+                    )
+
+                with patch.object(tasks.subprocess, "Popen", side_effect=compute):
+                    if failure:
+                        with self.assertRaises(subprocess.CalledProcessError):
+                            tasks.hand_fim.run(self.job_id, PAYLOAD)
+                    else:
+                        tasks.hand_fim.run(self.job_id, PAYLOAD)
+                for path in (output_dir, input_dir, flood, flow):
+                    self.assertFalse(path.exists(), str(path))
+                self.assertEqual((unrelated / "result.cog").read_bytes(), b"other output")
+
+    def test_upload_reads_files_before_cleanup(self):
+        def upload(filename, *args, **kwargs):
+            self.assertEqual(Path(filename).read_bytes(), b"test-cog")
+
+        self.storage_client.upload_file.side_effect = upload
+        with patch.object(tasks.subprocess, "Popen", side_effect=self.__spawn):
+            result = tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION)
+        self.assertIsNone(result["local_output_dir"])
+        self.assertEqual(result["files"][0]["size_bytes"], len(b"test-cog"))
+        self.assertFalse((self.root / "output" / "scenarios" / self.job_id).exists())
+
+    def test_cleanup_failure_is_explicit_and_other_paths_are_still_cleaned(self):
+        remove = tasks.__dict__["__remove_job_path"]
+
+        def fail_output_cleanup(root, path):
+            if path == self.root / "output" / "scenarios" / self.job_id:
+                raise PermissionError("cannot remove output")
+            remove(root, path)
+
+        with patch.object(tasks.subprocess, "Popen", side_effect=self.__spawn), patch.object(
+            tasks, "__remove_job_path", side_effect=fail_output_cleanup,
+        ), self.assertLogs(tasks.logger, level="ERROR"):
+            with self.assertRaisesRegex(RuntimeError, "cleanup failed.*cannot remove output"):
+                tasks.hand_fim.run(self.job_id, PAYLOAD)
+        self.assertFalse((self.root / "input" / "jobs" / self.job_id).exists())
+
+    def test_cleanup_unlinks_symlinks_without_removing_their_targets(self):
+        external = self.root / "external"
+        external.mkdir()
+        (external / "keep.txt").write_text("preserve")
+        flood = self.root / "output" / "flood_03020201"
+        flood.parent.mkdir(parents=True)
+        flood.symlink_to(external, target_is_directory=True)
+        with patch.object(tasks.subprocess, "Popen", side_effect=self.__spawn):
+            tasks.hand_fim.run(self.job_id, PAYLOAD)
+        self.assertFalse(flood.is_symlink())
+        self.assertEqual((external / "keep.txt").read_text(), "preserve")
+
+    def test_log_failure_stops_subprocess_group_before_cleanup(self):
+        process = Mock(
+            pid=12345, stdout=io.StringIO("progress\n"), wait=Mock(return_value=-9),
+        )
+
+        def append(job_id, content):
+            if content == "progress\n":
+                raise RedisConnectionError("logs unavailable")
+
+        def stop_group(pid, sig):
+            self.assertEqual(pid, process.pid)
+            self.assertEqual(sig, signal.SIGKILL)
+            self.assertTrue((self.root / "input" / "jobs" / self.job_id).exists())
+
+        self.append_job_log.side_effect = append
+        with patch.object(tasks.subprocess, "Popen", return_value=process) as spawn, patch.object(
+            tasks.os, "killpg", side_effect=stop_group,
+        ) as kill_group, self.assertLogs(tasks.logger, level="ERROR"):
+            with self.assertRaises(RedisConnectionError):
+                tasks.hand_fim.run(self.job_id, PAYLOAD)
+        self.assertTrue(spawn.call_args.kwargs["start_new_session"])
+        kill_group.assert_called_once()
+        process.wait.assert_called_once()
+        self.assertFalse((self.root / "input" / "jobs" / self.job_id).exists())
+        self.assertFalse((self.root / "output" / "scenarios" / self.job_id).exists())
 
     def test_output_symlink_is_rejected_without_uploading_external_data(self):
         external = self.root / "secret.txt"
@@ -532,6 +635,8 @@ class WorkerTests(unittest.TestCase):
         with patch.object(tasks.subprocess, "Popen", side_effect=self.__spawn):
             with self.assertRaises(ClientError):
                 tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION)
+        self.assertFalse((self.root / "output" / "scenarios" / self.job_id).exists())
+        self.assertFalse((self.root / "input" / "jobs" / self.job_id).exists())
 
 
 class StorageTests(unittest.TestCase):

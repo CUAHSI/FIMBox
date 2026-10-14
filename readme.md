@@ -17,8 +17,9 @@ fimbox status --job-id JOB_ID
 ```
 
 No `.env`, OAuth credentials, session token, or keychain setup is needed.
-The worker writes output under `data/output/scenarios/<job_id>/`; the API
-returns output metadata but does not mount or serve these files. The initial
+The worker writes output temporarily under `data/output/scenarios/<job_id>/`;
+every job removes its local files when it finishes. Supply an S3 destination
+to retain artifacts; local-only jobs return metadata but no retained files. The initial
 image build and watershed downloads require network access.
 
 With neither OAuth client ID nor secret configured, the server uses a shared
@@ -215,9 +216,10 @@ The worker pool is always running (default one worker, 4 CPUs, 16 GiB memory),
 not request-driven or automatically scaled by queue length. CPU/memory and
 instance count are configurable. Cloud Run's writable filesystem is ephemeral
 and **counts against memory**: HAND-FIM watershed caches, intermediate rasters,
-and outputs must fit alongside scientific processing. Scratch data accumulates
-within an instance and is lost on replacement; monitor capacity and replace
-idle workers when necessary. Large workloads may need a persistent-disk/NFS
+and outputs must fit alongside scientific processing. Jobs remove their inputs,
+downloaded HUC data, temporary files, intermediate rasters, and final local outputs
+on both success and failure. A forced termination/OOM kill cannot run cleanup;
+replace affected workers if files remain. Large workloads may need a persistent-disk/NFS
 or Compute Engine deployment instead. S3 uploads preserve completed artifacts,
 not computation scratch state. This Terraform does not provision Filestore.
 
@@ -398,11 +400,12 @@ When changing the host/port, update both redirect URI settings and the
 provider's registered URLs. Access logging is disabled for the supplied API
 commands to avoid logging OAuth callback codes.
 
-### Output storage: local by default, optional HydroShare S3
+### Output storage: transient local files, optional HydroShare S3
 
-Without `output_bucket`, files remain in the worker's Compose-mounted
-`/home/output/scenarios/<job_id>/` directory. The result includes
-`local_output_dir` and a file manifest with `key: null`. No S3 account,
+Without `output_bucket`, files are generated temporarily in the worker's
+`/home/output/scenarios/<job_id>/` directory and deleted before job completion.
+The result includes `local_output_dir: null` and a file manifest with `key: null`.
+To retain artifacts, provide an S3 bucket. No S3 account,
 credentials, or upload is required. Session authentication and per-user
 ownership apply when OAuth is configured; otherwise jobs use the shared local identity.
 
@@ -537,6 +540,16 @@ and subdirectories:
 This includes `.tif`, `.cog`, and any other generated files, without renaming
 them. Shared watershed caches and previous jobs elsewhere in `/home/output`
 are excluded. Redelivered jobs clear their local output files before computing.
+Worker containers retain filesystem data between jobs. Before each HUC/scenario
+computation, the container removes that run's stale intermediate rasters and
+temporary files, including leftovers from failed attempts. Successful scenarios
+also remove their intermediate label directories. In addition, the API worker
+always removes the job's scenario input directory (including subprocess temporary
+files), flow files, entire referenced HUC download/intermediate directories, and
+final local outputs on success or failure. S3 uploads finish before cleanup.
+Other jobs' final output directories are not deleted. HUC data is downloaded
+again for the next job; run only one worker per shared filesystem.
+This local cleanup is independent of the S3 `overwrite` option.
 By default, if any target key already exists, the worker fails the job before
 uploading output files. Set the submission option `overwrite=true` to replace
 conflicting objects during the final upload.
@@ -547,7 +560,8 @@ Failed computation, missing output, or an upload failure fails the job.
 Successful results include a `files` manifest alongside `outputs`, with each
 file's relative `path`, S3 `key` when uploaded, and `size_bytes`. The API
 provides job status and metadata only; retrieve artifacts from the configured
-output storage using the reported key or the shared local output directory.
+S3 output storage using the reported key. `local_output_dir` is always null;
+without an S3 destination, the file manifest describes deleted artifacts.
 
 Credentials expire in Redis at the earlier of their provider expiry and
 `RESULT_TTL_SECONDS` after submission. Choose a credential lifetime covering
@@ -573,8 +587,8 @@ cannot be interrupted by this single-process Celery worker and return HTTP 409.
 - `RESULT_TTL_SECONDS` and `VISIBILITY_TIMEOUT_SECONDS` default to 86400
   seconds. Set visibility timeout longer than the longest job to prevent Redis
   from redelivering active work. These settings must agree on API and worker.
-- The input/output bind mounts retain watershed data and generated rasters.
-  Deleting these host directories deletes datasets. Result metadata expires after its
+- Job cleanup removes referenced watershed data and generated rasters from the
+  input/output bind mounts. Result metadata expires after its
   TTL; status access requires unexpired successful result metadata and ownership.
   Uploaded objects have independent storage retention.
 - Ownership and per-user job tracking expire `RESULT_TTL_SECONDS` after
@@ -897,7 +911,7 @@ fimbox submit --body test-data/single_reach.json --max-procs 4
 `HAND_FIM_MAX_PROCS` (default 1). The generated SDK submission request model
 accepts `max_procs` too; concurrency applies inside one job, not to Celery worker count.
 
-This defaults to the Compose-mounted output directory. To opt into S3:
+Local output is temporary and removed when the job finishes. To retain it in S3:
 
 ```bash
 fimbox submit \

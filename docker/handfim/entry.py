@@ -705,18 +705,11 @@ def generate_scenario_fim(
         # {huc}_inundation/ dir) just remove the leftover file so we don't
         # delete output belonging to other scenarios/HUCs.
         for label, tif in raw_tifs:
-            if not tif.exists():
-                continue
             if tif.parent.name == label:
-                try:
+                if tif.parent.exists():
                     shutil.rmtree(tif.parent)
-                except OSError as e:
-                    print(f"Failed to remove directory: {tif.parent} : {e}")
-            else:
-                try:
-                    tif.unlink()
-                except OSError as e:
-                    print(f"Failed to remove file: {tif} : {e}")
+            elif tif.exists():
+                tif.unlink()
 
     print("-- CREATING COGs ---")
     __convert_to_cog(scenario_root)

@@ -39,6 +39,13 @@ making structural changes to the project, so future sessions can rely on it.
 
 ## Build / run / test commands
 
+- **Always run Python code through the Pixi environment in this repository**
+  (`pixi.toml` / `.pixi/`), never the system or Homebrew Python. Prefix
+  commands with `pixi run` (e.g. `pixi run python script.py`,
+  `pixi run python -m unittest ...`) or use the defined tasks (`pixi run fimbox`,
+  `pixi run api`, `pixi run sdk-generate`). Run `pixi install` first if
+  `.pixi/` is missing. Do not `pip install` into other interpreters; add
+  dependencies to `pixi.toml` instead.
 - Google Cloud deployment: `terraform/` adapts fimbox-api's Cloud Run template.
   It forces HydroShare auth/S3 on the API; Compose remains anonymous/local by default.
   Run `terraform -chdir=terraform validate` after init; mock-provider tests use
@@ -54,7 +61,7 @@ making structural changes to the project, so future sessions can rely on it.
 - Run the CLI: `fimbox submit --body test-data/single_reach.json`.
   Optional `--max-procs N` overrides worker concurrency (default 1);
   optional `--output-bucket` enables S3, otherwise output stays on the mount.
-- Tests: `PYTHONPATH=src python -m unittest discover -s tests -v`.
+- Tests: `PYTHONPATH=src pixi run python -m unittest discover -s tests -v`.
   Tests cover API/worker/SDK/CLI/auth; scientific computation is mocked.
   Container-only regressions require the HAND-FIM image.
   No repository-wide linter/formatter is configured.

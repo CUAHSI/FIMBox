@@ -11,7 +11,7 @@
           "authentication"
         ],
         "summary": "Authentication Config",
-        "description": "Discover whether this server requires HydroShare authentication.",
+        "description": "Discover this server's HydroShare authentication and output requirements.",
         "operationId": "authentication_config_auth_config_get",
         "responses": {
           "200": {
@@ -604,11 +604,16 @@
           "authentication_enabled": {
             "type": "boolean",
             "title": "Authentication Enabled"
+          },
+          "require_hydroshare_output": {
+            "type": "boolean",
+            "title": "Require Hydroshare Output"
           }
         },
         "type": "object",
         "required": [
-          "authentication_enabled"
+          "authentication_enabled",
+          "require_hydroshare_output"
         ],
         "title": "AuthenticationConfig"
       },

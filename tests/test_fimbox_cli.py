@@ -18,7 +18,7 @@ import fimbox_cli
 from fimbox_api import auth, main, tasks
 from fimbox_sdk import AuthenticatedClient, Client
 from fimbox_sdk.api.default import submit_hand_fim_jobs_hand_fim_post
-from fimbox_sdk.models import HandFimJobRequest, JobSubmitted, Reach, Scenario
+from fimbox_sdk.models import AuthenticationConfig, HandFimJobRequest, HTTPValidationError, JobSubmitted, Reach, Scenario
 
 PAYLOAD = [{
     "ScenarioID": "test",
@@ -33,6 +33,12 @@ class SdkCliTests(unittest.TestCase):
         patcher = patch.object(fimbox_cli, "__authentication_enabled", return_value=True)
         self.auth_mode = patcher.start()
         self.addCleanup(patcher.stop)
+        self.real_api_config = fimbox_cli.__dict__["__api_config"]
+        patcher = patch.object(fimbox_cli, "__api_config", return_value=AuthenticationConfig(
+            authentication_enabled=True, require_hydroshare_output=False,
+        ))
+        self.api_config = patcher.start()
+        self.addCleanup(patcher.stop)
         patcher = patch.object(fimbox_cli, "__credential_store")
         self.credential_store = patcher.start().return_value
         self.credential_store.get_password.return_value = None
@@ -43,12 +49,15 @@ class SdkCliTests(unittest.TestCase):
         self.body.write_text(json.dumps(PAYLOAD))
         self.job_id = str(uuid4())
         self.requests = []
+        self.login_responses = {}
         self.response = httpx.Response(202, json={
             "job_id": self.job_id, "status": "queued", "status_url": f"/jobs/{self.job_id}",
         })
 
         def respond(request):
             self.requests.append(request)
+            if request.url.path in self.login_responses:
+                return self.login_responses[request.url.path].pop(0)
             return self.response
 
         factory = httpx.Client
@@ -130,7 +139,8 @@ class SdkCliTests(unittest.TestCase):
         )
         self.assertEqual(result.exit_code, 1)
         result = self.invoke("submit")
-        self.assertEqual(result.exit_code, 2)
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("Input method", result.output)
         self.assertEqual(self.requests, [])
 
     def test_submit_defaults_to_local_output(self):
@@ -146,6 +156,127 @@ class SdkCliTests(unittest.TestCase):
         })
         result = self.invoke("submit", "--body", str(self.body), "--output-prefix", "orphan")
         self.assertEqual(result.exit_code, 1)
+
+    def test_submit_interactive_manual_inputs_build_a_scenario(self):
+        result = self.invoke(
+            "submit",
+            input="manual\nmanual-test\n03020201\n8780625, 8780626\n1.5, 2.5\n3\n",
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        request = json.loads(self.requests[-1].content)
+        self.assertEqual(request["scenarios"], [{
+            "ScenarioID": "manual-test",
+            "Reaches": [
+                {"HUC": "03020201", "ReachID": "8780625", "Streamflow": 1.5},
+                {"HUC": "03020201", "ReachID": "8780626", "Streamflow": 2.5},
+            ],
+        }])
+        self.assertEqual(request["max_procs"], 3)
+
+    def test_submit_interactive_json_inputs_load_file(self):
+        result = self.invoke("submit", input=f"json\n{self.body}\n1\n")
+        self.assertEqual(result.exit_code, 0, result.output)
+        request = json.loads(self.requests[-1].content)
+        self.assertEqual(request["scenarios"], PAYLOAD)
+        self.assertEqual(request["max_procs"], 1)
+
+    def test_interactive_required_output_prompts_and_discovers_config_once(self):
+        self.login_responses["/auth/config"] = [httpx.Response(200, json={
+            "authentication_enabled": True, "require_hydroshare_output": True,
+        })]
+        with patch.object(fimbox_cli, "__api_config", wraps=self.real_api_config), patch.object(
+            fimbox_cli, "__authentication_enabled", wraps=self.real_auth_mode,
+        ):
+            result = self.invoke(
+                "submit", input="\nasdf\n\n\n\n\nbucket\nruns/test\ny\n",
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("HydroShare output bucket (required by the API)", result.output)
+        self.assertEqual([request.url.path for request in self.requests], [
+            "/auth/config", "/jobs/hand-fim",
+        ])
+        request = json.loads(self.requests[-1].content)
+        self.assertEqual(request["output_bucket"], "bucket")
+        self.assertEqual(request["output_prefix"], "runs/test")
+        self.assertTrue(request["overwrite"])
+
+    def test_interactive_output_flags_skip_prompts(self):
+        self.api_config.return_value.require_hydroshare_output = True
+        for flag, expected in (("--overwrite", True), ("--no-overwrite", False)):
+            with self.subTest(flag=flag):
+                result = self.invoke(
+                    "submit", "--output-bucket", "bucket", "--output-prefix", "",
+                    "--max-procs", "4", flag, input=f"json\n{self.body}\n",
+                )
+                self.assertEqual(result.exit_code, 0, result.output)
+                self.assertNotIn("HydroShare output bucket", result.output)
+                self.assertNotIn("Output prefix", result.output)
+                self.assertNotIn("Replace existing", result.output)
+                self.assertNotIn("Max concurrent", result.output)
+                request = json.loads(self.requests[-1].content)
+                self.assertEqual(request["output_bucket"], "bucket")
+                self.assertEqual(request["output_prefix"], "")
+                self.assertEqual(request["max_procs"], 4)
+                self.assertEqual(request["overwrite"], expected)
+
+    def test_interactive_optional_bucket_prompts_for_remaining_output_options(self):
+        result = self.invoke(
+            "submit", "--output-bucket", "bucket",
+            input=f"json\n{self.body}\n1\n\nn\n",
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Output prefix", result.output)
+        self.assertIn("Replace existing", result.output)
+        request = json.loads(self.requests[-1].content)
+        self.assertEqual(request["output_prefix"], "")
+        self.assertFalse(request["overwrite"])
+
+    def test_interactive_local_output_does_not_prompt_for_storage(self):
+        self.api_config.return_value = AuthenticationConfig(
+            authentication_enabled=False, require_hydroshare_output=False,
+        )
+        self.auth_mode.side_effect = self.real_auth_mode
+        result = self.invoke("submit", input=f"json\n{self.body}\n1\n", token="")
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("output bucket", result.output)
+        self.assertNotIn("Output prefix", result.output)
+        self.assertNotIn("Replace existing", result.output)
+        self.assertNotIn("authorization", self.requests[-1].headers)
+        self.credential_store.get_password.assert_not_called()
+
+    def test_required_bucket_abort_does_not_submit(self):
+        self.api_config.return_value.require_hydroshare_output = True
+        result = self.invoke("submit", input=f"json\n{self.body}\n1\n")
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("HydroShare output bucket", result.output)
+        self.assertEqual(self.requests, [])
+
+    def test_required_bucket_prompt_accepts_an_explicit_prefix(self):
+        self.api_config.return_value.require_hydroshare_output = True
+        result = self.invoke(
+            "submit", "--output-prefix", "runs", "--no-overwrite",
+            input=f"json\n{self.body}\n1\nbucket\n",
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("Output prefix", result.output)
+        request = json.loads(self.requests[-1].content)
+        self.assertEqual(request["output_bucket"], "bucket")
+        self.assertEqual(request["output_prefix"], "runs")
+
+    def test_interactive_config_failure_does_not_submit(self):
+        self.api_config.side_effect = click.ClickException("Cannot determine API configuration.")
+        result = self.invoke("submit", input=f"json\n{self.body}\n1\n")
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("Cannot determine API configuration", result.output)
+        self.assertEqual(self.requests, [])
+
+    def test_submit_interactive_rejects_mismatched_reach_and_flow_counts(self):
+        result = self.invoke(
+            "submit", input="manual\nscenario1\n03020201\n8780625,8780626\n10\n",
+        )
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("must match", result.output)
+        self.assertEqual(self.requests, [])
 
     def test_max_procs_cli_uses_generated_schema(self):
         result = self.invoke("submit", "--body", str(self.body), "--max-procs", "4")
@@ -177,25 +308,106 @@ class SdkCliTests(unittest.TestCase):
                     self.assertEqual(json.loads(result.output), payload)
         self.assertNotIn("authorization", self.requests[-1].headers)
 
-    def test_hidden_session_prompt_and_custom_url(self):
+    def configure_browser_login(self, api_url="http://localhost:8000"):
+        self.login_responses = {
+            "/auth/device/start": [httpx.Response(200, json={
+                "device_code": "b" * 43 + "." + "s" * 43,
+                "verification_uri": api_url + "/auth/device/verify?code=" + "b" * 43,
+                "expires_in": 600, "interval": 5,
+            })],
+            "/auth/device/poll": [httpx.Response(200, json={
+                "status": "authorized",
+                "token": {
+                    "access_token": "hidden-secret", "token_type": "bearer",
+                    "expires_in": 600, "user_id": "alice", "scope": "read",
+                },
+            })],
+        }
+
+    def test_browser_login_polls_custom_url_without_prompting(self):
+        self.configure_browser_login("https://fimbox.test")
+        self.login_responses["/auth/device/poll"].insert(
+            0, httpx.Response(200, json={"status": "pending"}),
+        )
         self.response = httpx.Response(200, json={"jobs": []})
-        result = self.invoke("--api-url", "https://fimbox.test", "jobs", token="", input="hidden-secret\n")
+        with patch("fimbox_login.time.sleep") as sleep, patch("click.prompt") as prompt:
+            result = self.invoke("--api-url", "https://fimbox.test", "jobs", token="")
+        prompt.assert_not_called()
+        sleep.assert_called_once_with(5)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertNotIn("hidden-secret", result.output)
-        self.assertIn("https://fimbox.test/auth/login", result.output)
-        self.assertIn("copy the access_token", result.output)
+        self.assertNotIn("s" * 43, result.output)
+        self.assertIn("https://fimbox.test/auth/device/verify?code=" + "b" * 43, result.output)
+        self.assertIn("Waiting for browser approval", result.output)
+        self.assertEqual([request.url.path for request in self.requests], [
+            "/auth/device/start", "/auth/device/poll", "/auth/device/poll", "/jobs",
+        ])
+        for request in self.requests[:-1]:
+            self.assertNotIn("authorization", request.headers)
+            self.assertEqual(request.url.host, "fimbox.test")
+        self.assertEqual(json.loads(self.requests[1].content), {
+            "device_code": "b" * 43 + "." + "s" * 43,
+        })
+        self.credential_store.set_password.assert_called_once_with(
+            "fimbox", "https://fimbox.test", "hidden-secret",
+        )
         self.assertEqual(self.requests[-1].headers["Authorization"], "Bearer hidden-secret")
         self.assertEqual(self.requests[-1].url.host, "fimbox.test")
 
-    def test_default_session_prompt_includes_local_login_link(self):
+    def test_browser_login_on_loopback_saves_token(self):
+        self.configure_browser_login()
         self.response = httpx.Response(200, json={"jobs": []})
-        result = self.invoke("jobs", token="", input="hidden-secret\n")
+        result = self.invoke("jobs", token="")
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("http://localhost:8000/auth/login", result.output)
+        self.assertIn("http://localhost:8000/auth/device/verify", result.output)
         self.assertNotIn("hidden-secret", result.output)
         self.credential_store.set_password.assert_called_once_with(
             "fimbox", "http://localhost:8000", "hidden-secret",
         )
+
+    def test_browser_login_failures_stop_before_operation_or_token_storage(self):
+        for status, message in (
+            ("denied", "denied"), ("failed", "authentication failed"),
+        ):
+            with self.subTest(status=status):
+                self.configure_browser_login()
+                self.requests.clear()
+                self.login_responses["/auth/device/poll"] = [
+                    httpx.Response(200, json={"status": status}),
+                ]
+                result = self.invoke("jobs", token="")
+                self.assertEqual(result.exit_code, 1, result.output)
+                self.assertIn(message, result.output)
+                self.assertEqual(len(self.requests), 2)
+                self.credential_store.set_password.assert_not_called()
+
+    def test_browser_login_timeout_is_a_cli_error(self):
+        self.configure_browser_login()
+        with patch("fimbox_login.BrowserLogin.wait", side_effect=TimeoutError("Browser login timed out")):
+            result = self.invoke("jobs", token="")
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("Browser login timed out", result.output)
+        self.assertEqual(len(self.requests), 1)
+        self.credential_store.set_password.assert_not_called()
+
+    def test_browser_login_start_failure_is_explicit(self):
+        self.configure_browser_login()
+        self.login_responses["/auth/device/start"] = [
+            httpx.Response(503, json={"detail": "private-server-details"}),
+        ]
+        result = self.invoke("jobs", token="")
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("HTTP 503", result.output)
+        self.assertNotIn("private-server-details", result.output)
+        self.assertEqual(len(self.requests), 1)
+        self.credential_store.set_password.assert_not_called()
+
+    def test_browser_login_refuses_non_loopback_http(self):
+        result = self.invoke("--api-url", "http://remote.test", "jobs", token="")
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("requires HTTPS", result.output)
+        self.assertEqual(self.requests, [])
+        self.credential_store.set_password.assert_not_called()
 
     def test_saved_token_is_reused_and_scoped_to_api_url(self):
         self.response = httpx.Response(200, json={"jobs": []})
@@ -235,15 +447,28 @@ class SdkCliTests(unittest.TestCase):
 
     def test_auth_mode_is_discovered_from_generated_public_endpoint(self):
         settings = fimbox_cli.Settings("http://localhost:8000", None, 30)
-        self.response = httpx.Response(200, json={"authentication_enabled": False})
-        with patch.object(fimbox_cli, "__authentication_enabled", wraps=self.real_auth_mode):
+        self.response = httpx.Response(200, json={
+            "authentication_enabled": False, "require_hydroshare_output": False,
+        })
+        with patch.object(fimbox_cli, "__authentication_enabled", wraps=self.real_auth_mode), patch.object(
+            fimbox_cli, "__api_config", wraps=self.real_api_config,
+        ):
             self.assertFalse(fimbox_cli.__dict__["__authentication_enabled"](settings))
+            self.assertFalse(fimbox_cli.__dict__["__api_config"](settings).require_hydroshare_output)
+            self.assertEqual(len(self.requests), 1, "Configuration is cached for this invocation")
             for response in (
                 httpx.Response(503), httpx.Response(200, json={}),
-                httpx.Response(200, json={"authentication_enabled": "false"}),
+                httpx.Response(200, json={
+                    "authentication_enabled": "false", "require_hydroshare_output": False,
+                }),
+                httpx.Response(200, json={
+                    "authentication_enabled": False, "require_hydroshare_output": "false",
+                }),
+                httpx.Response(200, json={"authentication_enabled": False}),
                 httpx.Response(200, content=b"invalid"),
             ):
                 self.response = response
+                settings.api_config = None
                 with self.assertRaises(click.ClickException):
                     fimbox_cli.__dict__["__authentication_enabled"](settings)
         self.assertEqual(self.requests[-1].url.path, "/auth/config")
@@ -272,10 +497,13 @@ class SdkCliTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.credential_store.delete_password.assert_called_once_with("fimbox", "http://localhost:8000")
 
-    def test_failed_prompted_request_does_not_save_token(self):
+    def test_failed_browser_authenticated_request_does_not_save_token(self):
+        self.configure_browser_login()
         self.response = httpx.Response(401, json={"detail": "Invalid session"})
-        result = self.invoke("jobs", token="", input="bad-secret\n")
+        result = self.invoke("jobs", token="")
         self.assertEqual(result.exit_code, 1)
+        self.assertIn("HTTP 401", result.output)
+        self.assertEqual(len(self.requests), 3)
         self.credential_store.set_password.assert_not_called()
 
     def test_keychain_failure_is_explicit_and_never_leaks_token(self):
@@ -288,8 +516,9 @@ class SdkCliTests(unittest.TestCase):
         self.assertEqual(self.requests, [])
         self.credential_store.get_password.side_effect = None
         self.credential_store.set_password.side_effect = KeyringError("secret-details")
+        self.configure_browser_login()
         self.response = httpx.Response(200, json={"jobs": []})
-        result = self.invoke("jobs", token="", input="hidden-secret\n")
+        result = self.invoke("jobs", token="")
         self.assertEqual(result.exit_code, 1)
         self.assertIn("request succeeded", result.output)
         self.assertNotIn("secret-details", result.output)
@@ -318,6 +547,23 @@ class SdkCliTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 1)
         self.assertIn("SDK contract", result.output)
 
+    def test_noninteractive_submission_reports_required_output_bucket(self):
+        self.api_config.return_value.require_hydroshare_output = True
+        self.response = httpx.Response(422, json={
+            "detail": [{
+                "loc": ["body", "output_bucket"],
+                "msg": "This deployment requires a HydroShare output_bucket",
+                "type": "value_error",
+            }],
+        })
+        result = self.invoke("submit", "--body", str(self.body))
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("HTTP 422", result.output)
+        self.assertIn("requires a HydroShare output_bucket", result.output)
+        self.assertNotIn("SDK contract", result.output)
+        self.assertEqual(len(self.requests), 1)
+        self.credential_store.set_password.assert_not_called()
+
     def test_connection_and_option_errors(self):
         with patch.object(httpx, "Client", side_effect=httpx.ConnectError("connection refused")):
             result = self.invoke("health")
@@ -343,6 +589,48 @@ class SdkIntegrationTests(unittest.TestCase):
             user_id="alice", access_token="provider", scope="read write", expires_at=time.time() + 60,
         )
         self.addCleanup(main.app.dependency_overrides.clear)
+
+    def test_interactive_cli_prompts_for_cloud_output_and_enqueues(self):
+        with TestClient(main.app) as http_client, patch.object(
+            Client, "get_httpx_client", return_value=http_client,
+        ), patch.object(
+            AuthenticatedClient, "get_httpx_client", return_value=http_client,
+        ), patch.object(
+            main.settings, "require_hydroshare_output", True,
+        ), patch.object(main, "create_job_credentials"), patch.object(main, "track_user_job"), patch.object(
+            tasks.hand_fim, "apply_async",
+        ) as enqueue:
+            result = CliRunner().invoke(
+                fimbox_cli.app, ["submit"],
+                env={"FIMBOX_API_URL": "http://testserver", "FIMBOX_SESSION_TOKEN": "session"},
+                input="\ncloud-test\n\n\n\n\nbucket\nruns/test\nn\n",
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn('"status": "queued"', result.output)
+        self.assertEqual(enqueue.call_count, 1)
+        self.assertEqual(enqueue.call_args.kwargs["args"][2:], ["bucket", "runs/test", 1, False])
+
+    def test_required_output_bucket_rejection_matches_sdk_contract(self):
+        with TestClient(main.app) as http_client, patch.object(
+            main.settings, "require_hydroshare_output", True,
+        ), patch.object(tasks.hand_fim, "apply_async") as enqueue:
+            client = AuthenticatedClient(base_url="http://testserver", token="session")
+            client.set_httpx_client(http_client)
+            response = submit_hand_fim_jobs_hand_fim_post.sync_detailed(
+                client=client,
+                body=HandFimJobRequest(
+                    scenarios=[Scenario.from_dict(PAYLOAD[0])],
+                    output_bucket=None, output_prefix="",
+                ),
+            )
+            self.assertEqual(response.status_code, 422)
+            self.assertIsInstance(response.parsed, HTTPValidationError)
+            self.assertEqual(json.loads(response.content)["detail"], [{
+                "loc": ["body", "output_bucket"],
+                "msg": "This deployment requires a HydroShare output_bucket",
+                "type": "value_error",
+            }])
+            enqueue.assert_not_called()
 
     def test_generated_client_enqueues_through_fastapi(self):
         with TestClient(main.app) as http_client, patch.object(main, "create_job_credentials"), patch.object(

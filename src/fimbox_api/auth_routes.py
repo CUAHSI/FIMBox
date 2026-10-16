@@ -110,8 +110,11 @@ def authorize_device_login(
 
 @router.get("/config", response_model=AuthenticationConfig)
 def authentication_config() -> AuthenticationConfig:
-    """Discover whether this server requires HydroShare authentication."""
-    return AuthenticationConfig(authentication_enabled=settings.authentication_enabled)
+    """Discover this server's HydroShare authentication and output requirements."""
+    return AuthenticationConfig(
+        authentication_enabled=settings.authentication_enabled,
+        require_hydroshare_output=settings.require_hydroshare_output,
+    )
 
 
 @router.get("/login")

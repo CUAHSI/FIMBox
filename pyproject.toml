@@ -1,6 +1,7 @@
 [build-system]
-requires = ["setuptools>=77"]
-build-backend = "setuptools.build_meta"
+requires = ["setuptools>=77", "openapi-python-client==0.28.0"]
+build-backend = "build_backend"
+backend-path = ["sdk"]
 
 [project]
 name = "fimbox"

@@ -12,27 +12,48 @@ that container (`docker/handfim/`), a second Typer CLI (`entry.py`) drives the
 actual FIM computation using NOAA/OWP's `inundation-mapping` tooling and the
 `fimserve` package (vendored/patched under `docker/handfim/patches/`).
 
+## User documentation
+
+- **`readme.md`** — Concise local quickstart and links to the focused guides.
+- **`docker/api/README.md`** — Compose API/worker, authentication, output, and
+  host/container testing.
+- **`docker/handfim/README.md`** — Base image and container commands.
+- **`sdk/README.md`** — SDK generation, package installation, and CLI usage.
+- **`terraform/README.md`** — Google Cloud infrastructure setup and operation.
+- **`notebooks/README.md`**, **`test-data/README.md`** — Cloud notebook and
+  sample input guidance.
+
 ## Host-side CLI (`src/`)
 
 - **`src/fimbox_cli.py`** — Handwritten Click CLI using generated SDK operation
   modules/models, not runtime OpenAPI parsing or handwritten HTTP routes.
-  Commands: submit, jobs, status, cancel, session, logout, health. `--body`
-  reads a scenario JSON array.
-  `submit --max-procs N` selects per-job concurrency. Omission uses
-  HAND_FIM_MAX_PROCS (worker default 1).
+  Commands: submit, jobs, status, cancel, session, logout, health. `submit
+  --body` reads a scenario JSON array; omitting `--body` prompts for manual
+  HAND-FIM reach inputs or a scenario JSON file.
+  `submit --max-procs N` selects per-job concurrency. JSON submissions that
+  omit it use HAND_FIM_MAX_PROCS (worker default 1); interactive submissions
+  prompt with a default of 1.
   `fimbox`/`pixi run fimbox` are the installed console entry points.
   Defaults to `http://localhost:8000`.
   Discovers `/auth/config` via the SDK; local mode uses Client without a token,
   prompt, or keychain access. Discovery errors fail explicitly.
-  Authenticated session precedence: option/environment, OS keychain scoped to API URL, hidden
-  prompt. Successful prompted tokens are saved with keyring; logout and saved
+  Configuration includes required `require_hydroshare_output` and is cached
+  per CLI invocation. Interactive submissions prompt for a missing required
+  bucket and, when a bucket is selected, unspecified output prefix/overwrite.
+  Explicit flags skip their prompts; `--body` keeps job options noninteractive.
+  Authenticated session precedence: option/environment, OS keychain scoped to API URL,
+  browser login via fimbox_login.begin_login. Displays the authorization link,
+  polls for up to 10 minutes, and retrieves the token without copy/paste.
+  Successful browser-login tokens are saved with keyring; logout and saved
   token HTTP 401 clear the entry. Only OS secure backends are accepted, no
   plaintext fallback; keychain errors are explicit. Tests mock the keychain.
-  The prompt shows the configured API's `/auth/login` link and instructions
-  to copy the returned FIMBox `access_token`.
+  Browser-login errors become explicit CLI errors; no manual-token fallback.
   No plaintext credential files, Docker subprocesses, or API server imports.
   Help does not require a server. CLI rejects fields dropped by generated
   models and surfaces HTTP/transport/contract errors without retries.
+  Required-HydroShare-output HTTP 422 rejections use the documented
+  validation-error list shape so both the CLI and direct SDK callers can
+  parse and report the error.
 - **`src/fimbox_sdk/`** — Locally generated and gitignored; do not hand-edit or
   commit. Local openapi-python-client 0.28.0 generates Client/AuthenticatedClient,
   attrs models, sync/async operation modules, errors and response types for every endpoint.
@@ -54,14 +75,20 @@ actual FIM computation using NOAA/OWP's `inundation-mapping` tooling and the
   Corrects its parsed optional-security flag before template rendering, so
   job operations accept Client or AuthenticatedClient without changing the
   captured spec or hand-editing generated files. Warnings/errors fail generation.
-  Run it before installing the CLI, importing its generated client, or running
-  tests that exercise the SDK.
+  Invoked automatically during package builds; `pixi run sdk-generate` remains
+  available to regenerate after contract changes.
+- **`sdk/build_backend.py`** — In-tree PEP 517 backend wrapping setuptools.
+  Generates the SDK before wheel, editable, and source-distribution builds so
+  `pixi install` and pip installs provide a ready-to-use CLI from a clean checkout.
+  Uses the generator pinned in the isolated build requirements.
 - **`pyproject.toml`**, **`MANIFEST.in`** — Installable `fimbox` distribution:
   packages the locally generated fimbox_sdk, fimbox_cli, and fimbox_login, with fimbox console
   entry point. Python 3.10+. Does not package server modules. Optional codegen dependency
   pins generator; spec/config included in source distribution.
 - **`tests/test_fimbox_cli.py`** — SDK/CLI regression tests with mock HTTP,
   typed sync/async responses, source-spec parity, and submission through FastAPI.
+- **`tests/test_sdk_packaging.py`** — Build-hook ordering, argument delegation,
+  and explicit generation-failure regressions for SDK packaging.
 
 ## Cloud example notebook (`notebooks/`)
 

@@ -70,6 +70,7 @@ class JobSubmitted(BaseModel):
 
 class AuthenticationConfig(BaseModel):
     authentication_enabled: bool
+    require_hydroshare_output: bool
 
 
 class OutputFile(BaseModel):

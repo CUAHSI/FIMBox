@@ -118,7 +118,9 @@ class AuthTests(unittest.TestCase):
             auth.settings, "hydroshare_client_secret", SecretStr(""),
         ):
             response = self.client.get("/auth/config")
-            self.assertEqual(response.json(), {"authentication_enabled": False})
+            self.assertEqual(response.json(), {
+                "authentication_enabled": False, "require_hydroshare_output": False,
+            })
             response = self.client.get("/auth/session")
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.json()["user_id"], auth.LOCAL_USER_ID)
@@ -127,8 +129,16 @@ class AuthTests(unittest.TestCase):
 
     def test_configured_mode_advertises_authentication(self):
         self.assertEqual(
-            self.client.get("/auth/config").json(), {"authentication_enabled": True},
+            self.client.get("/auth/config").json(), {
+                "authentication_enabled": True, "require_hydroshare_output": False,
+            },
         )
+
+    def test_config_advertises_required_hydroshare_output(self):
+        with patch.object(auth.settings, "require_hydroshare_output", True):
+            self.assertEqual(self.client.get("/auth/config").json(), {
+                "authentication_enabled": True, "require_hydroshare_output": True,
+            })
 
     def __device_start(self):
         self.redis.pipeline.return_value = self.pipeline

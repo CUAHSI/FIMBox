@@ -95,9 +95,15 @@ class ApiTests(unittest.TestCase):
         with patch.object(main.settings, "require_hydroshare_output", True), patch.object(
             tasks.hand_fim, "apply_async",
         ) as enqueue:
-            response = self.client.post("/jobs/hand-fim", json={"scenarios": PAYLOAD})
+            response = self.client.post("/jobs/hand-fim", json={
+                "scenarios": PAYLOAD, "output_bucket": None, "output_prefix": "",
+            })
             self.assertEqual(response.status_code, 422)
-            self.assertIn("output_bucket", response.json()["detail"])
+            self.assertEqual(response.json()["detail"], [{
+                "loc": ["body", "output_bucket"],
+                "msg": "This deployment requires a HydroShare output_bucket",
+                "type": "value_error",
+            }])
             enqueue.assert_not_called()
             self.track_user_job.assert_not_called()
             self.create_job_credentials.assert_not_called()

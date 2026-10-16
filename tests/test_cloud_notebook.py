@@ -58,7 +58,9 @@ class CloudNotebookTests(unittest.TestCase):
             path = request.url.path
             if path == "/auth/config":
                 self.assertNotIn("authorization", request.headers)
-                return httpx.Response(200, json={"authentication_enabled": True})
+                return httpx.Response(200, json={
+                    "authentication_enabled": True, "require_hydroshare_output": True,
+                })
             if path == "/auth/device/start":
                 return httpx.Response(200, json={
                     "device_code": "b" * 43 + "." + "s" * 43,
@@ -139,7 +141,9 @@ class CloudNotebookTests(unittest.TestCase):
         namespace = {"API_URL": "https://api.example.org", "os": os}
         imports = self.sources["dependencies"].split("from fimbox_sdk import", 1)[1]
         exec("from fimbox_sdk import" + imports, namespace)
-        transport = httpx.MockTransport(lambda request: httpx.Response(200, json={"authentication_enabled": True}))
+        transport = httpx.MockTransport(lambda request: httpx.Response(200, json={
+            "authentication_enabled": True, "require_hydroshare_output": True,
+        }))
         http = httpx.Client(transport=transport, base_url=namespace["API_URL"])
         self.addCleanup(http.close)
         with patch.object(

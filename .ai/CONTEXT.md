@@ -70,7 +70,8 @@ actual FIM computation using NOAA/OWP's `inundation-mapping` tooling and the
   origin/redirect restrictions, and credential-safe errors.
 - **`sdk/openapi.json`**, **`sdk/generator.yaml`** — Captured API contract
   and local generator config. `pixi run sdk-generate` creates the ignored SDK
-  directory from the spec.
+  directory from the spec. PNG content-type override selects the generator's
+  binary parser for raster tiles; runtime responses remain image/png.
 - **`sdk/generate.py`** — Local generation driver for pinned generator 0.28.
   Corrects its parsed optional-security flag before template rendering, so
   job operations accept Client or AuthenticatedClient without changing the
@@ -101,6 +102,16 @@ actual FIM computation using NOAA/OWP's `inundation-mapping` tooling and the
   No saved outputs or live cloud execution during validation.
 - **`tests/test_cloud_notebook.py`** — Cell syntax/editable-import checks and
   mocked SDK/auth/submission/monitoring workflow.
+- **`src/fimbox_map.py`** — Packaged optional `fimbox[map]` ipyleaflet helper.
+  Uses generated raster-info/tile SDK operations in the notebook kernel;
+  credentials never enter browser tile URLs. Raster selector prefers COGs,
+  viewport requests cap at 64 tiles (coarsening zoom for large views), and a
+  bounded 128-tile in-memory cache avoids repeat reads. Displays binary
+  inundation imagery as image overlays; failures are visible and reloadable.
+  Cloud notebook appends optional-dependency/map cells after monitoring.
+- **`tests/test_raster_map.py`** — Auth/ownership/manifest restrictions, credential
+  renewal, widget requests/cache, transparent PNGs, and real COG HTTP range reads
+  using a local range-only server (no live HydroShare access).
 
 ## Schema (`src/schemas/`)
 
@@ -161,8 +172,18 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
   strings), sharing status normalization with individual job polling,
   byte-offset worker-log polling, queued-job cancellation, public health, and
   explicit storage/queue errors.
+  Raster info/PNG routes select only successful owned job manifest entries,
+  require retained S3 keys, validate tile coordinates, and return no-store data.
   Login-response middleware prevents caching/referrer leakage for device routes
   and OAuth callbacks, including error and validation responses.
+- **`src/fimbox_api/rasters.py`** — rio-tiler/rasterio metadata and 256px
+  Web Mercator window/overview reads. Request-scoped credentials configure
+  signed S3 range reads with directory listing disabled. Binary flood=1 is blue,
+  dry=0/nodata transparent; out-of-bounds tiles are transparent. Read failures
+  are sanitized HTTP 502 errors, never returned as blank success tiles.
+  `docker/api/Dockerfile` installs native libexpat1 for rasterio in the slim
+  Python image and smoke-tests raster imports during the build; the HAND-FIM
+  worker base already supplies the library through GDAL.
 - **`src/fimbox_api/tasks.py`** — Real HAND-FIM Celery task. Revalidates input,
   substitutes safe job-specific internal scenario names, writes the scenario
   JSON, invokes the existing container `scenario` CLI in a subprocess, verifies

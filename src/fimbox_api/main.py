@@ -4,7 +4,7 @@ from typing import Annotated, Any
 from uuid import UUID, uuid4
 
 from botocore.exceptions import BotoCoreError, ClientError
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.openapi.utils import get_openapi
 from kombu.exceptions import KombuError
@@ -30,12 +30,17 @@ from .models import (
     JobSummary,
     JobStatus,
     JobSubmitted,
+    RasterInfo,
+    StoredHandFimResult,
 )
 from .storage import (
     StorageCredentialsError,
     create_job_credentials,
     delete_job_credentials,
+    RasterSource,
+    raster_source,
 )
+from .rasters import RasterReadError, raster_info, raster_tile
 from .job_logs import read_job_logs
 from .tasks import hand_fim
 
@@ -210,6 +215,63 @@ def get_job_logs(
         status=__job_status(result.state),
         logs=logs,
         next_offset=next_offset,
+    )
+
+
+def __raster_source(job_id: UUID, file_index: int, session: UserSession) -> RasterSource:
+    __require_job_owner(job_id, session)
+    job = celery_app.AsyncResult(str(job_id))
+    if job.state != "SUCCESS":
+        raise HTTPException(status_code=409, detail="Raster viewing requires a successful job")
+    result = StoredHandFimResult.model_validate(job.result)
+    if file_index >= len(result.files):
+        raise HTTPException(status_code=404, detail="Output file not found")
+    artifact = result.files[file_index]
+    if not artifact.path.lower().endswith((".cog", ".tif", ".tiff")):
+        raise HTTPException(status_code=400, detail="Output file is not a raster")
+    if result.output_bucket is None or artifact.key is None:
+        raise HTTPException(status_code=409, detail="Raster viewing requires retained S3 output")
+    return raster_source(job_id, session, result.output_bucket, artifact.key)
+
+
+@app.exception_handler(RasterReadError)
+def raster_error_handler(_request: Request, error: RasterReadError) -> JSONResponse:
+    return JSONResponse(
+        status_code=502, content={"detail": str(error)},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/jobs/{job_id}/rasters/{file_index}/info", response_model=RasterInfo)
+def get_raster_info(
+    job_id: UUID, file_index: Annotated[int, Path(ge=0)],
+    session: AuthenticatedSession, response: Response,
+) -> RasterInfo:
+    """Read geographic bounds without downloading the full raster."""
+    source = __raster_source(job_id, file_index, session)
+    response.headers["Cache-Control"] = "no-store"
+    return raster_info(source)
+
+
+@app.get(
+    "/jobs/{job_id}/rasters/{file_index}/tiles/{z}/{x}/{y}.png",
+    response_class=Response,
+    responses={200: {"content": {"image/png": {"schema": {"type": "string", "format": "binary"}}}}},
+)
+def get_raster_tile(
+    job_id: UUID, file_index: Annotated[int, Path(ge=0)],
+    z: Annotated[int, Path(ge=0, le=22)],
+    x: Annotated[int, Path(ge=0)],
+    y: Annotated[int, Path(ge=0)],
+    session: AuthenticatedSession,
+) -> Response:
+    """Render a 256-pixel inundation tile using range reads against S3."""
+    if x >= 2 ** z or y >= 2 ** z:
+        raise HTTPException(status_code=400, detail="Tile coordinates are outside this zoom level")
+    source = __raster_source(job_id, file_index, session)
+    return Response(
+        content=raster_tile(source, z, x, y), media_type="image/png",
+        headers={"Cache-Control": "no-store"},
     )
 
 

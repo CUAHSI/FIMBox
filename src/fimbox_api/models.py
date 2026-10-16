@@ -105,3 +105,9 @@ class JobLogs(BaseModel):
     status: str
     logs: str
     next_offset: int
+
+
+class RasterInfo(BaseModel):
+    bounds: tuple[float, float, float, float]
+    minzoom: int
+    maxzoom: int

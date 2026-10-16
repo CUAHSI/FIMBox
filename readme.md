@@ -13,7 +13,7 @@ pixi install
 docker compose up --build
 ```
 
-This starts the API at <http://localhost:8000>, a worker, and Redis. The API is
+This starts the API at [http://localhost:8000](http://localhost:8000), a worker, and Redis. The API is
 bound to loopback and uses a shared anonymous local identity by default; use
 only on a trusted machine. HAND-FIM input data and generated files use the
 `data/input/` and `data/output/` mounts. Local output is removed when each job

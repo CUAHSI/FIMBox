@@ -595,6 +595,152 @@
           }
         }
       }
+    },
+    "/jobs/{job_id}/rasters/{file_index}/info": {
+      "get": {
+        "summary": "Get Raster Info",
+        "description": "Read geographic bounds without downloading the full raster.\nAuthentication is required only when the server has OAuth credentials configured. See GET /auth/config.",
+        "operationId": "get_raster_info_jobs__job_id__rasters__file_index__info_get",
+        "security": [
+          {
+            "OAuth2AuthorizationCodeBearer": []
+          },
+          {}
+        ],
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Job Id"
+            }
+          },
+          {
+            "name": "file_index",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "title": "File Index"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RasterInfo"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/jobs/{job_id}/rasters/{file_index}/tiles/{z}/{x}/{y}.png": {
+      "get": {
+        "summary": "Get Raster Tile",
+        "description": "Render a 256-pixel inundation tile using range reads against S3.\nAuthentication is required only when the server has OAuth credentials configured. See GET /auth/config.",
+        "operationId": "get_raster_tile_jobs__job_id__rasters__file_index__tiles__z___x___y__png_get",
+        "security": [
+          {
+            "OAuth2AuthorizationCodeBearer": []
+          },
+          {}
+        ],
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Job Id"
+            }
+          },
+          {
+            "name": "file_index",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "title": "File Index"
+            }
+          },
+          {
+            "name": "z",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 22,
+              "minimum": 0,
+              "title": "Z"
+            }
+          },
+          {
+            "name": "x",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "title": "X"
+            }
+          },
+          {
+            "name": "y",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "title": "Y"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1164,6 +1310,45 @@
           "next_offset"
         ],
         "title": "JobLogs"
+      },
+      "RasterInfo": {
+        "properties": {
+          "bounds": {
+            "prefixItems": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "type": "array",
+            "maxItems": 4,
+            "minItems": 4,
+            "title": "Bounds"
+          },
+          "minzoom": {
+            "type": "integer",
+            "title": "Minzoom"
+          },
+          "maxzoom": {
+            "type": "integer",
+            "title": "Maxzoom"
+          }
+        },
+        "type": "object",
+        "required": [
+          "bounds",
+          "minzoom",
+          "maxzoom"
+        ],
+        "title": "RasterInfo"
       }
     },
     "securitySchemes": {

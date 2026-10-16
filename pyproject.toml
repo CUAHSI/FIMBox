@@ -23,10 +23,11 @@ fimbox = "fimbox_cli:app"
 
 [project.optional-dependencies]
 codegen = ["openapi-python-client==0.28.0"]
+map = ["ipyleaflet>=0.20,<0.21"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-py-modules = ["fimbox_cli", "fimbox_login"]
+py-modules = ["fimbox_cli", "fimbox_login", "fimbox_map"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

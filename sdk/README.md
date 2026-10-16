@@ -87,6 +87,14 @@ For browser-assisted login in scripts or notebooks, see
 [cloud notebook guide](../notebooks/README.md). Keep the returned session
 token private.
 
+## Notebook raster maps
+
+Install the optional `fimbox[map]` dependency to use `fimbox_map.job_map` with
+an existing connected SDK client, successful job ID, and typed output result.
+See [the notebook guide](../notebooks/README.md). The helper fetches raster
+metadata and visible PNG tiles using generated operations; session tokens stay
+in the kernel. The API must include the matching raster endpoints.
+
 ## Regenerate the SDK
 
 To update the captured API contract, run the service and capture OpenAPI, then
@@ -96,6 +104,10 @@ run the pinned local generator:
 curl --fail http://localhost:8000/openapi.json -o sdk/openapi.json
 pixi run sdk-generate
 ```
+
+The generator configuration maps `image/png` to its binary response parser
+because generator 0.28 does not recognize PNG content types directly. The
+actual API response remains `image/png`.
 
 Generation does not use a hosted service. Commit the OpenAPI document and
 generator configuration, not the generated SDK files. If API operation IDs

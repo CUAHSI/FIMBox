@@ -1,13 +1,16 @@
 import json
 import logging
 import math
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 from uuid import UUID
 
 import boto3
 import httpx
 from botocore.config import Config
 from pydantic import BaseModel, Field, SecretStr, ValidationError, field_validator
+from rasterio.session import AWSSession
 
 from .auth import UserSession, get_redis_client
 from .config import settings
@@ -105,4 +108,40 @@ def s3_client(job_id: UUID):
             signature_version="s3v4",
             s3={"addressing_style": settings.s3_addressing_style},
         ),
+    )
+
+
+@dataclass
+class RasterSource:
+    path: str
+    options: dict[str, str | bool] = field(default_factory=dict, repr=False)
+    session: AWSSession | None = field(default=None, repr=False)
+
+
+def raster_source(job_id: UUID, session: UserSession, bucket: str, key: str) -> RasterSource:
+    """Configure signed S3 range reads without exposing credentials to clients."""
+    if get_redis_client().get(JOB_CREDENTIALS_PREFIX + str(job_id)) is None:
+        create_job_credentials(job_id, session)
+    credentials = __job_credentials(job_id)
+    if (credentials.expiry - datetime.now(timezone.utc)).total_seconds() < 120:
+        create_job_credentials(job_id, session)
+        credentials = __job_credentials(job_id)
+    endpoint = urlsplit(settings.s3_endpoint_url)
+    if endpoint.scheme not in {"http", "https"} or not endpoint.netloc or endpoint.path.strip("/"):
+        raise StorageCredentialsError("Raster S3 endpoint must be an HTTP(S) origin")
+    return RasterSource(
+        path=f"s3://{bucket}/{key}",
+        session=AWSSession(
+            aws_access_key_id=credentials.access_key.get_secret_value(),
+            aws_secret_access_key=credentials.secret_key.get_secret_value(),
+            aws_session_token="",
+            region_name=settings.s3_region,
+            aws_unsigned=False,
+        ),
+        options={
+            "AWS_S3_ENDPOINT": endpoint.netloc,
+            "AWS_HTTPS": endpoint.scheme == "https",
+            "AWS_VIRTUAL_HOSTING": settings.s3_addressing_style == "virtual",
+            "AWS_NO_SIGN_REQUEST": False,
+        },
     )

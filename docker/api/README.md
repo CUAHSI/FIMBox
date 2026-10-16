@@ -75,6 +75,32 @@ client. There is no static AWS-credential fallback.
 jobs cannot be interrupted. Job metadata and ownership expire according to
 `RESULT_TTL_SECONDS` (default 86400 seconds).
 
+## Raster viewing
+
+The cloud notebook displays retained rasters through authenticated endpoints:
+
+- `GET /jobs/{job_id}/rasters/{file_index}/info` returns WGS84 bounds/zoom levels.
+- `GET /jobs/{job_id}/rasters/{file_index}/tiles/{z}/{x}/{y}.png` returns a
+  256-pixel Web Mercator inundation tile.
+
+`file_index` is the zero-based index in the successful job's `files` manifest.
+Only COG/TIFF entries with retained S3 keys are accepted. Each request checks
+job ownership and success before accessing storage; arbitrary URLs/keys cannot
+be requested. No raster files are downloaded to the API filesystem. rio-tiler
+reads windows/overviews through GDAL's signed S3 range requests using a
+request-scoped rasterio environment. Directory listing is disabled. Responses
+are `no-store`; errors do not expose S3 credentials. Missing/near-expiry S3
+credentials are renewed using the owner's current HydroShare session.
+
+Rebuild/redeploy the API with the updated requirements. No extra public tile
+service or S3 CORS configuration is required. Local metadata-only jobs cannot
+be mapped after cleanup. Job metadata/ownership TTL still limits API access to
+retained S3 rasters. See [the notebook guide](../../notebooks/README.md).
+The slim API image installs the native `libexpat1` runtime needed by rasterio
+and checks raster imports during the build. Python requirements alone do not
+provide this system library. The HAND-FIM worker base already supplies it
+through its GDAL dependencies.
+
 ## Configuration notes
 
 - `FIMBOX_API_PORT` changes the host port (default `8000`).

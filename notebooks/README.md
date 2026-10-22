@@ -9,6 +9,9 @@ Open the notebook in Jupyter or VS Code with a Python kernel. Click the login
 link while the authentication cell waits, then run the separate Connect cell.
 Set `RESUME_JOB_ID` to monitor an existing job after restarting the kernel;
 otherwise, submission starts a real cloud computation that may incur cost.
+Before submission, choose the inline scenario example or the JSON-loading cell,
+which reads `test-data/single_reach.json` into generated SDK `Scenario` models.
+The submission cell uses the current `scenarios` value without replacing it.
 
 ## Result map
 

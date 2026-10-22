@@ -96,6 +96,7 @@ actual FIM computation using NOAA/OWP's `inundation-mapping` tooling and the
 - **`notebooks/cloud_hand_fim.ipynb`** — User-run generated SDK example: HTTPS API
   configuration, SDK auth discovery and browser-assisted polling via fimbox_login,
   separate Connect cell, typed direct submission,
+  separate inline and test-JSON scenario cells feeding the submission cell,
   using AuthenticatedClient (no CLI subprocess) and bounded polling/resume.
   Setup reprocesses the kernel's site-package .pth files after editable install
   so SDK imports work without a kernel restart.

@@ -29,6 +29,18 @@ class CloudNotebookTests(unittest.TestCase):
                 source = "".join(line for line in cell["source"] if not line.startswith("%"))
                 compile(source, cell["id"], "exec")
 
+    def test_scenarios_json_loads_typed_sample_without_submitting(self):
+        from fimbox_sdk.models import Scenario
+
+        root = NOTEBOOK.parents[1]
+        namespace = {"ROOT": root, "Scenario": Scenario}
+        with redirect_stdout(io.StringIO()) as output:
+            exec(self.sources["scenarios-json"], namespace)
+        payload = json.loads((root / "test-data" / "single_reach.json").read_text())
+        self.assertEqual([scenario.to_dict() for scenario in namespace["scenarios"]], payload)
+        self.assertIn("Loaded 1 scenario(s)", output.getvalue())
+        self.assertNotIn("scenarios =", self.sources["submission"])
+
     def test_setup_loads_editable_install_in_running_interpreter(self):
         source = self.sources["dependencies"]
         refresh_and_imports = source.split("# Load editable-install", 1)[1]
@@ -116,6 +128,7 @@ class CloudNotebookTests(unittest.TestCase):
             exec(self.sources["connect"], namespace)
             output = io.StringIO()
             with redirect_stdout(output):
+                exec(self.sources["scenarios-inline"], namespace)
                 exec(self.sources["submission"], namespace)
             self.assertEqual(sum(request.url.path == "/jobs/hand-fim" for request in requests), 1)
             with redirect_stdout(output):

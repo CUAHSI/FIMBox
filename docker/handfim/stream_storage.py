@@ -35,7 +35,6 @@ class StreamConfig:
     input_unsigned: bool
     output_bucket: str
     output_prefix: str
-    attempt: str
     endpoint_url: str
     region: str
     addressing_style: str
@@ -57,7 +56,6 @@ class StreamConfig:
             input_unsigned=environ.get("FIMBOX_STREAM_INPUT_UNSIGNED", "").lower() in {"1", "true", "yes"},
             output_bucket=required("FIMBOX_STREAM_OUTPUT_BUCKET"),
             output_prefix=environ.get("FIMBOX_STREAM_OUTPUT_PREFIX", ""),
-            attempt=required("FIMBOX_STREAM_ATTEMPT"),
             endpoint_url=required("FIMBOX_S3_ENDPOINT_URL"),
             region=environ.get("FIMBOX_S3_REGION", "us-east-1"),
             addressing_style=environ.get("FIMBOX_S3_ADDRESSING_STYLE", "path"),
@@ -66,8 +64,8 @@ class StreamConfig:
             tile_size=int(environ.get("FIMBOX_STREAM_TILE_SIZE", "2048")),
         )
 
-    def attempt_prefix(self, scenario_id: str) -> str:
-        return join_key(self.output_prefix, scenario_id, "attempts", self.attempt)
+    def scenario_prefix(self, scenario_id: str) -> str:
+        return join_key(self.output_prefix, scenario_id)
 
 
 def __client(config: StreamConfig, unsigned: bool):
@@ -144,7 +142,7 @@ def run_streaming(
     manifests = []
     with __gdal_environment(config, stream_module.GDAL_STREAMING_OPTIONS):
         for scenario in scenarios:
-            prefix = config.attempt_prefix(scenario["ScenarioID"])
+            prefix = config.scenario_prefix(scenario["ScenarioID"])
 
             def write_tile(name: str, data: bytes, prefix=prefix) -> str:
                 key = join_key(prefix, name)

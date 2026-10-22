@@ -10,6 +10,7 @@ COPY docker/handfim/entry.py /home/entry.py
 COPY docker/handfim/patches/runFIM.py /home/code/FIMServ/src/fimserve/runFIM.py
 COPY docker/handfim/patches/streamFIM.py /home/code/FIMServ/src/fimserve/streamFIM.py
 COPY docker/handfim/stream_storage.py /home/stream_storage.py
+COPY docker/handfim/prepare_streaming_dataset.py /home/prepare_streaming_dataset.py
 COPY docker/api/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh \
     && mkdir -p /home/data/inputs /home/output \

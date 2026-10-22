@@ -35,6 +35,9 @@ services:
       HYDROSHARE_S3_CREDENTIALS_EXPIRY_DAYS: ${HYDROSHARE_S3_CREDENTIALS_EXPIRY_DAYS:-1}
       S3_REGION: ${S3_REGION:-us-east-1}
       S3_ADDRESSING_STYLE: ${S3_ADDRESSING_STYLE:-path}
+      STREAM_INPUT_BUCKET: ${STREAM_INPUT_BUCKET:-resource}
+      STREAM_INPUT_PREFIX: ${STREAM_INPUT_PREFIX:-1edaa4d7b8e54fddb8e2ae4601dc78a9/data/contents}
+      STREAM_INPUT_UNSIGNED: ${STREAM_INPUT_UNSIGNED:-false}
     ports:
       - "127.0.0.1:${FIMBOX_API_PORT:-8000}:8000"
     depends_on:
@@ -55,6 +58,9 @@ services:
       S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-https://s3.hydroshare.org}
       S3_REGION: ${S3_REGION:-us-east-1}
       S3_ADDRESSING_STYLE: ${S3_ADDRESSING_STYLE:-path}
+      STREAM_INPUT_BUCKET: ${STREAM_INPUT_BUCKET:-resource}
+      STREAM_INPUT_PREFIX: ${STREAM_INPUT_PREFIX:-1edaa4d7b8e54fddb8e2ae4601dc78a9/data/contents}
+      STREAM_INPUT_UNSIGNED: ${STREAM_INPUT_UNSIGNED:-false}
     volumes:
       - "${FIMBOX_INPUT_DIR:-./data/input}:/home/data/inputs"
       - "${FIMBOX_OUTPUT_DIR:-./data/output}:/home/output"

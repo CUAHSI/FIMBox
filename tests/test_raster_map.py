@@ -326,11 +326,14 @@ class NotebookMapTests(unittest.TestCase):
             widget = fimbox_map.job_map(client, uuid4(), result)
             selector, _, status, map_widget = widget.children
             self.assertEqual(selector.value, ("scenario", 0))
+            self.assertEqual(map_widget.min_zoom, 11)
+            self.assertGreaterEqual(map_widget.zoom, 11)
             map_widget.zoom = 9
             map_widget.set_trait("bounds", ((30, -80), (31, -79)))
             self.assertIn("Zoom in to level 11", status.value)
             self.assertFalse(any("/tiles/" in str(request.url) for request in requests))
             map_widget.zoom = 12
+            self.assertIn("visible tiles", status.value)
             map_widget.set_trait("bounds", ((30.2, -79.8), (30.3, -79.7)))
             self.assertIn("visible tiles", status.value)
             self.assertTrue(all(

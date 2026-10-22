@@ -91,7 +91,7 @@ def load_scenario_tiles(client: Any, bucket: str, manifest: ScenarioManifest) ->
     """
     Loads a published manifest's tile keys and WGS84 bounds, revalidating cached copies by ETag.
 
-    Only keys under the manifest's own ``attempts/`` prefix are returned.
+    Only COG keys under the manifest's scenario directory are returned.
     """
     cache_key = (bucket, manifest.key)
     with __manifest_lock:
@@ -111,7 +111,7 @@ def load_scenario_tiles(client: Any, bucket: str, manifest: ScenarioManifest) ->
         raise RasterReadError("Scenario tile manifest is too large.")
     try:
         document = json.loads(content)
-        root = manifest.key.rsplit("/", 1)[0] + "/attempts/" if "/" in manifest.key else "attempts/"
+        root = manifest.key.rsplit("/", 1)[0] + "/" if "/" in manifest.key else ""
         tiles = [
             (tile["key"], tuple(float(value) for value in tile["bounds_wgs84"]))
             for tile in document["tiles"]
@@ -119,7 +119,8 @@ def load_scenario_tiles(client: Any, bucket: str, manifest: ScenarioManifest) ->
     except (ValueError, KeyError, TypeError):
         raise RasterReadError("Scenario tile manifest is invalid.") from None
     if document.get("scenario_id") != manifest.ScenarioID or any(
-        not key.startswith(root) or ".." in key.split("/") or len(bounds) != 4 for key, bounds in tiles
+        not key.startswith(root) or not key.endswith(".cog")
+        or ".." in key.split("/") or len(bounds) != 4 for key, bounds in tiles
     ):
         raise RasterReadError("Scenario tile manifest is invalid.")
     with __manifest_lock:

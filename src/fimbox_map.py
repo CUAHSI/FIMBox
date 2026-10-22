@@ -163,6 +163,9 @@ def job_map(
             if response.status_code != 200 or not isinstance(response.parsed, RasterInfo):
                 raise RuntimeError(f"Raster metadata request failed: HTTP {response.status_code}.")
             metadata = response.parsed
+            map_widget.min_zoom = metadata.minzoom if kind == "scenario" else 0
+            if map_widget.zoom < map_widget.min_zoom:
+                map_widget.zoom = map_widget.min_zoom
             west, south, east, north = metadata.bounds
             map_widget.fit_bounds(((south, west), (north, east)))
         finally:
@@ -182,6 +185,6 @@ def job_map(
 
     select()
     selector.observe(select_changed, names="value")
-    map_widget.observe(render, names="bounds")
+    map_widget.observe(render, names=["bounds", "zoom"])
     reload_button.on_click(reload_tiles)
     return VBox([selector, reload_button, status, map_widget])

@@ -60,15 +60,34 @@ the COG blocks its catchments occupy. Publish the directory unchanged to a
 HydroShare resource (or any S3 bucket). `huc.json` is written last, so a
 partially published HUC is reported as missing.
 
+When uploading with recent AWS CLI versions to HydroShare, disable optional
+upload checksums to avoid AWS chunked-transfer framing being stored as file
+content by the S3 gateway:
+
+```bash
+AWS_REQUEST_CHECKSUM_CALCULATION=when_required aws s3 sync /data/hand-stream/ \
+  s3://resource/<resource_id>/data/contents/hand-stream/ \
+  --endpoint-url https://s3.hydroshare.org --size-only
+```
+
+Use your HydroShare S3 credentials for this command. If previously uploaded
+JSON files start with a hexadecimal chunk length or COGs do not start with a
+TIFF header, re-upload the entire prepared dataset from the original local
+files with this setting. Correcting only the JSON files is insufficient:
+chunk framing also corrupts raster byte offsets. `--size-only` replaces
+objects whose stored size differs from the original local file.
+
 `stream-scenario <json_file> <output_dir>` reads `FIMBOX_STREAM_INPUT_BUCKET`,
 `FIMBOX_STREAM_INPUT_PREFIX`, optional `FIMBOX_STREAM_INPUT_UNSIGNED`,
-`FIMBOX_STREAM_OUTPUT_BUCKET`/`_PREFIX`, `FIMBOX_STREAM_ATTEMPT`,
+`FIMBOX_STREAM_OUTPUT_BUCKET`/`_PREFIX`,
 `FIMBOX_STREAM_TILE_SIZE`, `FIMBOX_S3_*`, and `AWS_*` credentials from the
 environment (the API worker sets these). For each fixed output window it reads
 only the blocks of reaches intersecting that window, writes a binary
 inundation COG (1 = wet, nodata = dry) to
-`<prefix>/<ScenarioID>/attempts/<attempt>/<huc>/<row>_<col>.cog`, and records
+`<prefix>/<ScenarioID>/<huc>/<row>_<col>.cog`, and records
 it in `<output_dir>/<ScenarioID>.manifest.json`. Peak memory depends on the
 tile size, not the HUC size. HUCs keep their native grids instead of being
 mosaicked; viewers show the union of wet cells, whereas legacy output keeps the
-first HUC's value where HUCs overlap.
+first HUC's value where HUCs overlap. Tile paths are stable across runs:
+overwrites are non-atomic and failures can leave mixed old/new tiles.
+Use different prefixes for concurrent runs; failed runs retain uploaded tiles.

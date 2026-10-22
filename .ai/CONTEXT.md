@@ -403,6 +403,13 @@ uploaded tile by tile.
   (run first by the CLI) fetches only those inputs from the public
   `ciroh-owp-hand-fim` bucket (us-east-2, unsigned, `hand_fim_<version>/`)
   unless branch 0 rasters already exist; `.part` files make it resumable.
+- HydroShare upload compatibility: the HydroShare S3 gateway was observed
+  storing AWS chunked-upload framing in both JSON indexes and COGs. Recent
+  external AWS CLI uploads must set
+  `AWS_REQUEST_CHECKSUM_CALCULATION=when_required`; affected datasets need
+  re-uploading from the original local files. The API/worker boto3 1.35.99
+  pin predates the new optional checksum defaults (and does not accept the
+  `request_checksum_calculation` Config option).
 - **`docker/handfim/patches/streamFIM.py`** — Copied into fimserve. Pure
   science/tiling: `plan_huc` (first discharge per feature, stage
   interpolation), `schedule_tiles` (fixed tile_size windows on each HUC's native
@@ -416,13 +423,23 @@ uploaded tile by tile.
 - API: `models.HandFimJobOptions.execution_mode` (streaming requires S3 output
   and one process); `config` STREAM_* settings; `storage.job_s3_environment`
   (credentials for the subprocess environment, rejects near-expiry);
-  `tasks.__hand_fim_streaming` (attempt-scoped tile prefixes, validates
-  manifests, publishes `<prefix>/<sid>/manifest.json` last, cleans failed
-  attempts and replaced tiles); `main` routes
+  `tasks.__hand_fim_streaming` (stable tiles
+  `<prefix>/<sid>/<huc>/<row>_<col>.cog`; no run ID in paths; validates
+  manifests, publishes `<prefix>/<sid>/manifest.json` last with an internal
+  publication ID for conditional manifest rollback; overwrites are non-atomic
+  and failed runs retain tiles; concurrent writes to a scenario prefix are
+  unsupported; removes replaced-only tiles, including older run-scoped layouts);
+  `main` routes
   `/jobs/{id}/scenarios/{i}/info|tiles/...` compositing with
-  `rasters.scenario_tile` (union, `STREAM_DISPLAY_MAX_TILES` cap). Legacy
+  `rasters.scenario_tile` (union, `STREAM_DISPLAY_MAX_TILES` cap).
+  Manifest tile validation accepts COGs within the scenario directory for
+  both stable and older run-scoped paths (not only the old `attempts/` layout).
+  Legacy
   Celery args are unchanged; streaming appends `"streaming"` and can route to
-  `STREAM_QUEUE`. `src/fimbox_map.py` lists streamed scenarios; the CLI has
+  `STREAM_QUEUE`. `src/fimbox_map.py` lists streamed scenarios, sets the map's
+  minimum zoom from scenario metadata, and refreshes on bounds/zoom changes.
+  The cloud notebook reloads this helper in its map cell for existing kernels.
+  The CLI has
   `--execution-mode`.
 - Terraform: `stream_input_*` variables and an optional `stream_worker` pool
   (4Gi) consuming the `streaming` queue.

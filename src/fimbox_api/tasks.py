@@ -2,13 +2,14 @@ import json
 import logging
 import mimetypes
 import os
+import secrets
 import shutil
 import signal
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from boto3.exceptions import S3UploadFailedError
 from botocore.exceptions import BotoCoreError, ClientError
@@ -159,21 +160,7 @@ def __delete_keys(client: Any, bucket: str, keys: list[str]) -> None:
         })
 
 
-def __delete_prefix(client: Any, bucket: str, prefix: str) -> None:
-    keys = []
-    for page in client.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix):
-        keys.extend(item["Key"] for item in page.get("Contents", []))
-    __delete_keys(client, bucket, keys)
-
-
-def __references_attempt(manifest: dict | None, attempt_prefix: str) -> bool:
-    tiles = manifest.get("tiles") if isinstance(manifest, dict) else None
-    return isinstance(tiles, list) and any(
-        isinstance(tile, dict) and str(tile.get("key", "")).startswith(attempt_prefix) for tile in tiles
-    )
-
-
-def __validated_manifest(path: Path, scenario_id: str, attempt_prefix: str) -> tuple[bytes, dict]:
+def __validated_manifest(path: Path, scenario_id: str, scenario_prefix: str) -> tuple[bytes, dict]:
     if not path.is_file() or path.is_symlink() or path.stat().st_size > MAX_MANIFEST_BYTES:
         raise RuntimeError(f"Streaming HAND-FIM produced no valid manifest for scenario {scenario_id!r}")
     content = path.read_bytes()
@@ -184,7 +171,8 @@ def __validated_manifest(path: Path, scenario_id: str, attempt_prefix: str) -> t
         raise RuntimeError(f"Streaming HAND-FIM manifest for scenario {scenario_id!r} is invalid")
     for tile in tiles:
         key = tile.get("key") if isinstance(tile, dict) else None
-        if not isinstance(key, str) or not key.startswith(attempt_prefix) or ".." in key.split("/"):
+        if not isinstance(key, str) or not key.startswith(scenario_prefix) \
+                or not key.endswith(".cog") or ".." in key.split("/"):
             raise RuntimeError(f"Streaming HAND-FIM manifest for scenario {scenario_id!r} has an invalid tile key")
     return content, manifest
 
@@ -198,11 +186,11 @@ def __hand_fim_streaming(
         raise RuntimeError("Streaming execution is not configured on this worker")
     bucket = destination.output_bucket
     client = s3_client(UUID(job_id))
-    attempt = uuid4().hex
+    publication_id = secrets.token_urlsafe(16)
     scenario_ids = [scenario.ScenarioID for scenario in scenarios.root]
     manifest_keys = {sid: output_file_key(destination.output_prefix, f"{sid}/manifest.json") for sid in scenario_ids}
-    attempt_prefixes = {
-        sid: output_file_key(destination.output_prefix, f"{sid}/attempts/{attempt}") + "/" for sid in scenario_ids
+    scenario_prefixes = {
+        sid: output_file_key(destination.output_prefix, sid) + "/" for sid in scenario_ids
     }
     previous = {}
     if destination.overwrite:
@@ -221,17 +209,18 @@ def __hand_fim_streaming(
                 "FIMBOX_STREAM_INPUT_UNSIGNED": "true" if settings.stream_input_unsigned else "false",
                 "FIMBOX_STREAM_OUTPUT_BUCKET": bucket,
                 "FIMBOX_STREAM_OUTPUT_PREFIX": destination.output_prefix,
-                "FIMBOX_STREAM_ATTEMPT": attempt,
                 "FIMBOX_STREAM_TILE_SIZE": str(settings.stream_tile_size),
             },
         )
         manifests = {
-            sid: __validated_manifest(output_dir / f"{sid}.manifest.json", sid, attempt_prefixes[sid])
+            sid: __validated_manifest(output_dir / f"{sid}.manifest.json", sid, scenario_prefixes[sid])
             for sid in scenario_ids
         }
         refs = []
-        # Manifests are published last so a reader never sees a partially written scenario.
+        # Publish manifests only after all tiles finish; existing tiles may already be overwritten.
         for sid, (content, manifest) in manifests.items():
+            manifest["publication_id"] = publication_id
+            content = json.dumps(manifest).encode()
             client.put_object(Bucket=bucket, Key=manifest_keys[sid], Body=content, ContentType="application/json")
             published.append(sid)
             refs.append(ScenarioManifest(
@@ -244,7 +233,8 @@ def __hand_fim_streaming(
             key = manifest_keys[sid]
             try:
                 # Another job may have published since; only roll back a manifest that is still ours.
-                if not __references_attempt(__load_manifest(client, bucket, key), attempt_prefixes[sid]):
+                current = __load_manifest(client, bucket, key)
+                if not isinstance(current, dict) or current.get("publication_id") != publication_id:
                     continue
                 if isinstance(previous.get(sid), dict):
                     client.put_object(
@@ -255,20 +245,18 @@ def __hand_fim_streaming(
                     client.delete_object(Bucket=bucket, Key=key)
             except (BotoCoreError, ClientError, ValueError):
                 logger.exception("Could not roll back manifest %s after failed job %s", key, job_id)
-        for prefix in attempt_prefixes.values():
-            try:
-                __delete_prefix(client, bucket, prefix)
-            except (BotoCoreError, ClientError):
-                logger.exception("Could not remove partial tiles %s for job %s", prefix, job_id)
+        append_job_log(job_id, "Streaming job failed; tiles are retained because output paths are shared.\n")
         raise
     for sid, manifest in previous.items():
         if not isinstance(manifest, dict):
             continue
-        scenario_root = output_file_key(destination.output_prefix, f"{sid}/attempts") + "/"
+        scenario_root = output_file_key(destination.output_prefix, sid) + "/"
+        current_keys = {tile["key"] for tile in manifests[sid][1]["tiles"]}
         stale = [
             tile["key"] for tile in manifest.get("tiles", [])
             if isinstance(tile, dict) and isinstance(tile.get("key"), str)
-            and tile["key"].startswith(scenario_root) and not tile["key"].startswith(attempt_prefixes[sid])
+            and tile["key"].startswith(scenario_root)
+            and tile["key"].endswith(".cog") and tile["key"] not in current_keys
         ]
         try:
             __delete_keys(client, bucket, stale)

@@ -101,7 +101,7 @@ class StreamingWorkerTests(unittest.TestCase):
         def run(command, **kwargs):
             env = kwargs["env"]
             self.command, self.env = command, env
-            prefix = f"data/output/s1/attempts/{env['FIMBOX_STREAM_ATTEMPT']}"
+            prefix = "data/output/s1"
             document = manifest_document("s1", [tile_key or f"{prefix}/03020201/0_0.cog"])
             Path(command[-1], "s1.manifest.json").write_text(json.dumps(document))
             return Mock(stdout=io.StringIO("streamed\n"), wait=Mock(return_value=0))
@@ -115,6 +115,9 @@ class StreamingWorkerTests(unittest.TestCase):
         self.assertEqual(self.env["AWS_SECRET_ACCESS_KEY"], "test-secret")
         self.assertEqual(self.env["FIMBOX_STREAM_INPUT_BUCKET"], "hydrofabric")
         self.assertEqual(self.env["FIMBOX_STREAM_OUTPUT_PREFIX"], "data/output")
+        published = json.loads(self.client.put_object.call_args.kwargs["Body"])
+        self.assertEqual(published["tiles"][0]["key"], "data/output/s1/03020201/0_0.cog")
+        self.assertNotIn("FIMBOX_STREAM_ATTEMPT", self.env)
         self.client.put_object.assert_called_once()
         self.assertEqual(self.client.put_object.call_args.kwargs["Key"], "data/output/s1/manifest.json")
         self.assertEqual(result["execution_mode"], "streaming")
@@ -123,14 +126,13 @@ class StreamingWorkerTests(unittest.TestCase):
         self.assertEqual(result["scenario_manifests"][0]["tile_count"], 1)
         self.client.delete_objects.assert_not_called()
 
-    def test_tile_outside_attempt_prefix_fails_and_removes_partial_tiles(self):
+    def test_tile_outside_scenario_prefix_fails_without_deleting_shared_tiles(self):
         with patch.object(tasks.subprocess, "Popen", side_effect=self.spawn("data/output/other/x.cog")):
             with self.assertRaisesRegex(RuntimeError, "invalid tile key"):
                 tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION, execution_mode="streaming")
         self.client.put_object.assert_not_called()
-        prefix = self.client.get_paginator.return_value.paginate.call_args.kwargs["Prefix"]
-        self.assertTrue(prefix.startswith("data/output/s1/attempts/"))
-        self.client.delete_objects.assert_called_once()
+        self.client.get_paginator.assert_not_called()
+        self.client.delete_objects.assert_not_called()
 
     def test_existing_manifest_is_rejected_before_computing(self):
         self.client.head_object.side_effect = None
@@ -140,14 +142,19 @@ class StreamingWorkerTests(unittest.TestCase):
         run.assert_not_called()
 
     def test_overwrite_removes_replaced_tiles_after_publishing(self):
-        old = manifest_document("s1", ["data/output/s1/attempts/old/03020201/0_0.cog", "elsewhere/x.cog"])
-        self.client.get_object.return_value = {"Body": io.BytesIO(json.dumps(old).encode())}
-        with patch.object(tasks.subprocess, "Popen", side_effect=self.spawn()):
-            tasks.hand_fim.run(
-                self.job_id, PAYLOAD, **DESTINATION, overwrite=True, execution_mode="streaming",
-            )
-        deleted = self.client.delete_objects.call_args.kwargs["Delete"]["Objects"]
-        self.assertEqual(deleted, [{"Key": "data/output/s1/attempts/old/03020201/0_0.cog"}])
+        for layout in ("attempts/old", "old"):
+            with self.subTest(layout=layout):
+                key = f"data/output/s1/{layout}/03020201/0_0.cog"
+                old = manifest_document("s1", [
+                    key, "data/output/s1/03020201/0_0.cog", "elsewhere/x.cog",
+                ])
+                self.client.get_object.return_value = {"Body": io.BytesIO(json.dumps(old).encode())}
+                with patch.object(tasks.subprocess, "Popen", side_effect=self.spawn()):
+                    tasks.hand_fim.run(
+                        self.job_id, PAYLOAD, **DESTINATION, overwrite=True, execution_mode="streaming",
+                    )
+                deleted = self.client.delete_objects.call_args.kwargs["Delete"]["Objects"]
+                self.assertEqual(deleted, [{"Key": key}])
 
     def run_two_scenarios_with_second_publish_failing(self, current_manifest):
         payload = [PAYLOAD[0], {**PAYLOAD[0], "ScenarioID": "s2"}]
@@ -165,10 +172,8 @@ class StreamingWorkerTests(unittest.TestCase):
         self.client.put_object.side_effect = [None, ClientError({"Error": {"Code": "500"}}, "PutObject"), None]
 
         def run(command, **kwargs):
-            attempt = kwargs["env"]["FIMBOX_STREAM_ATTEMPT"]
-            self.attempt = attempt
             for sid in ("s1", "s2"):
-                document = manifest_document(sid, [f"data/output/{sid}/attempts/{attempt}/03020201/0_0.cog"])
+                document = manifest_document(sid, [f"data/output/{sid}/03020201/0_0.cog"])
                 Path(command[-1], f"{sid}.manifest.json").write_text(json.dumps(document))
             return Mock(stdout=io.StringIO(""), wait=Mock(return_value=0))
 
@@ -178,18 +183,21 @@ class StreamingWorkerTests(unittest.TestCase):
         return old
 
     def test_failed_publish_restores_replaced_manifest(self):
-        current = lambda: manifest_document("s1", [f"data/output/s1/attempts/{self.attempt}/03020201/0_0.cog"])
+        current = lambda: json.loads(self.client.put_object.call_args_list[0].kwargs["Body"])
         old = self.run_two_scenarios_with_second_publish_failing(_Lazy(current))
         restored = self.client.put_object.call_args_list[-1].kwargs
         self.assertEqual(restored["Key"], "data/output/s1/manifest.json")
         self.assertEqual(json.loads(restored["Body"]), old)
         self.client.delete_object.assert_not_called()
+        self.client.delete_objects.assert_not_called()
 
     def test_failed_publish_leaves_newer_manifest_from_another_job(self):
-        newer = manifest_document("s1", ["data/output/s1/attempts/other-job/03020201/0_0.cog"])
+        newer = manifest_document("s1", ["data/output/s1/03020201/0_0.cog"])
+        newer["publication_id"] = "other-job"
         self.run_two_scenarios_with_second_publish_failing(newer)
         self.assertEqual(self.client.put_object.call_count, 2)
         self.client.delete_object.assert_not_called()
+        self.client.delete_objects.assert_not_called()
 
     def test_unconfigured_worker_fails_explicitly(self):
         with patch.object(tasks.settings, "stream_input_bucket", ""), patch.object(tasks.subprocess, "Popen") as run:
@@ -327,11 +335,28 @@ class ScenarioCompositingTests(unittest.TestCase):
         self.assertEqual(rasters.load_scenario_tiles(client, "bucket", manifest), tiles)
         self.assertEqual(client.get_object.call_args.kwargs["IfNoneMatch"], '"v1"')
         client.get_object.side_effect = None
-        client.get_object.return_value = {
-            "Body": io.BytesIO(json.dumps(manifest_document("s1", ["other/secret.cog"])).encode()), "ETag": '"v2"',
-        }
-        with self.assertRaises(rasters.RasterReadError):
-            rasters.load_scenario_tiles(client, "bucket", manifest)
+        for index, key in enumerate((
+            "out/s1/03020201/2_0.cog",
+            "out/s1/run-id/03020201/2_0.cog",
+        )):
+            with self.subTest(key=key):
+                client.get_object.return_value = {
+                    "Body": io.BytesIO(json.dumps(manifest_document("s1", [key])).encode()),
+                    "ETag": f'"stable-{index}"',
+                }
+                tiles = rasters.load_scenario_tiles(client, "bucket", manifest)
+                self.assertEqual(tiles[0][0], key)
+        for key in (
+            "other/secret.cog", "out/s10/secret.cog",
+            "out/s1/../secret.cog", "out/s1/manifest.json",
+        ):
+            with self.subTest(invalid_key=key):
+                client.get_object.return_value = {
+                    "Body": io.BytesIO(json.dumps(manifest_document("s1", [key])).encode()),
+                    "ETag": '"v2"',
+                }
+                with self.assertRaises(rasters.RasterReadError):
+                    rasters.load_scenario_tiles(client, "bucket", manifest)
 
     def test_info_minzoom_bounds_tiles_per_map_tile(self):
         manifest = ScenarioManifest(
@@ -348,7 +373,7 @@ class StreamStorageTests(unittest.TestCase):
         environ = {
             "FIMBOX_STREAM_INPUT_BUCKET": "hydrofabric", "FIMBOX_STREAM_INPUT_PREFIX": "hand/v1",
             "FIMBOX_STREAM_OUTPUT_BUCKET": "fim-output", "FIMBOX_STREAM_OUTPUT_PREFIX": "data/output",
-            "FIMBOX_STREAM_ATTEMPT": "abc", "FIMBOX_S3_ENDPOINT_URL": "https://s3.example.org",
+            "FIMBOX_S3_ENDPOINT_URL": "https://s3.example.org",
             **SECRETS, **overrides,
         }
         return stream_storage.StreamConfig.from_env(environ)
@@ -383,7 +408,7 @@ class StreamStorageTests(unittest.TestCase):
             paths = stream_storage.run_streaming(
                 [{"ScenarioID": "s1"}], Path(directory), module, self.config(), log=lambda _: None,
             )
-            self.assertEqual(json.loads(paths[0].read_text()), {"tiles": [{"key": "data/output/s1/attempts/abc/x/0_0.cog"}]})
+            self.assertEqual(json.loads(paths[0].read_text()), {"tiles": [{"key": "data/output/s1/x/0_0.cog"}]})
         self.assertEqual(seen["dataset"], {"ok": True})
         self.assertIsNone(seen["absent"])
         self.assertEqual(seen["raster"], "s3://hydrofabric/hand/v1/hucs/x/rem.tif")

@@ -75,15 +75,22 @@ client. There is no static AWS-credential fallback.
 `output_bucket`, permits only `max_procs` 1, and returns 409 unless the
 deployment sets `STREAM_INPUT_BUCKET`. The worker passes the job's temporary
 S3 credentials to the computation through its environment, never its command
-line. Tiles go to `<prefix>/<ScenarioID>/attempts/<attempt>/`; the
+line. Tiles go directly to `<prefix>/<ScenarioID>/<huc>/<row>_<col>.cog`; the
 `<prefix>/<ScenarioID>/manifest.json` that lists them is published only after
 every scenario succeeds, and the job result reports it in
-`scenario_manifests` (with `files` empty). Failed attempts are deleted, and a
-manifest this job already published is rolled back to the replaced version
-unless another job has published over it since. Concurrent jobs writing the
-same scenario prefix are not serialized; the last publish wins. An
-existing manifest causes failure unless `overwrite` is enabled, in which case
-tiles from the replaced attempt are deleted after publishing.
+`scenario_manifests` (with `files` empty). These stable tile paths make
+overwrites non-atomic: readers can see mixed old/new tiles during a replacement,
+and a failed run can leave partially overwritten or unreferenced tiles.
+Failure cleanup retains tiles rather than risking deletion of shared output.
+A manifest this job already published is rolled back to the replaced version
+unless another job has published over it since; an internal `publication_id`
+in the manifest identifies its publisher but is not part of any file path.
+Manifest rollback cannot restore overwritten raster bytes.
+Do not run concurrent jobs targeting the same scenario prefix.
+An existing manifest causes failure unless `overwrite` is enabled. After a
+successful replacement, tiles referenced only by the previous manifest are
+deleted, while tiles reused by the new manifest are retained. Older manifests
+with run-specific tile paths remain readable and are cleaned up when replaced.
 
 `GET /jobs` lists tracked jobs. Use `GET /jobs/{job_id}` to poll and
 `GET /jobs/{job_id}/logs?offset=0` to read worker logs by byte offset.

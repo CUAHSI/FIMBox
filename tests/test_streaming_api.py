@@ -382,6 +382,29 @@ class StreamStorageTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "FIMBOX_STREAM_INPUT_BUCKET"):
             self.config(FIMBOX_STREAM_INPUT_BUCKET="")
 
+    def test_invalid_index_reports_location_without_exposing_content(self):
+        for content in (b'5a\r\n{"ok":true}\r\n0\r\n\r\n', b'{"private": invalid}', b'[]'):
+            with self.subTest(content=content):
+                input_client = Mock()
+                input_client.get_object.return_value = {
+                    "Body": io.BytesIO(content), "ContentLength": len(content),
+                }
+
+                def run_scenario(scenario, read_json, *args, **kwargs):
+                    read_json("hucs/03030002/huc.json")
+
+                module = SimpleNamespace(GDAL_STREAMING_OPTIONS={}, run_scenario=run_scenario)
+                with tempfile.TemporaryDirectory() as directory, patch.object(
+                    stream_storage.boto3, "client", side_effect=[input_client, Mock()],
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError, "s3://hydrofabric/hand/v1/hucs/03030002/huc.json",
+                    ) as raised:
+                        stream_storage.run_streaming(
+                            [{"ScenarioID": "s1"}], Path(directory), module, self.config(),
+                        )
+                self.assertNotIn("private", str(raised.exception))
+
     def test_reads_index_writes_tiles_and_manifests(self):
         input_client, output_client = Mock(), Mock()
         input_client.get_object.side_effect = lambda Bucket, Key: (

@@ -403,6 +403,11 @@ uploaded tile by tile.
   (run first by the CLI) fetches only those inputs from the public
   `ciroh-owp-hand-fim` bucket (us-east-2, unsigned, `hand_fim_<version>/`)
   unless branch 0 rasters already exist; `.part` files make it resumable.
+  Ratings are grouped by (HydroID, feature_id); shared HydroIDs retain optional
+  `row_order` arrays. `streamFIM.plan_huc` merges requested features' rows in
+  source order and uses the first matching row's forecast, as NOAA does.
+  HUC 03030002 branch 0 contains HydroID 11690624 mapped to three features;
+  this is supported, not rejected as an ambiguous mapping.
 - HydroShare upload compatibility: the HydroShare S3 gateway was observed
   storing AWS chunked-upload framing in both JSON indexes and COGs. Recent
   external AWS CLI uploads must set
@@ -420,6 +425,8 @@ uploaded tile by tile.
   `entry.py stream-scenario` command: `StreamConfig.from_env` (FIMBOX_STREAM_*,
   FIMBOX_S3_*, AWS_*), boto3 index reads, GDAL `s3://` range reads, per-tile
   `put_object`, local `<sid>.manifest.json`.
+  Invalid index JSON reports the full S3 object location and upload remediation
+  without including object contents; bounded reads enforce the index size limit.
 - API: `models.HandFimJobOptions.execution_mode` (streaming requires S3 output
   and one process); `config` STREAM_* settings; `storage.job_s3_environment`
   (credentials for the subprocess environment, rejects near-expiry);

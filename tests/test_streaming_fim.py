@@ -260,6 +260,55 @@ class StreamingFimTests(unittest.TestCase):
         self.assertLess(sum(end - start + 1 for start, end in ranges), total // 4)
 
 
+class SharedHydroIdTests(unittest.TestCase):
+    def test_preparation_and_planning_match_noaa_for_shared_hydroid(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            huc_dir, _, source_rows = build_hydrofabric(root)
+            rows = []
+            for row in source_rows:
+                rows.append(row)
+                if row["HydroID"] == 1000:
+                    rows.append({**row, "feature_id": "15", "stage": row["stage"] + 1})
+            with (huc_dir / "hydrotable.csv").open("w", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+                writer.writeheader()
+                writer.writerows(rows)
+            output = root / "prepared"
+            prepare.prepare_huc("12090301", huc_dir, output, block_size=128, log=lambda _: None)
+
+            def read_json(key):
+                path = output / key
+                return json.loads(path.read_text()) if path.is_file() else None
+
+            for forecasts in ({"11": 10}, {"15": 20}, {"11": 10, "15": 20}, {"15": 20, "11": 10}):
+                with self.subTest(forecasts=forecasts):
+                    _, plans, missing = stream.plan_huc("12090301", forecasts, read_json)
+                    selected = [
+                        row for row in rows if row["HydroID"] == 1000 and row["feature_id"] in forecasts
+                    ]
+                    # NOAA joins forecasts, groups by HydroID in table order, and takes the first stage.
+                    expected = np.float32(round(np.interp(
+                        [forecasts[selected[0]["feature_id"]]],
+                        [row["discharge_cms"] for row in selected],
+                        [row["stage"] for row in selected],
+                    )[0], 4))
+                    self.assertFalse(missing)
+                    self.assertEqual(next(plan for plan in plans if plan.branch == "0").stages[1000], expected)
+            reach = read_json("hucs/12090301/reaches/15.json")
+            self.assertTrue(reach["branches"][0]["blocks"])
+            self.assertIn("row_order", reach["branches"][0]["hydroids"][0])
+            for feature in ("11", "15"):
+                path = output / "hucs" / "12090301" / "reaches" / f"{feature}.json"
+                document = json.loads(path.read_text())
+                for entry in document["branches"]:
+                    for rating in entry["hydroids"]:
+                        rating.pop("row_order", None)
+                path.write_text(json.dumps(document))
+            with self.assertRaisesRegex(stream.StreamingInputError, "needs row order"):
+                stream.plan_huc("12090301", {"11": 10, "15": 20}, read_json)
+
+
 class FakeS3:
     def __init__(self, keys):
         self.keys = keys

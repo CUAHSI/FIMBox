@@ -56,7 +56,11 @@ python /home/prepare_streaming_dataset.py 03020201 /data/hand-stream
 This writes `dataset.json`, `hucs/<huc>/huc.json`, lossless 512-pixel COGs
 (`hucs/<huc>/branches/<b>/rem.tif` and `catchments.tif`), and one
 `hucs/<huc>/reaches/<feature_id>.json` per reach holding its rating curves and
-the COG blocks its catchments occupy. Publish the directory unchanged to a
+the COG blocks its catchments occupy. HydroIDs mapped to multiple feature IDs
+retain each feature's rows and their source-table positions. Streaming combines
+only requested features in original row order before interpolation, matching
+NOAA's HydroID grouping rather than selecting an arbitrary feature.
+Publish the directory unchanged to a
 HydroShare resource (or any S3 bucket). `huc.json` is written last, so a
 partially published HUC is reported as missing.
 

@@ -55,28 +55,33 @@ def __branch_ids(huc_dir: Path, branches_file: Path | None) -> list[str]:
     return sorted((p.name for p in branches.iterdir() if p.is_dir()), key=int) if branches.is_dir() else []
 
 
-def __read_ratings(huc_dir: Path, branch: str) -> dict[int, dict]:
+def __read_ratings(huc_dir: Path, branch: str) -> dict[tuple[int, str], dict]:
     """Reads non-lake rating rows for one branch in hydro-table order."""
 
     huc_table = huc_dir / "hydrotable.csv"
     path = huc_table if huc_table.is_file() else huc_dir / "branches" / branch / f"hydroTable_{branch}.csv"
     if not path.is_file():
         raise PreparationError(f"Branch {branch} has no hydro-table")
-    ratings: dict[int, dict] = {}
+    ratings: dict[tuple[int, str], dict] = {}
+    features: dict[int, set[str]] = {}
     with path.open(newline="") as handle:
-        for row in csv.DictReader(handle):
+        for position, row in enumerate(csv.DictReader(handle)):
             if path == huc_table and str(row.get("branch_id", "")).strip() != branch:
                 continue
             if int(float(row["LakeID"])) != LAKE_FREE:
                 continue
             hydroid = int(row["HydroID"])
-            rating = ratings.setdefault(hydroid, {
-                "feature_id": str(row["feature_id"]).strip(), "discharge_cms": [], "stage": [],
+            feature_id = str(row["feature_id"]).strip()
+            features.setdefault(hydroid, set()).add(feature_id)
+            rating = ratings.setdefault((hydroid, feature_id), {
+                "feature_id": feature_id, "discharge_cms": [], "stage": [], "row_order": [],
             })
-            if rating["feature_id"] != str(row["feature_id"]).strip():
-                raise PreparationError(f"HydroID {hydroid} maps to multiple feature IDs")
             rating["discharge_cms"].append(float(row["discharge_cms"]))
             rating["stage"].append(float(row["stage"]))
+            rating["row_order"].append(position)
+    for (hydroid, _feature), rating in ratings.items():
+        if len(features[hydroid]) == 1:
+            del rating["row_order"]
     return ratings
 
 
@@ -283,15 +288,17 @@ def prepare_huc(
             }
             ratings = __read_ratings(huc_dir, branch)
             blocks = __occupied_blocks(
-                output_dir / prefix / "catchments.tif", np.array(sorted(ratings), dtype=np.int64), block_size,
+                output_dir / prefix / "catchments.tif",
+                np.array(sorted({hydroid for hydroid, _ in ratings}), dtype=np.int64), block_size,
             )
             per_feature: dict[str, dict] = {}
-            for hydroid, rating in ratings.items():
+            for (hydroid, _feature), rating in ratings.items():
                 entry = per_feature.setdefault(rating["feature_id"], {
                     "branch": branch, "hydroids": [], "blocks": set(),
                 })
                 entry["hydroids"].append({
                     "id": hydroid, "discharge_cms": rating["discharge_cms"], "stage": rating["stage"],
+                    **({"row_order": rating["row_order"]} if "row_order" in rating else {}),
                 })
                 entry["blocks"].update(tuple(block) for block in blocks.get(hydroid, []))
             for feature_id, entry in per_feature.items():

@@ -122,6 +122,7 @@ def run_streaming(
     output_client = __client(config, False)
 
     def read_json(key: str) -> dict | None:
+        location = f"s3://{config.input_bucket}/{join_key(config.input_prefix, key)}"
         try:
             response = input_client.get_object(
                 Bucket=config.input_bucket, Key=join_key(config.input_prefix, key),
@@ -132,8 +133,23 @@ def run_streaming(
             raise
         with response["Body"] as body:
             if response.get("ContentLength", 0) > MAX_INDEX_BYTES:
-                raise RuntimeError(f"Prepared dataset index {key} is too large")
-            return json.loads(body.read(MAX_INDEX_BYTES + 1))
+                raise RuntimeError(f"Prepared dataset index {location} is too large")
+            content = body.read(MAX_INDEX_BYTES + 1)
+        if len(content) > MAX_INDEX_BYTES:
+            raise RuntimeError(f"Prepared dataset index {location} is too large")
+        try:
+            document = json.loads(content)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            raise RuntimeError(
+                f"Prepared dataset index {location} is not valid JSON. "
+                "Check the uploaded object against the local prepared file. "
+                "For HydroShare AWS CLI uploads, set "
+                "AWS_REQUEST_CHECKSUM_CALCULATION=when_required and re-upload "
+                "the HUC indexes and COGs from the original files."
+            ) from None
+        if not isinstance(document, dict):
+            raise RuntimeError(f"Prepared dataset index {location} must be a JSON object")
+        return document
 
     def raster_path(key: str) -> str:
         return f"s3://{config.input_bucket}/{join_key(config.input_prefix, key)}"

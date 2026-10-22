@@ -12,8 +12,9 @@ Scientific behavior mirrors the pinned NOAA inundation-mapping code
 9d39cb85ae789b30964a82c19dd850d29fccf5df) followed by FIMBox's binary cleaning:
 
 * Each HydroID stage is ``float32(round(np.interp(Q, discharge_cms, stage), 4))``
-  using that HydroID's non-lake rating rows in table order and the first
-  discharge supplied for its feature ID.
+  using that HydroID's non-lake rating rows for requested features in table
+  order. For shared HydroIDs, Q is the forecast for the first matching row's
+  feature, matching NOAA's first interpolated stage.
 * A branch pixel is flooded when its catchment HydroID has a stage, its REM is
   ``>= 0``, and ``stage - REM > 0``.
 * Branch mosaics take the maximum signed HydroID, so a pixel is flooded when any
@@ -180,6 +181,7 @@ def plan_huc(
         raise StreamingInputError(f"HUC {huc} is not in the prepared streaming dataset")
     __validate_huc(huc, metadata)
     plans: dict[str, BranchPlan] = {}
+    ratings: dict[tuple[str, int], list[tuple[float, dict]]] = {}
     missing = []
     for feature_id, discharge in discharges.items():
         reach = read_json(f"hucs/{huc}/reaches/{feature_id}.json")
@@ -197,10 +199,28 @@ def plan_huc(
                 width=int(source["width"]), height=int(source["height"]),
             ))
             for rating in entry.get("hydroids", []):
-                plan.stages[int(rating["id"])] = stage_for_discharge(
-                    discharge, rating["discharge_cms"], rating["stage"],
-                )
+                ratings.setdefault((branch, int(rating["id"])), []).append((discharge, rating))
             plan.blocks.update((int(row), int(col)) for row, col in entry.get("blocks", []))
+    for (branch, hydroid), curves in ratings.items():
+        if len(curves) == 1:
+            discharge, rating = curves[0]
+            plans[branch].stages[hydroid] = stage_for_discharge(
+                discharge, rating["discharge_cms"], rating["stage"],
+            )
+        else:
+            rows = []
+            for discharge, rating in curves:
+                order = rating.get("row_order")
+                __require(
+                    isinstance(order, list)
+                    and len(order) == len(rating["discharge_cms"]) == len(rating["stage"]),
+                    f"Shared HydroID {hydroid} in branch {branch} needs row order; reprepare the HUC",
+                )
+                rows.extend(zip(order, rating["discharge_cms"], rating["stage"], [discharge] * len(order)))
+            rows.sort(key=lambda row: row[0])
+            plans[branch].stages[hydroid] = stage_for_discharge(
+                rows[0][3], [row[1] for row in rows], [row[2] for row in rows],
+            )
     return metadata, [plans[b] for b in sorted(plans, key=__branch_order) if plans[b].blocks], missing
 
 

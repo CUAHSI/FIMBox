@@ -741,6 +741,152 @@
           }
         }
       }
+    },
+    "/jobs/{job_id}/scenarios/{scenario_index}/info": {
+      "get": {
+        "summary": "Get Scenario Info",
+        "description": "Bounds and usable zoom range of a streaming scenario's tiled output.\nAuthentication is required only when the server has OAuth credentials configured. See GET /auth/config.",
+        "operationId": "get_scenario_info_jobs__job_id__scenarios__scenario_index__info_get",
+        "security": [
+          {
+            "OAuth2AuthorizationCodeBearer": []
+          },
+          {}
+        ],
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Job Id"
+            }
+          },
+          {
+            "name": "scenario_index",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "title": "Scenario Index"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RasterInfo"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/jobs/{job_id}/scenarios/{scenario_index}/tiles/{z}/{x}/{y}.png": {
+      "get": {
+        "summary": "Get Scenario Tile",
+        "description": "Render a 256-pixel tile combining the streaming scenario's output COG tiles.\nAuthentication is required only when the server has OAuth credentials configured. See GET /auth/config.",
+        "operationId": "get_scenario_tile_jobs__job_id__scenarios__scenario_index__tiles__z___x___y__png_get",
+        "security": [
+          {
+            "OAuth2AuthorizationCodeBearer": []
+          },
+          {}
+        ],
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Job Id"
+            }
+          },
+          {
+            "name": "scenario_index",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "title": "Scenario Index"
+            }
+          },
+          {
+            "name": "z",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 22,
+              "minimum": 0,
+              "title": "Z"
+            }
+          },
+          {
+            "name": "x",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "title": "X"
+            }
+          },
+          {
+            "name": "y",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "title": "Y"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1113,6 +1259,22 @@
               }
             ],
             "title": "Local Output Dir"
+          },
+          "execution_mode": {
+            "type": "string",
+            "enum": [
+              "legacy",
+              "streaming"
+            ],
+            "title": "Execution Mode",
+            "default": "legacy"
+          },
+          "scenario_manifests": {
+            "items": {
+              "$ref": "#/components/schemas/ScenarioManifest"
+            },
+            "type": "array",
+            "title": "Scenario Manifests"
           }
         },
         "additionalProperties": false,
@@ -1199,6 +1361,16 @@
           },
           "scenarios": {
             "$ref": "#/components/schemas/HandFimParameters"
+          },
+          "execution_mode": {
+            "type": "string",
+            "enum": [
+              "legacy",
+              "streaming"
+            ],
+            "title": "Execution Mode",
+            "description": "legacy downloads whole HUCs and writes one COG per scenario. streaming range-reads a prepared cloud-optimized hydrofabric per reach and writes tiled COGs plus a manifest per scenario; it requires output_bucket and a single process.",
+            "default": "legacy"
           }
         },
         "additionalProperties": false,
@@ -1349,6 +1521,64 @@
           "maxzoom"
         ],
         "title": "RasterInfo"
+      },
+      "ScenarioManifest": {
+        "properties": {
+          "ScenarioID": {
+            "type": "string",
+            "title": "Scenarioid"
+          },
+          "key": {
+            "type": "string",
+            "title": "Key"
+          },
+          "tile_count": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Tile Count"
+          },
+          "bounds": {
+            "prefixItems": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "type": "array",
+            "maxItems": 4,
+            "minItems": 4,
+            "title": "Bounds"
+          },
+          "resolution": {
+            "type": "number",
+            "exclusiveMinimum": 0.0,
+            "title": "Resolution"
+          },
+          "tile_size": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Tile Size"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ScenarioID",
+          "key",
+          "tile_count",
+          "bounds",
+          "resolution",
+          "tile_size"
+        ],
+        "title": "ScenarioManifest",
+        "description": "A published per-scenario tile manifest from a streaming job."
       }
     },
     "securitySchemes": {

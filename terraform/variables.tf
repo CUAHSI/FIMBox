@@ -148,6 +148,45 @@ variable "hand_fim_max_procs" {
   }
 }
 
+variable "stream_input_bucket" {
+  type        = string
+  default     = ""
+  description = "S3 bucket holding the prepared cloud-optimized HAND hydrofabric; empty disables streaming jobs."
+}
+
+variable "stream_input_prefix" {
+  type        = string
+  default     = ""
+  description = "Key prefix of the prepared dataset (the directory containing dataset.json)."
+}
+
+variable "stream_input_unsigned" {
+  type        = bool
+  default     = false
+  description = "Read the prepared dataset anonymously (public bucket) instead of with the job's HydroShare credentials."
+}
+
+variable "stream_worker_instance_count" {
+  type        = number
+  default     = 0
+  description = "Dedicated streaming worker instances; zero runs streaming jobs on the default worker pool."
+  validation {
+    condition     = var.stream_worker_instance_count >= 0 && floor(var.stream_worker_instance_count) == var.stream_worker_instance_count
+    error_message = "stream_worker_instance_count must be a nonnegative integer."
+  }
+}
+
+variable "stream_worker_cpu" {
+  type    = string
+  default = "2"
+}
+
+variable "stream_worker_memory" {
+  type        = string
+  default     = "4Gi"
+  description = "Streaming jobs range-read inputs and upload tiles directly, so no HUC data is staged in memory."
+}
+
 variable "redis_memory_gb" {
   type    = number
   default = 1

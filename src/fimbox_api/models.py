@@ -1,5 +1,6 @@
 import math
 import re
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -56,6 +57,23 @@ class HandFimJobOptions(OutputDestination):
         default=False,
         description="Replace existing S3 objects with matching output keys; by default, conflicting keys fail the job.",
     )
+    execution_mode: Literal["legacy", "streaming"] = Field(
+        default="legacy",
+        description=(
+            "legacy downloads whole HUCs and writes one COG per scenario. streaming range-reads a prepared "
+            "cloud-optimized hydrofabric per reach and writes tiled COGs plus a manifest per scenario; "
+            "it requires output_bucket and a single process."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def validate_execution_mode(self) -> "HandFimJobOptions":
+        if self.execution_mode == "streaming":
+            if self.output_bucket is None:
+                raise ValueError("streaming execution_mode requires output_bucket")
+            if self.max_procs not in (None, 1):
+                raise ValueError("streaming execution_mode runs one process; omit max_procs or use 1")
+        return self
 
 
 class HandFimJobRequest(HandFimJobOptions):
@@ -79,10 +97,23 @@ class OutputFile(BaseModel):
     size_bytes: int
 
 
+class ScenarioManifest(BaseModel):
+    """A published per-scenario tile manifest from a streaming job."""
+
+    ScenarioID: str
+    key: str
+    tile_count: int = Field(ge=1)
+    bounds: tuple[float, float, float, float]
+    resolution: float = Field(gt=0)
+    tile_size: int = Field(gt=0)
+
+
 class StoredHandFimResult(HandFimResult, OutputDestination):
     """Successful outputs and the destination persisted by the worker."""
 
+    execution_mode: Literal["legacy", "streaming"] = "legacy"
     files: list[OutputFile] = Field(default_factory=list)
+    scenario_manifests: list[ScenarioManifest] = Field(default_factory=list)
     local_output_dir: str | None = None
 
 

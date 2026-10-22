@@ -389,6 +389,47 @@ single worker per shared watershed cache. `pixi run api` runs FastAPI only.
     `reachfim_interval` command was removed; still available as a standalone
     CLI command.
 
+## Streaming HAND-FIM (opt-in `execution_mode="streaming"`)
+
+Targets a 4 GiB Cloud Run worker with no scratch storage: inputs are
+range-read from a prepared cloud-optimized hydrofabric on S3 and outputs are
+uploaded tile by tile.
+
+- **`docker/handfim/prepare_streaming_dataset.py`** — Offline tool (not run per
+  request): `prepare_huc` converts a downloaded `flood_<huc>/<huc>` directory
+  into `dataset.json`, `hucs/<huc>/huc.json` (written last), lossless 512-px
+  REM/catchment COGs per branch, and per-reach JSONs with HydroID ratings
+  (lake rows dropped) and the COG blocks each reach occupies. `download_huc`
+  (run first by the CLI) fetches only those inputs from the public
+  `ciroh-owp-hand-fim` bucket (us-east-2, unsigned, `hand_fim_<version>/`)
+  unless branch 0 rasters already exist; `.part` files make it resumable.
+- **`docker/handfim/patches/streamFIM.py`** — Copied into fimserve. Pure
+  science/tiling: `plan_huc` (first discharge per feature, stage
+  interpolation), `schedule_tiles` (fixed tile_size windows on each HUC's native
+  grid), `compute_tile` (reads only scheduled blocks, `stage > rem`, max across
+  branches), `encode_tile` (binary uint8 COG), `run_scenario` (returns the
+  manifest; no-flood is an error like legacy). I/O is injected as callables.
+- **`docker/handfim/stream_storage.py`** — Container S3 glue for the
+  `entry.py stream-scenario` command: `StreamConfig.from_env` (FIMBOX_STREAM_*,
+  FIMBOX_S3_*, AWS_*), boto3 index reads, GDAL `s3://` range reads, per-tile
+  `put_object`, local `<sid>.manifest.json`.
+- API: `models.HandFimJobOptions.execution_mode` (streaming requires S3 output
+  and one process); `config` STREAM_* settings; `storage.job_s3_environment`
+  (credentials for the subprocess environment, rejects near-expiry);
+  `tasks.__hand_fim_streaming` (attempt-scoped tile prefixes, validates
+  manifests, publishes `<prefix>/<sid>/manifest.json` last, cleans failed
+  attempts and replaced tiles); `main` routes
+  `/jobs/{id}/scenarios/{i}/info|tiles/...` compositing with
+  `rasters.scenario_tile` (union, `STREAM_DISPLAY_MAX_TILES` cap). Legacy
+  Celery args are unchanged; streaming appends `"streaming"` and can route to
+  `STREAM_QUEUE`. `src/fimbox_map.py` lists streamed scenarios; the CLI has
+  `--execution-mode`.
+- Terraform: `stream_input_*` variables and an optional `stream_worker` pool
+  (4Gi) consuming the `streaming` queue.
+- Tests: `tests/test_streaming_fim.py` (NOAA-reference equality, tile-size
+  invariance, range-only HTTP reads) and `tests/test_streaming_api.py`.
+- Not yet validated against a live HydroShare dataset or on Cloud Run.
+
 ## Known gaps / things to watch
 
 - The shared schema lives under `src/schemas/` and is consumed by both the

@@ -1,3 +1,4 @@
+import json
 import logging
 import mimetypes
 import os
@@ -7,7 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from boto3.exceptions import S3UploadFailedError
 from botocore.exceptions import BotoCoreError, ClientError
@@ -17,11 +18,13 @@ from schemas.hand_fim_schema import HandFimOutput
 
 from .celery_app import celery_app
 from .config import settings
-from .models import HandFimParameters, HandFimJobOptions, OutputFile, StoredHandFimResult
+from .models import HandFimParameters, HandFimJobOptions, OutputFile, ScenarioManifest, StoredHandFimResult
 from .job_logs import append_job_log, clear_job_logs
-from .storage import StorageCredentialsError, output_file_key, s3_client
+from .storage import StorageCredentialsError, job_s3_environment, output_file_key, s3_client
 
 logger = logging.getLogger(__name__)
+MANIFEST_FORMAT = "fimbox-scenario-tiles"
+MAX_MANIFEST_BYTES = 8 * 1024 * 1024
 
 
 def __output_files(output_dir: Path) -> list[Path]:
@@ -38,7 +41,7 @@ def __output_files(output_dir: Path) -> list[Path]:
     return files
 
 
-def __run_scenario(command: list[str], job_id: str) -> None:
+def __run_scenario(command: list[str], job_id: str, extra_env: dict[str, str] | None = None) -> None:
     process = subprocess.Popen(
         command,
         cwd=settings.hand_fim_entry.parent,
@@ -51,6 +54,7 @@ def __run_scenario(command: list[str], job_id: str) -> None:
         env={
             **os.environ, "PYTHONUNBUFFERED": "1",
             "TMPDIR": str(settings.hand_fim_input_dir / "jobs" / job_id / "tmp"),
+            **(extra_env or {}),
         },
         start_new_session=True,
     )
@@ -133,6 +137,151 @@ def __cleanup_job(job_id: str, scenarios: HandFimParameters) -> None:
     logger.info("Removed HAND-FIM job %s inputs, downloads, and outputs", job_id)
 
 
+def __is_missing(error: ClientError) -> bool:
+    return error.response.get("Error", {}).get("Code") in {"404", "NoSuchKey", "NotFound"}
+
+
+def __load_manifest(client: Any, bucket: str, key: str) -> dict | None:
+    try:
+        response = client.get_object(Bucket=bucket, Key=key)
+    except ClientError as error:
+        if __is_missing(error):
+            return None
+        raise
+    with response["Body"] as body:
+        return json.loads(body.read(MAX_MANIFEST_BYTES + 1))
+
+
+def __delete_keys(client: Any, bucket: str, keys: list[str]) -> None:
+    for start in range(0, len(keys), 1000):
+        client.delete_objects(Bucket=bucket, Delete={
+            "Objects": [{"Key": key} for key in keys[start:start + 1000]], "Quiet": True,
+        })
+
+
+def __delete_prefix(client: Any, bucket: str, prefix: str) -> None:
+    keys = []
+    for page in client.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix):
+        keys.extend(item["Key"] for item in page.get("Contents", []))
+    __delete_keys(client, bucket, keys)
+
+
+def __references_attempt(manifest: dict | None, attempt_prefix: str) -> bool:
+    tiles = manifest.get("tiles") if isinstance(manifest, dict) else None
+    return isinstance(tiles, list) and any(
+        isinstance(tile, dict) and str(tile.get("key", "")).startswith(attempt_prefix) for tile in tiles
+    )
+
+
+def __validated_manifest(path: Path, scenario_id: str, attempt_prefix: str) -> tuple[bytes, dict]:
+    if not path.is_file() or path.is_symlink() or path.stat().st_size > MAX_MANIFEST_BYTES:
+        raise RuntimeError(f"Streaming HAND-FIM produced no valid manifest for scenario {scenario_id!r}")
+    content = path.read_bytes()
+    manifest = json.loads(content)
+    tiles = manifest.get("tiles")
+    if manifest.get("format") != MANIFEST_FORMAT or manifest.get("scenario_id") != scenario_id \
+            or not isinstance(tiles, list) or not tiles:
+        raise RuntimeError(f"Streaming HAND-FIM manifest for scenario {scenario_id!r} is invalid")
+    for tile in tiles:
+        key = tile.get("key") if isinstance(tile, dict) else None
+        if not isinstance(key, str) or not key.startswith(attempt_prefix) or ".." in key.split("/"):
+            raise RuntimeError(f"Streaming HAND-FIM manifest for scenario {scenario_id!r} has an invalid tile key")
+    return content, manifest
+
+
+def __hand_fim_streaming(
+    job_id: str, scenarios: HandFimParameters, destination: HandFimJobOptions,
+    scenario_file: Path, output_dir: Path,
+) -> dict[str, Any]:
+    """Stream tiles directly to S3, then publish one manifest per scenario."""
+    if not settings.streaming_enabled:
+        raise RuntimeError("Streaming execution is not configured on this worker")
+    bucket = destination.output_bucket
+    client = s3_client(UUID(job_id))
+    attempt = uuid4().hex
+    scenario_ids = [scenario.ScenarioID for scenario in scenarios.root]
+    manifest_keys = {sid: output_file_key(destination.output_prefix, f"{sid}/manifest.json") for sid in scenario_ids}
+    attempt_prefixes = {
+        sid: output_file_key(destination.output_prefix, f"{sid}/attempts/{attempt}") + "/" for sid in scenario_ids
+    }
+    previous = {}
+    if destination.overwrite:
+        previous = {sid: __load_manifest(client, bucket, key) for sid, key in manifest_keys.items()}
+    else:
+        __reject_existing_s3_keys(client, bucket, list(manifest_keys.values()))
+    published = []
+    try:
+        __run_scenario(
+            [sys.executable, str(settings.hand_fim_entry), "stream-scenario", str(scenario_file), str(output_dir)],
+            job_id,
+            {
+                **job_s3_environment(UUID(job_id), settings.stream_min_credential_seconds),
+                "FIMBOX_STREAM_INPUT_BUCKET": settings.stream_input_bucket,
+                "FIMBOX_STREAM_INPUT_PREFIX": settings.stream_input_prefix,
+                "FIMBOX_STREAM_INPUT_UNSIGNED": "true" if settings.stream_input_unsigned else "false",
+                "FIMBOX_STREAM_OUTPUT_BUCKET": bucket,
+                "FIMBOX_STREAM_OUTPUT_PREFIX": destination.output_prefix,
+                "FIMBOX_STREAM_ATTEMPT": attempt,
+                "FIMBOX_STREAM_TILE_SIZE": str(settings.stream_tile_size),
+            },
+        )
+        manifests = {
+            sid: __validated_manifest(output_dir / f"{sid}.manifest.json", sid, attempt_prefixes[sid])
+            for sid in scenario_ids
+        }
+        refs = []
+        # Manifests are published last so a reader never sees a partially written scenario.
+        for sid, (content, manifest) in manifests.items():
+            client.put_object(Bucket=bucket, Key=manifest_keys[sid], Body=content, ContentType="application/json")
+            published.append(sid)
+            refs.append(ScenarioManifest(
+                ScenarioID=sid, key=manifest_keys[sid], tile_count=len(manifest["tiles"]),
+                bounds=tuple(manifest["bounds_wgs84"]), tile_size=int(manifest["tile_size"]),
+                resolution=min(float(huc["resolution"]) for huc in manifest["hucs"].values()),
+            ))
+    except BaseException:
+        for sid in published:
+            key = manifest_keys[sid]
+            try:
+                # Another job may have published since; only roll back a manifest that is still ours.
+                if not __references_attempt(__load_manifest(client, bucket, key), attempt_prefixes[sid]):
+                    continue
+                if isinstance(previous.get(sid), dict):
+                    client.put_object(
+                        Bucket=bucket, Key=key, Body=json.dumps(previous[sid]).encode(),
+                        ContentType="application/json",
+                    )
+                else:
+                    client.delete_object(Bucket=bucket, Key=key)
+            except (BotoCoreError, ClientError, ValueError):
+                logger.exception("Could not roll back manifest %s after failed job %s", key, job_id)
+        for prefix in attempt_prefixes.values():
+            try:
+                __delete_prefix(client, bucket, prefix)
+            except (BotoCoreError, ClientError):
+                logger.exception("Could not remove partial tiles %s for job %s", prefix, job_id)
+        raise
+    for sid, manifest in previous.items():
+        if not isinstance(manifest, dict):
+            continue
+        scenario_root = output_file_key(destination.output_prefix, f"{sid}/attempts") + "/"
+        stale = [
+            tile["key"] for tile in manifest.get("tiles", [])
+            if isinstance(tile, dict) and isinstance(tile.get("key"), str)
+            and tile["key"].startswith(scenario_root) and not tile["key"].startswith(attempt_prefixes[sid])
+        ]
+        try:
+            __delete_keys(client, bucket, stale)
+        except (BotoCoreError, ClientError):
+            logger.exception("Could not remove replaced tiles for scenario %s in job %s", sid, job_id)
+    append_job_log(job_id, "Streaming HAND-FIM manifests published.\n")
+    return StoredHandFimResult(
+        outputs=[HandFimOutput(ScenarioID=sid) for sid in scenario_ids],
+        execution_mode="streaming", scenario_manifests=refs, local_output_dir=None,
+        **destination.model_dump(include={"output_bucket", "output_prefix"}),
+    ).model_dump(mode="json")
+
+
 @celery_app.task(name="fimbox_api.tasks.hand_fim")
 def hand_fim(
     job_id: str,
@@ -141,13 +290,14 @@ def hand_fim(
     output_prefix: str = "",
     max_procs: int | None = None,
     overwrite: bool = False,
+    execution_mode: str = "legacy",
 ) -> dict[str, Any]:
     """Run the container scenario command and upload its job-specific output tree."""
     job_id = str(UUID(job_id))
     scenarios = HandFimParameters.model_validate(payload)
     destination = HandFimJobOptions(
         output_bucket=output_bucket, output_prefix=output_prefix,
-        max_procs=max_procs, overwrite=overwrite,
+        max_procs=max_procs, overwrite=overwrite, execution_mode=execution_mode,
     )
     input_dir = settings.hand_fim_input_dir / "jobs" / job_id
     output_dir = settings.hand_fim_output_dir / "scenarios" / job_id
@@ -163,6 +313,8 @@ def hand_fim(
         # A redelivered task must not mistake a previous attempt's files for success.
         for path in __output_files(output_dir):
             path.unlink()
+        if destination.execution_mode == "streaming":
+            return __hand_fim_streaming(job_id, scenarios, destination, scenario_file, output_dir)
         __run_scenario(
             [
                 sys.executable,
@@ -224,7 +376,7 @@ def hand_fim(
         return StoredHandFimResult(
             outputs=outputs, files=files,
             local_output_dir=None,
-            **destination.model_dump(exclude={"max_procs", "overwrite"}),
+            **destination.model_dump(include={"output_bucket", "output_prefix"}),
         ).model_dump(mode="json")
     except (
         OSError, subprocess.CalledProcessError, RuntimeError,

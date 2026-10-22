@@ -22,6 +22,13 @@ class Settings(BaseSettings):
     s3_addressing_style: Literal["path", "virtual", "auto"] = "path"
     hydroshare_s3_credentials_url: str = "https://www.hydroshare.org/hsapi/user/service/accounts/s3/"
     hydroshare_s3_credentials_expiry_days: int = Field(default=1, ge=1)
+    stream_input_bucket: str = ""
+    stream_input_prefix: str = ""
+    stream_input_unsigned: bool = False
+    stream_tile_size: int = Field(default=2048, ge=512, le=8192, multiple_of=512)
+    stream_min_credential_seconds: int = Field(default=3600, ge=60)
+    stream_queue: str = ""
+    stream_display_max_tiles: int = Field(default=16, ge=4, le=64)
     redis_url: str = "redis://localhost:6379/2"
     session_ttl_seconds: int = Field(default=86400, ge=1)
     hydroshare_oauth_authorize_url: str = "https://www.hydroshare.org/o/authorize/"
@@ -39,6 +46,10 @@ class Settings(BaseSettings):
     hydroshare_scope: str = "read write"
     oauth_state_cookie_secure: bool = True
     swagger_oauth_redirect_uri: str = "http://localhost:8000/docs/oauth2-redirect"
+
+    @property
+    def streaming_enabled(self) -> bool:
+        return bool(self.stream_input_bucket)
 
     @property
     def authentication_enabled(self) -> bool:

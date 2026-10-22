@@ -93,6 +93,14 @@ Filestore or a queue autoscaler. Job metadata expires according to
 `result_ttl_seconds`; Redis is not a durable job archive. Do not scale down or
 destroy the deployment during active work.
 
+Streaming mode avoids the whole-HUC scratch budget. Publish a prepared dataset
+(see [the HAND-FIM guide](../docker/handfim/README.md#streaming-mode)) and set
+`stream_input_bucket`/`stream_input_prefix` (plus `stream_input_unsigned` for a
+public bucket). Set `stream_worker_instance_count` to add a dedicated pool
+(`stream_worker_memory`, default 4Gi; `stream_worker_cpu`, default 2) that
+consumes a separate `streaming` queue; otherwise the default worker runs
+streaming jobs too.
+
 Validate without applying:
 
 ```bash

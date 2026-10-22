@@ -295,12 +295,49 @@ class NotebookMapTests(unittest.TestCase):
             before = len(requests)
             map_widget.set_trait("bounds", ((30.01, -80), (31, -79)))
             self.assertEqual(len(requests), before, "Visible tiles should be cached in kernel memory")
-            selector.value = 1
+            selector.value = ("file", 1)
             self.assertTrue(any("/rasters/1/" in str(request.url) for request in requests))
             button.click()
             self.assertIn("visible tiles", status.value)
             map_widget.close()
             widget.close()
+
+    def test_streamed_scenarios_use_scenario_routes_and_respect_minzoom(self):
+        requests = []
+
+        def respond(request):
+            requests.append(request)
+            if request.url.path.endswith("/info"):
+                return httpx.Response(200, json={"bounds": [-80, 30, -79, 31], "minzoom": 11, "maxzoom": 15})
+            return httpx.Response(200, content=PNG, headers={"content-type": "image/png"})
+
+        result = StoredHandFimResult.from_dict({
+            **manifest(), "files": [], "execution_mode": "streaming",
+            "scenario_manifests": [{
+                "ScenarioID": "s1", "key": "outputs/s1/manifest.json", "tile_count": 2,
+                "bounds": [-80, 30, -79, 31], "resolution": 10.0, "tile_size": 2048,
+            }],
+        })
+        client = AuthenticatedClient(
+            base_url="https://api.example", token="test",
+            httpx_args={"transport": httpx.MockTransport(respond)},
+        )
+        with client, patch("ipyleaflet.Map.fit_bounds"):
+            widget = fimbox_map.job_map(client, uuid4(), result)
+            selector, _, status, map_widget = widget.children
+            self.assertEqual(selector.value, ("scenario", 0))
+            map_widget.zoom = 9
+            map_widget.set_trait("bounds", ((30, -80), (31, -79)))
+            self.assertIn("Zoom in to level 11", status.value)
+            self.assertFalse(any("/tiles/" in str(request.url) for request in requests))
+            map_widget.zoom = 12
+            map_widget.set_trait("bounds", ((30.2, -79.8), (30.3, -79.7)))
+            self.assertIn("visible tiles", status.value)
+            self.assertTrue(all(
+                "/scenarios/0/" in str(request.url) for request in requests
+            ))
+            widget.close()
+            map_widget.close()
 
     def test_missing_storage_is_explicit(self):
         result = StoredHandFimResult.from_dict({**manifest(), "output_bucket": None, "output_prefix": ""})

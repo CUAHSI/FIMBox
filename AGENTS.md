@@ -25,8 +25,10 @@ making structural changes to the project, so future sessions can rely on it.
 - `sdk/` — Captured OpenAPI document and pinned local generator configuration.
 - `docker/handfim/` — Code that runs *inside* the `cuahsi/handfim` Docker
   image: `entry.py` (container CLI), `compute_rating_increments.py` (rating
-  curve interpolation), and `patches/` (files that intentionally override
-  upstream `fimserve` modules — see "External dependencies" below).
+  curve interpolation), `stream_storage.py` + `prepare_streaming_dataset.py`
+  (opt-in streaming mode over a prepared cloud-optimized hydrofabric), and
+  `patches/` (files that intentionally override or extend upstream `fimserve`
+  modules, including `streamFIM.py` — see "External dependencies" below).
 - `test-data/` — Sample input data for manual testing.
 - `data/input/`, `data/output/` — Default runtime bind mounts for the worker
   Compose service; configurable through FIMBOX_INPUT_DIR/FIMBOX_OUTPUT_DIR.

@@ -95,8 +95,40 @@ def output_file_key(prefix: str, relative_path: str) -> str:
     return key
 
 
-def s3_client(job_id: UUID):
+def job_s3_environment(job_id: UUID, min_seconds: int) -> dict[str, str]:
+    """S3 settings for a HAND-FIM subprocess; credentials go only into its environment."""
     credentials = __job_credentials(job_id)
+    if (credentials.expiry - datetime.now(timezone.utc)).total_seconds() < min_seconds:
+        raise StorageCredentialsError("Job S3 credentials expire too soon for a streaming run")
+    return {
+        "AWS_ACCESS_KEY_ID": credentials.access_key.get_secret_value(),
+        "AWS_SECRET_ACCESS_KEY": credentials.secret_key.get_secret_value(),
+        "FIMBOX_S3_ENDPOINT_URL": settings.s3_endpoint_url,
+        "FIMBOX_S3_REGION": settings.s3_region,
+        "FIMBOX_S3_ADDRESSING_STYLE": settings.s3_addressing_style,
+    }
+
+
+def s3_client(job_id: UUID):
+    return __client(__job_credentials(job_id))
+
+
+def __fresh_credentials(job_id: UUID, session: UserSession) -> HydroShareS3Credentials:
+    if get_redis_client().get(JOB_CREDENTIALS_PREFIX + str(job_id)) is None:
+        create_job_credentials(job_id, session)
+    credentials = __job_credentials(job_id)
+    if (credentials.expiry - datetime.now(timezone.utc)).total_seconds() < 120:
+        create_job_credentials(job_id, session)
+        credentials = __job_credentials(job_id)
+    return credentials
+
+
+def session_s3_client(job_id: UUID, session: UserSession):
+    """An S3 client for API reads, renewing the job credentials if needed."""
+    return __client(__fresh_credentials(job_id, session))
+
+
+def __client(credentials: HydroShareS3Credentials):
     return boto3.client(
         "s3",
         endpoint_url=settings.s3_endpoint_url,
@@ -120,12 +152,7 @@ class RasterSource:
 
 def raster_source(job_id: UUID, session: UserSession, bucket: str, key: str) -> RasterSource:
     """Configure signed S3 range reads without exposing credentials to clients."""
-    if get_redis_client().get(JOB_CREDENTIALS_PREFIX + str(job_id)) is None:
-        create_job_credentials(job_id, session)
-    credentials = __job_credentials(job_id)
-    if (credentials.expiry - datetime.now(timezone.utc)).total_seconds() < 120:
-        create_job_credentials(job_id, session)
-        credentials = __job_credentials(job_id)
+    credentials = __fresh_credentials(job_id, session)
     endpoint = urlsplit(settings.s3_endpoint_url)
     if endpoint.scheme not in {"http", "https"} or not endpoint.netloc or endpoint.path.strip("/"):
         raise StorageCredentialsError("Raster S3 endpoint must be an HTTP(S) origin")

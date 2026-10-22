@@ -42,7 +42,9 @@ for a missing output bucket when HydroShare output is required. When a bucket
 is selected, they also prompt for the output prefix (default empty) and
 whether to overwrite existing output objects (default no). Explicit
 `--output-bucket`, `--output-prefix`, `--overwrite`/`--no-overwrite`, and
-`--max-procs` flags skip the corresponding prompts.
+`--max-procs` flags skip the corresponding prompts. `--execution-mode streaming`
+selects the opt-in streaming computation; it requires `--output-bucket`, and
+the field is omitted from legacy requests.
 
 Submissions using `--body` remain noninteractive for job options; pass
 `--output-bucket` explicitly when the deployment requires it:

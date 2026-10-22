@@ -278,7 +278,10 @@ class ApiTests(unittest.TestCase):
             main.celery_app, "AsyncResult", return_value=Mock(state="SUCCESS", result=result)
         ):
             response = self.client.get(f"/jobs/{job_id}")
-            self.assertEqual(response.json()["result"], result)
+            self.assertEqual(
+                response.json()["result"],
+                {**result, "execution_mode": "legacy", "scenario_manifests": []},
+            )
 
     def test_output_download_and_envelope_routes_are_removed(self):
         job_id = str(uuid4())

@@ -52,7 +52,8 @@ pixi run fimbox submit --body test-data/single_reach.json
 ```
 
 Or use `POST /jobs/hand-fim` with an object containing `scenarios` and optional
-`output_bucket`, `output_prefix`, `overwrite`, and `max_procs` fields.
+`output_bucket`, `output_prefix`, `overwrite`, `max_procs`, and
+`execution_mode` fields.
 Requests require unique scenario IDs, eight-digit HUCs, and finite,
 nonnegative streamflows. The API validates requests before enqueueing.
 
@@ -69,6 +70,21 @@ requests temporary credentials and stores them in Redis; neither provider
 tokens nor S3 credentials are passed in Celery arguments or returned to the
 client. There is no static AWS-credential fallback.
 
+`execution_mode` defaults to `legacy`. `streaming` runs the
+[streaming HAND-FIM mode](../handfim/README.md#streaming-mode): it requires
+`output_bucket`, permits only `max_procs` 1, and returns 409 unless the
+deployment sets `STREAM_INPUT_BUCKET`. The worker passes the job's temporary
+S3 credentials to the computation through its environment, never its command
+line. Tiles go to `<prefix>/<ScenarioID>/attempts/<attempt>/`; the
+`<prefix>/<ScenarioID>/manifest.json` that lists them is published only after
+every scenario succeeds, and the job result reports it in
+`scenario_manifests` (with `files` empty). Failed attempts are deleted, and a
+manifest this job already published is rolled back to the replaced version
+unless another job has published over it since. Concurrent jobs writing the
+same scenario prefix are not serialized; the last publish wins. An
+existing manifest causes failure unless `overwrite` is enabled, in which case
+tiles from the replaced attempt are deleted after publishing.
+
 `GET /jobs` lists tracked jobs. Use `GET /jobs/{job_id}` to poll and
 `GET /jobs/{job_id}/logs?offset=0` to read worker logs by byte offset.
 `DELETE /jobs/{job_id}` cancels a queued job on a best-effort basis; running
@@ -82,6 +98,13 @@ The cloud notebook displays retained rasters through authenticated endpoints:
 - `GET /jobs/{job_id}/rasters/{file_index}/info` returns WGS84 bounds/zoom levels.
 - `GET /jobs/{job_id}/rasters/{file_index}/tiles/{z}/{x}/{y}.png` returns a
   256-pixel Web Mercator inundation tile.
+
+Streamed scenarios use `GET /jobs/{job_id}/scenarios/{scenario_index}/info`
+and `.../scenarios/{scenario_index}/tiles/{z}/{x}/{y}.png`, where
+`scenario_index` indexes `scenario_manifests`. Each map tile composites the
+union of intersecting output tiles; requests touching more than
+`STREAM_DISPLAY_MAX_TILES` (default 16) output tiles return 400, and the info
+`minzoom` reflects that limit.
 
 `file_index` is the zero-based index in the successful job's `files` manifest.
 Only COG/TIFF entries with retained S3 keys are accepted. Each request checks
@@ -110,6 +133,12 @@ through its GDAL dependencies.
 - `RESULT_TTL_SECONDS` and `VISIBILITY_TIMEOUT_SECONDS` should exceed the
   longest queue wait and job duration. Configure them consistently for API
   and worker.
+- Streaming mode: `STREAM_INPUT_BUCKET` (enables it), `STREAM_INPUT_PREFIX`,
+  `STREAM_INPUT_UNSIGNED` (read a public dataset anonymously),
+  `STREAM_TILE_SIZE` (output window in pixels, multiple of 512, default 2048),
+  `STREAM_MIN_CREDENTIAL_SECONDS` (default 3600; the job fails early if its S3
+  credentials expire sooner), `STREAM_QUEUE` (route streaming jobs to a
+  dedicated worker queue), and `STREAM_DISPLAY_MAX_TILES`.
 - Use one worker per shared watershed cache. Do not scale workers against the
   same filesystem without cache coordination.
 

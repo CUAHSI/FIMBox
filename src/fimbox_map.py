@@ -13,6 +13,8 @@ from fimbox_sdk import AuthenticatedClient, Client
 from fimbox_sdk.api.default import (
     get_raster_info_jobs_job_id_rasters_file_index_info_get as info_operation,
     get_raster_tile_jobs_job_id_rasters_file_index_tiles_z_x_y_png_get as tile_operation,
+    get_scenario_info_jobs_job_id_scenarios_scenario_index_info_get as scenario_info_operation,
+    get_scenario_tile_jobs_job_id_scenarios_scenario_index_tiles_z_x_y_png_get as scenario_tile_operation,
 )
 from fimbox_sdk.models import RasterInfo, StoredHandFimResult
 
@@ -36,6 +38,7 @@ def __visible_tiles(
     bounds: Sequence[Sequence[float]],
     zoom: int,
     raster_bounds: Sequence[float],
+    minzoom: int = 0,
 ) -> list[tuple[int, int, int]]:
     (south, west), (north, east) = bounds
     left, bottom, right, top = raster_bounds
@@ -53,7 +56,7 @@ def __visible_tiles(
 
         y0 = max(0, int(row(north)))
         y1 = min(count - 1, math.ceil(row(south)) - 1)
-        if (x1 - x0 + 1) * (y1 - y0 + 1) <= 64 or zoom == 0:
+        if (x1 - x0 + 1) * (y1 - y0 + 1) <= 64 or zoom <= minzoom:
             return [(zoom, x, y) for x in range(x0, x1 + 1) for y in range(y0, y1 + 1)]
         zoom -= 1
 
@@ -61,7 +64,7 @@ def __visible_tiles(
 def job_map(
     client: Client | AuthenticatedClient, job_id: str | UUID, result: StoredHandFimResult,
 ) -> "VBox":
-    """Return an ipyleaflet widget for retained HAND-FIM COG/TIFF outputs.
+    """Return an ipyleaflet widget for retained HAND-FIM COG/TIFF or streamed scenario outputs.
 
     Arguments:
         client: Connected generated SDK client. Credentials stay in the kernel.
@@ -78,13 +81,18 @@ def job_map(
     if not result.output_bucket:
         raise ValueError("Map viewing requires retained S3 outputs.")
     files = [
-        (artifact.path, index) for index, artifact in enumerate(result.files)
+        (artifact.path, ("file", index)) for index, artifact in enumerate(result.files)
         if artifact.path.lower().endswith((".cog", ".tif", ".tiff")) and artifact.key
     ]
-    if not files:
-        raise ValueError("This job has no retained COG/TIFF outputs.")
     # Prefer a COG over the original TIFF when both are in the manifest.
     files.sort(key=lambda item: (not item[0].lower().endswith(".cog"), item[0]))
+    manifests = result.scenario_manifests if isinstance(result.scenario_manifests, list) else []
+    files.extend(
+        (f"{manifest.scenario_id} (streamed tiles)", ("scenario", index))
+        for index, manifest in enumerate(manifests)
+    )
+    if not files:
+        raise ValueError("This job has no retained COG/TIFF or streamed scenario outputs.")
     selector = Dropdown(options=files, description="Raster:", layout=Layout(width="95%"))
     status = Label()
     reload_button = Button(description="Reload tiles", tooltip="Retry after a read error or renewed login")
@@ -97,10 +105,16 @@ def job_map(
     changing = False
 
     @lru_cache(maxsize=128)
-    def tile(index: int, z: int, x: int, y: int) -> str:
-        response = tile_operation.sync_detailed(
-            client=client, job_id=job_id, file_index=index, z=z, x=x, y=y,
-        )
+    def tile(source: tuple[str, int], z: int, x: int, y: int) -> str:
+        kind, index = source
+        if kind == "scenario":
+            response = scenario_tile_operation.sync_detailed(
+                client=client, job_id=job_id, scenario_index=index, z=z, x=x, y=y,
+            )
+        else:
+            response = tile_operation.sync_detailed(
+                client=client, job_id=job_id, file_index=index, z=z, x=x, y=y,
+            )
         if response.status_code != 200:
             raise RuntimeError(f"Raster tile request failed: HTTP {response.status_code}.")
         if not response.content.startswith(b"\x89PNG\r\n\x1a\n"):
@@ -112,9 +126,14 @@ def job_map(
             return
         status.value = "Loading visible inundation tiles..."
         try:
-            coordinates = __visible_tiles(
-                map_widget.bounds, max(0, int(map_widget.zoom)), metadata.bounds,
-            )
+            zoom = max(0, int(map_widget.zoom))
+            # Streamed scenarios are composited from many tile COGs, so the API bounds low zooms.
+            minzoom = metadata.minzoom if selector.value[0] == "scenario" else 0
+            if zoom < minzoom:
+                map_widget.layers = base_layers
+                status.value = f"Zoom in to level {minzoom} or closer to view inundation tiles."
+                return
+            coordinates = __visible_tiles(map_widget.bounds, zoom, metadata.bounds, minzoom)
             overlays = [
                 ImageOverlay(url=tile(selector.value, z, x, y), bounds=__tile_bounds(z, x, y))
                 for z, x, y in coordinates
@@ -132,9 +151,15 @@ def job_map(
         metadata = None
         map_widget.layers = base_layers
         try:
-            response = info_operation.sync_detailed(
-                client=client, job_id=job_id, file_index=selector.value,
-            )
+            kind, index = selector.value
+            if kind == "scenario":
+                response = scenario_info_operation.sync_detailed(
+                    client=client, job_id=job_id, scenario_index=index,
+                )
+            else:
+                response = info_operation.sync_detailed(
+                    client=client, job_id=job_id, file_index=index,
+                )
             if response.status_code != 200 or not isinstance(response.parsed, RasterInfo):
                 raise RuntimeError(f"Raster metadata request failed: HTTP {response.status_code}.")
             metadata = response.parsed

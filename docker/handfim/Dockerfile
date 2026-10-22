@@ -62,6 +62,9 @@ COPY patches/fimserve_pyproject.toml /home/code/FIMServ/pyproject.toml
 # inundate_mosaic_wrapper.py (required for it to emit any progress at all),
 # and force OS-level line-buffering via stdbuf for non-Python subprocesses.
 COPY patches/runFIM.py /home/code/FIMServ/src/fimserve/runFIM.py
+# streamFIM.py range-reads a prepared cloud-optimized hydrofabric one reach
+# block at a time (opt-in streaming mode; see README).
+COPY patches/streamFIM.py /home/code/FIMServ/src/fimserve/streamFIM.py
 
 RUN cd /home/code/FIMServ \
  && uv pip install --system -e . 
@@ -70,6 +73,8 @@ RUN cd /home/code/FIMServ \
 
 COPY compute_rating_increments.py /home/compute_rating_increments.py
 COPY entry.py /home/entry.py
+COPY stream_storage.py /home/stream_storage.py
+COPY prepare_streaming_dataset.py /home/prepare_streaming_dataset.py
 RUN mkdir -p /home/data/inputs
 
 # Set bash as the default command

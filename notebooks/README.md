@@ -25,8 +25,11 @@ the execution settings, and provides rerun and path-based viewing examples.
 Install the optional `fimbox[map]` dependency for ipyleaflet/Jupyter widgets,
 then run the map cell. `fimbox_map.output_map(api_client, SCENARIO_PATHS)` loads
 retained outputs directly from `s3://bucket/key` paths, not an expiring job ID.
-The example builds streaming `scenario/manifest.json` paths from the configured
-destination and scenario names. Edit `SCENARIO_PATHS` to use explicit manifest
+The example uses `EXECUTION_MODE` to build legacy `<ScenarioID>.cog` paths or
+streaming `<ScenarioID>/manifest.json` paths from the configured destination
+and scenario names. Match the mode and `OUTPUT_PREFIX` to the saved run being
+viewed; legacy runs do not produce streaming manifests.
+Edit `SCENARIO_PATHS` to use explicit manifest
 paths or `.cog`, `.tif`, and `.tiff` object paths (prefer COGs).
 To reopen outputs after 24 hours or a kernel restart, run setup, configuration,
 authentication/Connect, scenario inputs, and the map cell. Do not submit or

@@ -110,7 +110,8 @@ actual FIM computation using NOAA/OWP's `inundation-mapping` tooling and the
   job credentials and authorizes via S3 permissions; retained manifest metadata
   allows maps to reopen after the 24-hour job TTL. Existing job-scoped endpoints
   retain ownership checks. `job_map` is a saved-result compatibility wrapper.
-  The cloud notebook builds editable manifest paths from destination/scenario names.
+  The cloud notebook builds editable legacy COG or streaming manifest paths from
+  EXECUTION_MODE and destination/scenario names, without a saved job result.
   All SDK requests run in the notebook kernel;
   credentials never enter browser tile URLs. Raster selector prefers COGs,
   viewport requests cap at 64 tiles (coarsening zoom for large views), and a

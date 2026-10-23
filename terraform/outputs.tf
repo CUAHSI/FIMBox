@@ -10,6 +10,10 @@ output "worker_pool_name" {
   value = try(google_cloud_run_v2_worker_pool.worker[0].name, null)
 }
 
+output "stream_worker_pool_name" {
+  value = try(google_cloud_run_v2_worker_pool.stream_worker[0].name, null)
+}
+
 output "oauth_secret_names" {
   value = { for key, secret in google_secret_manager_secret.oauth : key => secret.secret_id }
 }

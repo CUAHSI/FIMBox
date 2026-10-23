@@ -278,7 +278,10 @@ class ApiTests(unittest.TestCase):
             main.celery_app, "AsyncResult", return_value=Mock(state="SUCCESS", result=result)
         ):
             response = self.client.get(f"/jobs/{job_id}")
-            self.assertEqual(response.json()["result"], result)
+            self.assertEqual(
+                response.json()["result"],
+                {**result, "execution_mode": "legacy", "scenario_manifests": [], "parity": []},
+            )
 
     def test_output_download_and_envelope_routes_are_removed(self):
         job_id = str(uuid4())
@@ -407,11 +410,12 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(result["outputs"], [{"ScenarioID": PAYLOAD[0]["ScenarioID"]}])
         self.assertEqual(result["output_bucket"], "fim-output")
         self.assertEqual(result["output_prefix"], "data/output")
-        self.storage_client.upload_file.assert_called_once_with(
+        self.storage_client.upload_file.assert_any_call(
             str(output_path),
             "fim-output", f"data/output/{PAYLOAD[0]['ScenarioID']}.cog",
             ExtraArgs={"ContentType": "image/tiff"},
         )
+        self.assertEqual(self.storage_client.upload_file.call_count, 3)
         self.assertEqual(run.call_args.args[0][-3:], [
             str(self.root / "input" / "jobs" / self.job_id / "scenario.json"), "1", self.job_id,
         ])
@@ -440,9 +444,10 @@ class WorkerTests(unittest.TestCase):
             result = tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION)
         self.assertEqual(
             {file["path"] for file in result["files"]},
-            {f"{PAYLOAD[0]['ScenarioID']}.cog", f"{PAYLOAD[0]['ScenarioID']}.tif", "logs/run.txt"},
+            {f"{PAYLOAD[0]['ScenarioID']}.cog", f"{PAYLOAD[0]['ScenarioID']}.tif",
+             "logs/run.txt", "scenarios.json", "README.md"},
         )
-        self.assertEqual(self.storage_client.upload_file.call_count, 3)
+        self.assertEqual(self.storage_client.upload_file.call_count, 5)
         for file in result["files"]:
             self.assertEqual(file["key"], f"data/output/{file['path']}")
             self.assertNotIn("download_url", file)
@@ -456,7 +461,7 @@ class WorkerTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "already exists.*overwrite=true"):
                 tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION)
         self.storage_client.head_object.assert_called_once_with(
-            Bucket="fim-output", Key=f"data/output/{PAYLOAD[0]['ScenarioID']}.cog",
+            Bucket="fim-output", Key="data/output/README.md",
         )
         self.storage_client.upload_file.assert_not_called()
         self.assertFalse((self.root / "output" / "scenarios" / self.job_id).exists())
@@ -468,7 +473,7 @@ class WorkerTests(unittest.TestCase):
                 self.job_id, PAYLOAD, **DESTINATION, overwrite=True,
             )
         self.storage_client.head_object.assert_not_called()
-        self.storage_client.upload_file.assert_called_once()
+        self.assertEqual(self.storage_client.upload_file.call_count, 3)
         self.assertEqual(result["output_bucket"], "fim-output")
         self.assertNotIn("overwrite", result)
 
@@ -479,6 +484,38 @@ class WorkerTests(unittest.TestCase):
         ):
             with self.assertRaises(subprocess.CalledProcessError):
                 tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION)
+
+    def test_input_scenarios_json_is_uploaded_and_listed_before_cleanup(self):
+        uploaded = {}
+
+        def upload(path, bucket, key, **kwargs):
+            if key.endswith("/scenarios.json"):
+                uploaded["body"] = Path(path).read_bytes()
+                self.assertEqual(bucket, "fim-output")
+                self.assertEqual(key, "data/output/scenarios.json")
+                self.assertEqual(kwargs["ExtraArgs"], {"ContentType": "application/json"})
+
+        self.storage_client.upload_file.side_effect = upload
+        with patch.object(tasks.subprocess, "Popen", side_effect=self.__spawn):
+            result = tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION)
+        self.assertEqual(json.loads(uploaded["body"]), PAYLOAD)
+        self.assertIn({
+            "path": "scenarios.json", "key": "data/output/scenarios.json",
+            "size_bytes": len(uploaded["body"]),
+        }, result["files"])
+        self.assertFalse((self.root / "output" / "scenarios" / self.job_id).exists())
+
+    def test_existing_scenarios_json_prevents_all_uploads_without_overwrite(self):
+        def head(**kwargs):
+            if kwargs["Key"].endswith("/scenarios.json"):
+                return {}
+            raise ClientError({"Error": {"Code": "404"}}, "HeadObject")
+
+        self.storage_client.head_object.side_effect = head
+        with patch.object(tasks.subprocess, "Popen", side_effect=self.__spawn):
+            with self.assertRaisesRegex(RuntimeError, "scenarios.json.*already exists"):
+                tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION)
+        self.storage_client.upload_file.assert_not_called()
 
     def test_max_procs_reaches_container_and_uses_worker_default_when_omitted(self):
         with patch.object(tasks.settings, "hand_fim_max_procs", 2):
@@ -495,7 +532,7 @@ class WorkerTests(unittest.TestCase):
         with patch.object(tasks.subprocess, "Popen", side_effect=self.__spawn):
             result = tasks.hand_fim.run(self.job_id, PAYLOAD)
         self.assertIsNone(result["output_bucket"])
-        self.assertIsNone(result["files"][0]["key"])
+        self.assertTrue(all(file["key"] is None for file in result["files"]))
         output_dir = self.root / "output" / "scenarios" / self.job_id
         self.assertIsNone(result["local_output_dir"])
         self.assertFalse(output_dir.exists())
@@ -535,13 +572,19 @@ class WorkerTests(unittest.TestCase):
 
     def test_upload_reads_files_before_cleanup(self):
         def upload(filename, *args, **kwargs):
-            self.assertEqual(Path(filename).read_bytes(), b"test-cog")
+            if Path(filename).name == "scenarios.json":
+                self.assertEqual(json.loads(Path(filename).read_text()), PAYLOAD)
+            elif Path(filename).name == "README.md":
+                self.assertIn("# HAND-FIM scenario outputs", Path(filename).read_text())
+            else:
+                self.assertEqual(Path(filename).read_bytes(), b"test-cog")
 
         self.storage_client.upload_file.side_effect = upload
         with patch.object(tasks.subprocess, "Popen", side_effect=self.__spawn):
             result = tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION)
         self.assertIsNone(result["local_output_dir"])
-        self.assertEqual(result["files"][0]["size_bytes"], len(b"test-cog"))
+        cog = next(file for file in result["files"] if file["path"].endswith(".cog"))
+        self.assertEqual(cog["size_bytes"], len(b"test-cog"))
         self.assertFalse((self.root / "output" / "scenarios" / self.job_id).exists())
 
     def test_cleanup_failure_is_explicit_and_other_paths_are_still_cleaned(self):

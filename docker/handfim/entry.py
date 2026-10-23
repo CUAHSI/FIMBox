@@ -715,6 +715,49 @@ def generate_scenario_fim(
     __convert_to_cog(scenario_root)
 
 
+@app.command(name="stream-scenario")
+def generate_streaming_scenario_fim(
+    json_file: Annotated[
+        Path,
+        typer.Argument(..., help="Path to a scenario JSON file."),
+    ],
+    output_dir: Annotated[
+        Path,
+        typer.Argument(..., help="Directory for the per-scenario tile manifests."),
+    ],
+) -> None:
+    """
+    Streams scenario inundation from a prepared cloud-optimized hydrofabric.
+
+    Unlike "scenario", nothing is downloaded: REM and catchment COG blocks
+    for the requested reaches are range-read from S3, and fixed-size output
+    COG tiles are uploaded as they are produced. Locations and credentials
+    come from FIMBOX_STREAM_* / FIMBOX_S3_* / AWS_* environment variables.
+
+    Arguments:
+    ==========
+        json_file - Path: Path to the scenario JSON file.
+        output_dir - Path: Directory where <ScenarioID>.manifest.json files are written.
+
+    Returns:
+    ========
+        None
+
+    """
+
+    from fimserve import streamFIM
+    import stream_storage
+
+    scenarios = __load_scenarios(json_file)
+    try:
+        stream_storage.run_streaming(
+            scenarios, output_dir, streamFIM, stream_storage.StreamConfig.from_env(),
+        )
+    except (streamFIM.StreamingInputError, RuntimeError) as error:
+        print(f"Streaming HAND-FIM failed: {error}")
+        raise typer.Exit(1)
+
+
 @app.command(name="clean")
 def clean_fims_cmd(
     directory: Annotated[

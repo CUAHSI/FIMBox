@@ -1,4 +1,5 @@
 import base64
+import io
 import json
 import tempfile
 import threading
@@ -13,6 +14,7 @@ from uuid import uuid4
 import httpx
 import numpy as np
 import rasterio
+from botocore.exceptions import ClientError
 from fastapi.testclient import TestClient
 from rasterio.shutil import copy as copy_raster
 from rasterio.session import AWSSession
@@ -206,7 +208,151 @@ class RasterReadTests(unittest.TestCase):
             rasters.raster_info(storage.RasterSource(str(Path(self.directory.name) / "missing-secret.cog")))
 
 
+class OutputPathApiTests(unittest.TestCase):
+    def setUp(self):
+        self.session = auth.UserSession(
+            user_id="alice", access_token="provider-secret", scope="read", expires_at=time.time() + 600,
+        )
+        main.app.dependency_overrides[auth.get_authenticated_session] = lambda: self.session
+        self.addCleanup(main.app.dependency_overrides.clear)
+        self.client = TestClient(main.app)
+        self.addCleanup(self.client.close)
+        for name, value in (
+            ("hydroshare_client_id", "test"),
+            ("hydroshare_client_secret", SecretStr("test")),
+        ):
+            patcher = patch.object(main.settings, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        for name in ("output_s3_client", "output_raster_source"):
+            patcher = patch.object(main, name)
+            setattr(self, name, patcher.start())
+            self.addCleanup(patcher.stop)
+        self.bucket = "resource"
+        self.key = "abc/data/contents/flood/s1/manifest.json"
+        self.document = {
+            "format": "fimbox-scenario-tiles", "version": 1, "scenario_id": "s1",
+            "tile_size": 2048, "hucs": {"03020201": {"resolution": 10.0}},
+            "bounds_wgs84": [-80, 30, -79, 31],
+            "tiles": [{"key": "abc/data/contents/flood/s1/03020201/0_0.cog",
+                       "bounds_wgs84": [-80, 30, -79, 31]}],
+        }
+        self.output_s3_client.return_value.get_object.side_effect = lambda **kwargs: {
+            "Body": io.BytesIO(json.dumps(self.document).encode()),
+        }
+
+    def test_retained_manifest_loads_without_any_job_or_ownership_lookup(self):
+        with patch.object(main.celery_app, "AsyncResult", side_effect=AssertionError("Job expired")), patch.object(
+            main, "user_has_job", side_effect=AssertionError("Ownership expired"),
+        ), patch.object(main, "scenario_tile", return_value=PNG) as tile:
+            params = {"bucket": self.bucket, "key": self.key}
+            response = self.client.get("/outputs/info", params=params)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["bounds"], [-80, 30, -79, 31])
+            self.assertEqual(response.headers["cache-control"], "no-store")
+            response = self.client.get("/outputs/tiles/12/1138/1681.png", params=params)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.content, PNG)
+            self.assertEqual(response.headers["cache-control"], "no-store")
+            keys = tile.call_args.args[0]
+            self.assertEqual(keys[0][0], self.document["tiles"][0]["key"])
+            tile.call_args.args[-1](keys[0][0])
+            self.output_raster_source.assert_called_once_with(self.session, self.bucket, keys[0][0])
+        self.output_s3_client.assert_called_with(self.session)
+
+    def test_retained_raster_uses_the_current_session_and_exact_key(self):
+        for extension in ("cog", "tif", "tiff"):
+            with self.subTest(extension=extension), patch.object(main, "raster_info", return_value=RasterInfo(
+                bounds=(-80, 30, -79, 31), minzoom=5, maxzoom=15,
+            )), patch.object(main, "raster_tile", return_value=PNG):
+                key = f"abc/data/contents/flood/s1.{extension}"
+                params = {"bucket": self.bucket, "key": key}
+                self.assertEqual(self.client.get("/outputs/info", params=params).status_code, 200)
+                response = self.client.get("/outputs/tiles/5/8/12.png", params=params)
+                self.assertEqual(response.content, PNG)
+                self.output_raster_source.assert_called_with(self.session, self.bucket, key)
+
+    def test_invalid_paths_and_coordinates_do_not_access_storage(self):
+        for key in ("../flood.cog", "/flood.cog", "a//flood.cog", "flood.txt", "a/./flood.cog"):
+            response = self.client.get("/outputs/info", params={"bucket": self.bucket, "key": key})
+            self.assertEqual(response.status_code, 400, response.text)
+        for path in ("/outputs/tiles/1/2/0.png", "/outputs/tiles/1/0/2.png", "/outputs/tiles/23/0/0.png"):
+            response = self.client.get(path, params={"bucket": self.bucket, "key": self.key})
+            self.assertIn(response.status_code, (400, 422))
+        self.output_s3_client.assert_not_called()
+        self.output_raster_source.assert_not_called()
+
+    def test_authentication_and_storage_permissions_are_still_required(self):
+        main.app.dependency_overrides.clear()
+        params = {"bucket": self.bucket, "key": self.key}
+        self.assertEqual(self.client.get("/outputs/info", params=params).status_code, 401)
+        self.output_s3_client.assert_not_called()
+        main.app.dependency_overrides[auth.get_authenticated_session] = lambda: self.session
+        self.output_s3_client.return_value.get_object.side_effect = ClientError(
+            {"Error": {"Code": "AccessDenied", "Message": "private-storage-detail"}}, "GetObject",
+        )
+        response = self.client.get("/outputs/info", params=params)
+        self.assertEqual(response.status_code, 503)
+        self.assertNotIn("private-storage-detail", response.text)
+
+    def test_invalid_manifest_and_out_of_directory_tiles_are_rejected(self):
+        params = {"bucket": self.bucket, "key": self.key}
+        self.document["version"] = 99
+        self.assertEqual(self.client.get("/outputs/info", params=params).status_code, 502)
+        self.document["version"] = 1
+        self.document["tiles"][0]["key"] = "someone-else/flood.cog"
+        with patch.object(main, "scenario_tile") as tile:
+            response = self.client.get("/outputs/tiles/12/1138/1681.png", params=params)
+        self.assertEqual(response.status_code, 502)
+        tile.assert_not_called()
+
+
 class RasterCredentialsTests(unittest.TestCase):
+    def test_path_credentials_are_refreshed_before_near_expiry_reads(self):
+        session = auth.UserSession(
+            user_id="alice", access_token="provider-secret", scope="read", expires_at=time.time() + 600,
+        )
+        old = storage.HydroShareS3Credentials(
+            access_key="old", secret_key="old", expiry=datetime.now(timezone.utc) + timedelta(seconds=30),
+        )
+        fresh = storage.HydroShareS3Credentials(
+            access_key="fresh", secret_key="fresh", expiry=datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+        with patch.object(storage, "get_redis_client"), patch.object(
+            storage, "__cached_credentials", side_effect=[old, fresh],
+        ), patch.object(storage, "__store_credentials") as renew:
+            source = storage.output_raster_source(session, "resource", "s1/flood.cog")
+        renew.assert_called_once()
+        self.assertEqual(source.session.credentials["aws_access_key_id"], "fresh")
+
+    def test_path_credentials_are_cached_per_session_and_renew_after_expiry(self):
+        credentials = storage.HydroShareS3Credentials(
+            access_key="access", secret_key="secret", expiry=datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+        session = auth.UserSession(
+            user_id="alice", access_token="provider-secret", scope="read", expires_at=time.time() + 600,
+        )
+        with patch.object(storage, "get_redis_client") as redis, patch.object(
+            storage, "__store_credentials",
+        ) as renew, patch.object(storage, "__cached_credentials", return_value=credentials), patch.object(
+            storage, "__job_credentials", side_effect=AssertionError("No job credentials"),
+        ):
+            redis.return_value.get.return_value = None
+            source = storage.output_raster_source(session, "resource", "s1/flood.cog")
+            first_key = renew.call_args.args[0]
+            self.assertTrue(first_key.startswith("storage:session_credentials:"))
+            self.assertNotIn("provider-secret", first_key)
+            renew.assert_called_once_with(first_key, session)
+            self.assertEqual(source.session.credentials["aws_access_key_id"], "access")
+            renew.reset_mock()
+            redis.return_value.get.return_value = "cached"
+            storage.output_s3_client(session)
+            renew.assert_not_called()
+            session.access_token = SecretStr("another-users-token")
+            redis.return_value.get.return_value = None
+            storage.output_s3_client(session)
+            self.assertNotEqual(renew.call_args.args[0], first_key)
+
     def test_expired_redis_entry_is_renewed_using_current_session(self):
         job_id = uuid4()
         session = Mock()
@@ -245,6 +391,30 @@ class RasterCredentialsTests(unittest.TestCase):
 
 
 class NotebookMapTests(unittest.TestCase):
+    def test_notebook_map_can_reopen_paths_without_job_or_result_variables(self):
+        from fimbox_sdk.models import Scenario
+
+        notebook = json.loads((Path(__file__).resolve().parents[1] / "notebooks/cloud_hand_fim.ipynb").read_text())
+        source = next("".join(cell["source"]) for cell in notebook["cells"] if cell["id"] == "map")
+        namespace = {
+            "api_client": Mock(), "OUTPUT_BUCKET": "resource", "OUTPUT_PREFIX": "abc/data/contents/flood/",
+            "scenarios": [Scenario.from_dict({"ScenarioID": "s1", "Reaches": []})], "display": Mock(),
+        }
+        with patch("importlib.reload", return_value=fimbox_map), patch.object(
+            fimbox_map, "output_map",
+        ) as output_map:
+            exec(source, namespace)
+        output_map.assert_called_once_with(
+            namespace["api_client"], ["s3://resource/abc/data/contents/flood/s1/manifest.json"],
+        )
+
+    def test_paths_are_validated_before_requesting_metadata(self):
+        for path in ("https://example.com/flood.cog", "s3://resource/a/../flood.cog",
+                     "s3://user:password@resource/flood.cog", "s3://resource/flood.txt",
+                     "s3://resource/flood.cog?token=secret"):
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                fimbox_map.output_map(Mock(), [path])
+
     def test_notebook_map_cell_is_unexecuted_and_uses_existing_session(self):
         notebook = json.loads((Path(__file__).resolve().parents[1] / "notebooks/cloud_hand_fim.ipynb").read_text())
         cells = {cell["id"]: cell for cell in notebook["cells"]}
@@ -253,7 +423,9 @@ class NotebookMapTests(unittest.TestCase):
         self.assertIsNone(cell["execution_count"])
         source = "".join(cell["source"])
         compile(source, "map", "exec")
-        self.assertIn("job_map(api_client, job_id, final_result)", source)
+        self.assertIn("output_map(api_client, SCENARIO_PATHS)", source)
+        self.assertNotIn("job_id", source)
+        self.assertNotIn("final_result", source)
         self.assertNotIn("session_token", source)
 
     def test_tile_selection_is_bounded_and_clipped(self):
@@ -285,7 +457,9 @@ class NotebookMapTests(unittest.TestCase):
         with client, patch("ipyleaflet.Map.fit_bounds") as fit_bounds:
             widget = fimbox_map.job_map(client, uuid4(), StoredHandFimResult.from_dict(manifest()))
             fit_bounds.assert_called_once_with(((30, -80), (31, -79)))
-            selector, button, status, map_widget = widget.children
+            selector, controls, status, map_widget = widget.children
+            button, auto_zoom = controls.children
+            self.assertEqual(controls.__class__.__name__, "HBox")
             map_widget.set_trait("bounds", ((30, -80), (31, -79)))
             self.assertGreater(len(map_widget.layers), 1)
             for layer in map_widget.layers[1:]:
@@ -295,12 +469,73 @@ class NotebookMapTests(unittest.TestCase):
             before = len(requests)
             map_widget.set_trait("bounds", ((30.01, -80), (31, -79)))
             self.assertEqual(len(requests), before, "Visible tiles should be cached in kernel memory")
-            selector.value = 1
-            self.assertTrue(any("/rasters/1/" in str(request.url) for request in requests))
+            selector.value = ("file", 1)
+            self.assertTrue(any(request.url.params["key"] == "outputs/flood.tif" for request in requests))
+            self.assertTrue(all(request.url.path.startswith("/outputs/") for request in requests))
             button.click()
             self.assertIn("visible tiles", status.value)
+            self.assertTrue(auto_zoom.value)
+            auto_zoom.value = False
+            fit_bounds.reset_mock()
+            map_widget.center = (30.4, -79.6)
+            map_widget.zoom = 10
+            selector.value = ("file", 0)
+            button.click()
+            fit_bounds.assert_not_called()
+            self.assertEqual(map_widget.center, [30.4, -79.6])
+            self.assertEqual(map_widget.zoom, 10)
+            auto_zoom.value = True
+            fit_bounds.assert_called_once_with(((30, -80), (31, -79)))
             map_widget.close()
             widget.close()
+
+    def test_streamed_scenarios_use_stored_paths_and_respect_minzoom(self):
+        requests = []
+
+        def respond(request):
+            requests.append(request)
+            if request.url.path.endswith("/info"):
+                return httpx.Response(200, json={"bounds": [-80, 30, -79, 31], "minzoom": 11, "maxzoom": 15})
+            return httpx.Response(200, content=PNG, headers={"content-type": "image/png"})
+
+        client = AuthenticatedClient(
+            base_url="https://api.example", token="test",
+            httpx_args={"transport": httpx.MockTransport(respond)},
+        )
+        with client, patch("ipyleaflet.Map.fit_bounds"):
+            widget = fimbox_map.output_map(client, ["s3://resource/outputs/s1/manifest.json"])
+            selector, controls, status, map_widget = widget.children
+            button, auto_zoom = controls.children
+            self.assertEqual(selector.value, ("scenario", 0))
+            self.assertEqual(map_widget.min_zoom, 11)
+            self.assertGreaterEqual(map_widget.zoom, 11)
+            map_widget.zoom = 9
+            map_widget.set_trait("bounds", ((30, -80), (31, -79)))
+            self.assertIn("Zoom in to level 11", status.value)
+            self.assertFalse(any("/tiles/" in str(request.url) for request in requests))
+            map_widget.zoom = 12
+            self.assertIn("visible tiles", status.value)
+            map_widget.set_trait("bounds", ((30.2, -79.8), (30.3, -79.7)))
+            self.assertIn("visible tiles", status.value)
+            self.assertTrue(all(
+                request.url.path.startswith("/outputs/")
+                and request.url.params["bucket"] == "resource"
+                and request.url.params["key"] == "outputs/s1/manifest.json"
+                for request in requests
+            ))
+            auto_zoom.value = False
+            self.assertEqual(map_widget.min_zoom, 0)
+            map_widget.zoom = 9
+            before = len(requests)
+            button.click()
+            self.assertEqual(map_widget.zoom, 9)
+            self.assertIn("Zoom in to level 11", status.value)
+            self.assertFalse(any("/tiles/" in str(request.url) for request in requests[before:]))
+            auto_zoom.value = True
+            self.assertEqual(map_widget.min_zoom, 11)
+            self.assertGreaterEqual(map_widget.zoom, 11)
+            widget.close()
+            map_widget.close()
 
     def test_missing_storage_is_explicit(self):
         result = StoredHandFimResult.from_dict({**manifest(), "output_bucket": None, "output_prefix": ""})

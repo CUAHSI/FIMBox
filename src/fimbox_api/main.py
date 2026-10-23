@@ -30,7 +30,9 @@ from .models import (
     JobSummary,
     JobStatus,
     JobSubmitted,
+    ParityJobRequest,
     RasterInfo,
+    ScenarioManifest,
     StoredHandFimResult,
 )
 from .storage import (
@@ -39,10 +41,16 @@ from .storage import (
     delete_job_credentials,
     RasterSource,
     raster_source,
+    session_s3_client,
+    output_s3_client,
+    output_raster_source,
 )
-from .rasters import RasterReadError, raster_info, raster_tile
+from .rasters import (
+    RasterReadError, TooManyTilesError, load_scenario_tiles, raster_info, raster_tile,
+    scenario_info, scenario_tile, stored_scenario_manifest,
+)
 from .job_logs import read_job_logs
-from .tasks import hand_fim
+from .tasks import hand_fim, hand_fim_parity
 
 logger = logging.getLogger(__name__)
 app = FastAPI(
@@ -121,6 +129,8 @@ def __submit_hand_fim(
             "msg": "This deployment requires a HydroShare output_bucket",
             "type": "value_error",
         }])
+    if destination.execution_mode == "streaming" and not settings.streaming_enabled:
+        raise HTTPException(status_code=409, detail="Streaming execution is not configured on this server")
     job_id = str(uuid4())
     if destination.output_bucket is not None:
         if not settings.authentication_enabled:
@@ -136,9 +146,15 @@ def __submit_hand_fim(
                 destination.output_prefix,
                 destination.max_procs,
                 destination.overwrite,
+                # Legacy jobs keep the original arguments so older workers still accept them.
+                *(["streaming"] if destination.execution_mode == "streaming" else []),
             ],
             task_id=job_id,
             retry=False,
+            **(
+                {"queue": settings.stream_queue}
+                if destination.execution_mode == "streaming" and settings.stream_queue else {}
+            ),
         )
     except (KombuError, RedisError, OSError):
         if destination.output_bucket is not None:
@@ -158,6 +174,38 @@ def submit_hand_fim(
 ) -> JobSubmitted:
     """Submit a HAND-FIM job with scenarios and options in the JSON body."""
     return __submit_hand_fim(body.scenarios, body, session)
+
+
+@app.post("/jobs/parity", status_code=202, response_model=JobSubmitted)
+def submit_parity(body: ParityJobRequest, session: AuthenticatedSession) -> JobSubmitted:
+    """Rerun a retained legacy run's scenarios.json with streaming and diff every scenario.
+
+    The job result lists streaming manifests plus per-scenario parity counts; diff GeoTIFFs
+    (1=legacy-only, 2=streaming-only flooding) and parity/report.json go under output_prefix.
+    """
+    if not settings.streaming_enabled:
+        raise HTTPException(status_code=409, detail="Streaming execution is not configured on this server")
+    if not settings.authentication_enabled:
+        raise HTTPException(status_code=409, detail="HydroShare S3 output requires configured authentication")
+    job_id = str(uuid4())
+    create_job_credentials(UUID(job_id), session)
+    try:
+        track_user_job(session.user_id, job_id)
+        hand_fim_parity.apply_async(
+            args=[
+                job_id, body.legacy_bucket, body.legacy_prefix,
+                body.output_bucket, body.output_prefix, body.overwrite,
+            ],
+            task_id=job_id,
+            retry=False,
+            **({"queue": settings.stream_queue} if settings.stream_queue else {}),
+        )
+    except (KombuError, RedisError, OSError):
+        delete_job_credentials(UUID(job_id))
+        untrack_user_job(session.user_id, job_id)
+        raise
+    logger.info("Enqueued HAND-FIM parity job %s", job_id)
+    return JobSubmitted(job_id=job_id, status="queued", status_url=f"/jobs/{job_id}")
 
 
 @app.get("/jobs", response_model=JobList)
@@ -273,6 +321,116 @@ def get_raster_tile(
         content=raster_tile(source, z, x, y), media_type="image/png",
         headers={"Cache-Control": "no-store"},
     )
+
+
+def __scenario_manifest(job_id: UUID, scenario_index: int, session: UserSession) -> tuple[str, ScenarioManifest]:
+    __require_job_owner(job_id, session)
+    job = celery_app.AsyncResult(str(job_id))
+    if job.state != "SUCCESS":
+        raise HTTPException(status_code=409, detail="Raster viewing requires a successful job")
+    result = StoredHandFimResult.model_validate(job.result)
+    if scenario_index >= len(result.scenario_manifests):
+        raise HTTPException(status_code=404, detail="Scenario tile manifest not found")
+    if result.output_bucket is None:
+        raise HTTPException(status_code=409, detail="Raster viewing requires retained S3 output")
+    return result.output_bucket, result.scenario_manifests[scenario_index]
+
+
+@app.get("/jobs/{job_id}/scenarios/{scenario_index}/info", response_model=RasterInfo)
+def get_scenario_info(
+    job_id: UUID, scenario_index: Annotated[int, Path(ge=0)],
+    session: AuthenticatedSession, response: Response,
+) -> RasterInfo:
+    """Bounds and usable zoom range of a streaming scenario's tiled output."""
+    _bucket, manifest = __scenario_manifest(job_id, scenario_index, session)
+    response.headers["Cache-Control"] = "no-store"
+    return scenario_info(manifest, settings.stream_display_max_tiles)
+
+
+@app.get(
+    "/jobs/{job_id}/scenarios/{scenario_index}/tiles/{z}/{x}/{y}.png",
+    response_class=Response,
+    responses={200: {"content": {"image/png": {"schema": {"type": "string", "format": "binary"}}}}},
+)
+def get_scenario_tile(
+    job_id: UUID, scenario_index: Annotated[int, Path(ge=0)],
+    z: Annotated[int, Path(ge=0, le=22)],
+    x: Annotated[int, Path(ge=0)],
+    y: Annotated[int, Path(ge=0)],
+    session: AuthenticatedSession,
+) -> Response:
+    """Render a 256-pixel tile combining the streaming scenario's output COG tiles."""
+    if x >= 2 ** z or y >= 2 ** z:
+        raise HTTPException(status_code=400, detail="Tile coordinates are outside this zoom level")
+    bucket, manifest = __scenario_manifest(job_id, scenario_index, session)
+    tiles = load_scenario_tiles(session_s3_client(job_id, session), bucket, manifest)
+    try:
+        content = scenario_tile(
+            tiles, z, x, y, settings.stream_display_max_tiles,
+            lambda key: raster_source(job_id, session, bucket, key),
+        )
+    except TooManyTilesError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from None
+    return Response(content=content, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+OutputBucket = Annotated[str, Query(min_length=1, max_length=255, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")]
+OutputKey = Annotated[str, Query(min_length=1, max_length=1024)]
+
+
+def __require_output_path(key: str) -> bool:
+    if not settings.authentication_enabled:
+        raise HTTPException(status_code=409, detail="HydroShare S3 reads require configured authentication")
+    if len(key.encode("utf-8")) > 1024 or any(part in {"", ".", ".."} for part in key.split("/")):
+        raise HTTPException(status_code=400, detail="Invalid output object key")
+    if key.endswith("/manifest.json"):
+        return True
+    if not key.lower().endswith((".cog", ".tif", ".tiff")):
+        raise HTTPException(status_code=400, detail="Output path must reference a raster or scenario manifest.json")
+    return False
+
+
+@app.get("/outputs/info", response_model=RasterInfo)
+def get_output_info(
+    bucket: OutputBucket, key: OutputKey, session: AuthenticatedSession, response: Response,
+) -> RasterInfo:
+    """Read a retained S3 raster or scenario manifest using the current user's storage permissions."""
+    streamed = __require_output_path(key)
+    response.headers["Cache-Control"] = "no-store"
+    if streamed:
+        manifest = stored_scenario_manifest(output_s3_client(session), bucket, key)
+        return scenario_info(manifest, settings.stream_display_max_tiles)
+    return raster_info(output_raster_source(session, bucket, key))
+
+
+@app.get(
+    "/outputs/tiles/{z}/{x}/{y}.png", response_class=Response,
+    responses={200: {"content": {"image/png": {"schema": {"type": "string", "format": "binary"}}}}},
+)
+def get_output_tile(
+    bucket: OutputBucket, key: OutputKey,
+    z: Annotated[int, Path(ge=0, le=22)],
+    x: Annotated[int, Path(ge=0)], y: Annotated[int, Path(ge=0)],
+    session: AuthenticatedSession,
+) -> Response:
+    """Render retained output paths independently of job ownership/result TTLs."""
+    if x >= 2 ** z or y >= 2 ** z:
+        raise HTTPException(status_code=400, detail="Tile coordinates are outside this zoom level")
+    streamed = __require_output_path(key)
+    if streamed:
+        client = output_s3_client(session)
+        manifest = stored_scenario_manifest(client, bucket, key)
+        tiles = load_scenario_tiles(client, bucket, manifest)
+        try:
+            content = scenario_tile(
+                tiles, z, x, y, settings.stream_display_max_tiles,
+                lambda tile_key: output_raster_source(session, bucket, tile_key),
+            )
+        except TooManyTilesError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from None
+    else:
+        content = raster_tile(output_raster_source(session, bucket, key), z, x, y)
+    return Response(content=content, media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
 @app.delete("/jobs/{job_id}", status_code=204, response_class=Response)

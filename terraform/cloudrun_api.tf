@@ -40,7 +40,9 @@ resource "google_cloud_run_v2_service" "api" {
         limits = { cpu = "1", memory = "512Mi" }
       }
       dynamic "env" {
-        for_each = merge(local.common_environment, {
+        for_each = merge(local.common_environment, local.stream_environment, local.stream_queue == "" ? {} : {
+          STREAM_QUEUE = local.stream_queue
+          }, {
           APP_ROLE                      = "api"
           REQUIRE_HYDROSHARE_OUTPUT     = "true"
           OAUTH_STATE_COOKIE_SECURE     = "true"

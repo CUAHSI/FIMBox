@@ -135,6 +135,50 @@ run "tfvars_credentials_and_custom_s3" {
   }
 }
 
+run "streaming_worker_pool" {
+  command = plan
+  variables {
+    deploy_services              = true
+    api_image                    = "us-central1-docker.pkg.dev/fimbox-test/fimbox-dev/api:v1"
+    worker_image                 = "us-central1-docker.pkg.dev/fimbox-test/fimbox-dev/worker:v1"
+    stream_input_bucket          = "hydrofabric"
+    stream_input_prefix          = "hand/v1"
+    stream_worker_instance_count = 1
+  }
+  assert {
+    condition     = google_cloud_run_v2_worker_pool.stream_worker[0].template[0].containers[0].resources[0].limits.memory == "4Gi"
+    error_message = "Streaming workers must default to the 4 GiB budget."
+  }
+  assert {
+    condition = one([
+      for env in google_cloud_run_v2_worker_pool.stream_worker[0].template[0].containers[0].env :
+      env.value if env.name == "CELERY_TASK_DEFAULT_QUEUE"
+      ]) == "streaming" && one([
+      for env in google_cloud_run_v2_service.api[0].template[0].containers[0].env :
+      env.value if env.name == "STREAM_QUEUE"
+    ]) == "streaming"
+    error_message = "The API must route streaming jobs to the queue the streaming pool consumes."
+  }
+  assert {
+    condition = one([
+      for env in google_cloud_run_v2_service.api[0].template[0].containers[0].env :
+      env.value if env.name == "STREAM_INPUT_BUCKET"
+    ]) == "hydrofabric"
+    error_message = "The API must know the dataset bucket to accept streaming jobs."
+  }
+}
+
+run "streaming_workers_require_dataset" {
+  command = plan
+  variables {
+    deploy_services              = true
+    api_image                    = "us-central1-docker.pkg.dev/fimbox-test/fimbox-dev/api:v1"
+    worker_image                 = "us-central1-docker.pkg.dev/fimbox-test/fimbox-dev/worker:v1"
+    stream_worker_instance_count = 1
+  }
+  expect_failures = [google_cloud_run_v2_worker_pool.stream_worker[0]]
+}
+
 run "partial_credentials_rejected" {
   command = plan
   variables {

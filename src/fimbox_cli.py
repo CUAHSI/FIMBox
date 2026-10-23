@@ -28,8 +28,8 @@ from fimbox_sdk.api.default import (
     list_jobs_jobs_get,
     submit_hand_fim_jobs_hand_fim_post,
 )
-from fimbox_sdk.models import AuthenticationConfig, HandFimJobRequest, Scenario
-from fimbox_sdk.types import Response
+from fimbox_sdk.models import AuthenticationConfig, HandFimJobRequest, HandFimJobRequestExecutionMode, Scenario
+from fimbox_sdk.types import UNSET, Response
 
 
 @dataclass
@@ -286,16 +286,18 @@ def app(ctx: click.Context, api_url: str, session_token: str | None, timeout: fl
               help="Max concurrent HAND-FIM processes; JSON submissions default to worker configuration, interactive default is 1.")
 @click.option("--overwrite/--no-overwrite", default=False, show_default=True,
               help="Replace existing S3 objects with matching output keys.")
+@click.option("--execution-mode", type=click.Choice(["legacy", "streaming"]), default="legacy", show_default=True,
+              help="streaming range-reads a prepared cloud-optimized hydrofabric and writes tiled COGs; requires --output-bucket.")
 @click.pass_context
 def submit(
     ctx: click.Context, body: Path | None, output_bucket: str | None,
-    output_prefix: str, max_procs: int | None, overwrite: bool,
+    output_prefix: str, max_procs: int | None, overwrite: bool, execution_mode: str,
 ) -> None:
     """Submit HAND-FIM scenarios from JSON or interactive inputs."""
     if body is not None and output_bucket is None and output_prefix:
         raise click.ClickException("--output-prefix requires --output-bucket.")
     scenarios = __scenarios(__body(body)) if body is not None else __interactive_scenarios()
-    if body is None and max_procs is None:
+    if body is None and max_procs is None and execution_mode == "legacy":
         max_procs = click.prompt(
             "Max concurrent processes", default=1, type=click.IntRange(min=1),
         )
@@ -318,6 +320,10 @@ def submit(
             output_prefix=output_prefix,
             max_procs=max_procs,
             overwrite=overwrite,
+            # Omitted for legacy so servers without streaming support still accept the request.
+            execution_mode=(
+                HandFimJobRequestExecutionMode(execution_mode) if execution_mode != "legacy" else UNSET
+            ),
         ),
     )
 

@@ -27,3 +27,10 @@ worker_cpu          = "4"
 worker_memory       = "16Gi"
 hand_fim_max_procs  = 1
 result_ttl_seconds = 86400
+
+# Optional streaming HAND-FIM (prepared cloud-optimized hydrofabric).
+# stream_input_bucket          = "<hydroshare-resource-bucket>"
+# stream_input_prefix          = "hand-stream"
+# stream_input_unsigned        = false
+# stream_worker_instance_count = 1
+# stream_worker_memory         = "4Gi"

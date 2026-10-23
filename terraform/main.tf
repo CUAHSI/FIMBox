@@ -24,6 +24,12 @@ locals {
     S3_REGION                  = "us-east-1"
     S3_ADDRESSING_STYLE        = "path"
   }
+  stream_environment = var.stream_input_bucket == "" ? {} : {
+    STREAM_INPUT_BUCKET   = var.stream_input_bucket
+    STREAM_INPUT_PREFIX   = var.stream_input_prefix
+    STREAM_INPUT_UNSIGNED = tostring(var.stream_input_unsigned)
+  }
+  stream_queue = var.stream_worker_instance_count > 0 ? "streaming" : ""
 }
 
 resource "google_project_service" "apis" {

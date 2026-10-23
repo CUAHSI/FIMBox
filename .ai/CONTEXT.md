@@ -421,6 +421,9 @@ uploaded tile by tile.
   grid), `compute_tile` (reads only scheduled blocks, `stage > rem`, max across
   branches), `encode_tile` (binary uint8 COG), `run_scenario` (returns the
   manifest; no-flood is an error like legacy). I/O is injected as callables.
+  Output tiles are cropped to flooded-cell extents before encoding; transforms,
+  dimensions and manifest bounds reflect the crop, so map fitting excludes
+  dry padding. Filename row/column still refers to the processing window.
 - **`docker/handfim/stream_storage.py`** — Container S3 glue for the
   `entry.py stream-scenario` command: `StreamConfig.from_env` (FIMBOX_STREAM_*,
   FIMBOX_S3_*, AWS_*), boto3 index reads, GDAL `s3://` range reads, per-tile

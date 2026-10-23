@@ -182,6 +182,11 @@ class StreamingFimTests(unittest.TestCase):
             with rasterio.MemoryFile(tiles[tile["key"]]) as memory, memory.open() as dataset:
                 self.assertEqual(dataset.profile["driver"], "GTiff")
                 self.assertEqual(dataset.block_shapes[0], (512, 512))
+                wet = dataset.read(1) == 1
+                self.assertTrue(wet[0].any())
+                self.assertTrue(wet[-1].any())
+                self.assertTrue(wet[:, 0].any())
+                self.assertTrue(wet[:, -1].any())
 
     def test_tile_size_does_not_change_results(self):
         reaches = [{"HUC": "12090301", "ReachID": "13", "Streamflow": 30}]
@@ -191,6 +196,7 @@ class StreamingFimTests(unittest.TestCase):
         np.testing.assert_array_equal(
             mosaic(small, small_tiles), noaa_reference(self.sources, self.rows, reaches),
         )
+        np.testing.assert_allclose(small["bounds_wgs84"], large["bounds_wgs84"], atol=1e-5)
 
     def test_admission_limits_missing_huc_and_no_flood_fail_explicitly(self):
         reach = [{"HUC": "12090301", "ReachID": "11", "Streamflow": 15}]

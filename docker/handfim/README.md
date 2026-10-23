@@ -95,3 +95,8 @@ mosaicked; viewers show the union of wet cells, whereas legacy output keeps the
 first HUC's value where HUCs overlap. Tile paths are stable across runs:
 overwrites are non-atomic and failures can leave mixed old/new tiles.
 Use different prefixes for concurrent runs; failed runs retain uploaded tiles.
+
+Each output tile is cropped to its flooded-cell bounding box before COG
+encoding. Manifest bounds therefore frame inundation rather than empty tile
+padding, including when viewed on the notebook map. The row/column in each
+tile filename still identifies its original processing window.

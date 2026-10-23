@@ -427,6 +427,12 @@ def run_scenario(
             )
             if not flooded.any():
                 continue
+            rows = np.flatnonzero(flooded.any(axis=1))
+            cols = np.flatnonzero(flooded.any(axis=0))
+            row_start, row_stop = int(rows[0]), int(rows[-1]) + 1
+            col_start, col_stop = int(cols[0]), int(cols[-1]) + 1
+            flooded = flooded[row_start:row_stop, col_start:col_stop]
+            transform = transform * Affine.translation(col_start, row_start)
             encoded = encode_tile(flooded, transform, crs)
             height, width = flooded.shape
             del flooded

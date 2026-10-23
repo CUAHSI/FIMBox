@@ -108,12 +108,76 @@ class ScenarioManifest(BaseModel):
     tile_size: int = Field(gt=0)
 
 
+class ParityJobRequest(OutputDestination):
+    """Rerun a retained legacy run's scenarios with streaming and diff the outputs."""
+
+    legacy_bucket: str = Field(min_length=1, max_length=255, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    legacy_prefix: str = Field(
+        max_length=900,
+        description="Output prefix of a legacy run containing scenarios.json and <ScenarioID>.cog files.",
+    )
+    overwrite: bool = Field(
+        default=False,
+        description="Replace existing S3 objects with matching output keys; by default, conflicting keys fail the job.",
+    )
+
+    @model_validator(mode="after")
+    def validate_parity_destination(self) -> "ParityJobRequest":
+        if self.output_bucket is None:
+            raise ValueError("parity comparison requires output_bucket")
+        if any(part in {".", ".."} for part in self.legacy_prefix.split("/")):
+            raise ValueError("legacy_prefix must not contain '.' or '..' segments")
+        if (self.legacy_bucket, self.legacy_prefix.strip("/")) == (self.output_bucket, self.output_prefix.strip("/")):
+            raise ValueError("output_prefix must differ from the legacy run's prefix")
+        return self
+
+
+class ParityDifference(BaseModel):
+    x: float
+    y: float
+    value: Literal[1, 2] = Field(description="1=legacy-only flooding, 2=streaming-only flooding")
+
+
+class ScenarioParity(BaseModel):
+    """Cell-level comparison of one legacy scenario COG against its streaming tiles.
+
+    Cell counts are measured after realigning a small whole-pixel grid shift, which
+    is reported separately and does not affect ``matches``.
+    """
+
+    ScenarioID: str
+    legacy_key: str
+    diff_key: str
+    crs: str
+    legacy_flooded_cells: int
+    streaming_flooded_cells: int
+    legacy_only_cells: int
+    streaming_only_cells: int
+    different_cells: int
+    grid_shift_rows: int = Field(
+        default=0, description="Streaming rows offset from legacy (positive is south); realigned before counting.",
+    )
+    grid_shift_columns: int = Field(
+        default=0, description="Streaming columns offset from legacy (positive is east); realigned before counting.",
+    )
+    unaligned_different_cells: int = Field(
+        default=0, description="Differing cells before grid-shift realignment.",
+    )
+    missing_reaches: list[str] = Field(default_factory=list)
+    sample_differences: list[ParityDifference] = Field(default_factory=list)
+    matches: bool
+
+
 class StoredHandFimResult(HandFimResult, OutputDestination):
     """Successful outputs and the destination persisted by the worker."""
 
     execution_mode: Literal["legacy", "streaming"] = "legacy"
     files: list[OutputFile] = Field(default_factory=list)
     scenario_manifests: list[ScenarioManifest] = Field(default_factory=list)
+    parity: list[ScenarioParity] = Field(
+        default_factory=list,
+        description="Legacy/streaming comparisons; present only for parity jobs.",
+    )
     local_output_dir: str | None = None
 
 

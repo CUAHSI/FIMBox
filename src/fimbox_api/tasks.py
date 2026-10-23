@@ -8,6 +8,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any
@@ -21,8 +22,11 @@ from schemas.hand_fim_schema import HandFimOutput
 
 from .celery_app import celery_app
 from .config import settings
-from .models import HandFimParameters, HandFimJobOptions, OutputFile, ScenarioManifest, StoredHandFimResult
+from .models import (
+    HandFimParameters, HandFimJobOptions, OutputFile, ScenarioManifest, ScenarioParity, StoredHandFimResult,
+)
 from .job_logs import append_job_log, clear_job_logs
+from .parity import compare_scenario_outputs
 from .storage import StorageCredentialsError, job_s3_environment, output_file_key, s3_client
 
 logger = logging.getLogger(__name__)
@@ -492,3 +496,124 @@ def hand_fim(
         raise
     finally:
         __cleanup_job(job_id, scenarios)
+
+
+def __legacy_scenarios(client: Any, bucket: str, prefix: str) -> HandFimParameters:
+    key = output_file_key(prefix, "scenarios.json")
+    try:
+        response = client.get_object(Bucket=bucket, Key=key)
+    except ClientError as error:
+        if __is_missing(error):
+            raise RuntimeError(f"Legacy run has no s3://{bucket}/{key}") from None
+        raise
+    with response["Body"] as body:
+        content = body.read(MAX_MANIFEST_BYTES + 1)
+    if len(content) > MAX_MANIFEST_BYTES:
+        raise RuntimeError(f"Legacy s3://{bucket}/{key} is too large")
+    try:
+        return HandFimParameters.model_validate_json(content)
+    except ValueError:
+        raise RuntimeError(f"Legacy s3://{bucket}/{key} is not a valid scenario list") from None
+
+
+def __require_s3_keys(client: Any, bucket: str, keys: list[str]) -> None:
+    for key in keys:
+        try:
+            client.head_object(Bucket=bucket, Key=key)
+        except ClientError as error:
+            if __is_missing(error):
+                raise RuntimeError(f"Legacy output s3://{bucket}/{key} does not exist") from None
+            raise
+
+
+def __compare_scenario(
+    client: Any, legacy_bucket: str, legacy_key: str, bucket: str,
+    manifest_ref: ScenarioManifest, diff_key: str, work_dir: Path,
+) -> ScenarioParity:
+    sid = manifest_ref.ScenarioID
+    manifest = __load_manifest(client, bucket, manifest_ref.key)
+    scenario_prefix = manifest_ref.key.removesuffix("manifest.json")
+    tiles = manifest.get("tiles") if isinstance(manifest, dict) else None
+    if not isinstance(tiles, list):
+        raise RuntimeError(f"Streaming manifest for scenario {sid!r} is unavailable")
+    keys = [tile.get("key") if isinstance(tile, dict) else None for tile in tiles]
+    if any(
+        not isinstance(key, str) or not key.startswith(scenario_prefix)
+        or not key.endswith(".cog") or ".." in key.split("/") for key in keys
+    ):
+        raise RuntimeError(f"Streaming manifest for scenario {sid!r} has an invalid tile key")
+    scenario_dir = work_dir / sid
+    scenario_dir.mkdir()
+    legacy_path = scenario_dir / "legacy.cog"
+    client.download_file(legacy_bucket, legacy_key, str(legacy_path))
+    tile_paths = []
+    for index, key in enumerate(keys):
+        tile_paths.append(scenario_dir / f"tile-{index}.cog")
+        client.download_file(bucket, key, str(tile_paths[-1]))
+    diff_path = scenario_dir / "diff.tif"
+    report = compare_scenario_outputs(legacy_path, tile_paths, diff_path)
+    client.upload_file(str(diff_path), bucket, diff_key, ExtraArgs={"ContentType": "image/tiff"})
+    missing = [str(reach) for reach in manifest.get("missing_reaches", [])]
+    return ScenarioParity(
+        ScenarioID=sid, legacy_key=legacy_key, diff_key=diff_key, missing_reaches=missing,
+        matches=report["different_cells"] == 0 and not missing,
+        **{name: report[name] for name in (
+            "crs", "legacy_flooded_cells", "streaming_flooded_cells", "legacy_only_cells",
+            "streaming_only_cells", "different_cells", "sample_differences",
+            "grid_shift_rows", "grid_shift_columns", "unaligned_different_cells",
+        )},
+    )
+
+
+@celery_app.task(name="fimbox_api.tasks.hand_fim_parity")
+def hand_fim_parity(
+    job_id: str,
+    legacy_bucket: str,
+    legacy_prefix: str,
+    output_bucket: str,
+    output_prefix: str = "",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Rerun a retained legacy run's scenarios with streaming, then diff each scenario's flood mask."""
+    job_id = str(UUID(job_id))
+    client = s3_client(UUID(job_id))
+    scenarios = __legacy_scenarios(client, legacy_bucket, legacy_prefix)
+    scenario_ids = [scenario.ScenarioID for scenario in scenarios.root]
+    legacy_keys = {sid: output_file_key(legacy_prefix, f"{sid}.cog") for sid in scenario_ids}
+    diff_keys = {sid: output_file_key(output_prefix, f"parity/{sid}.diff.tif") for sid in scenario_ids}
+    report_key = output_file_key(output_prefix, "parity/report.json")
+    __require_s3_keys(client, legacy_bucket, list(legacy_keys.values()))
+    if not overwrite:
+        __reject_existing_s3_keys(client, output_bucket, [report_key, *diff_keys.values()])
+    result = StoredHandFimResult.model_validate(hand_fim(
+        job_id, scenarios.model_dump(mode="json"), output_bucket, output_prefix, None, overwrite, "streaming",
+    ))
+    append_job_log(job_id, "Comparing streaming tiles with legacy scenario outputs.\n")
+    with tempfile.TemporaryDirectory(prefix=f"parity-{job_id}-", dir=settings.hand_fim_input_dir) as work:
+        comparisons = []
+        for manifest_ref in result.scenario_manifests:
+            sid = manifest_ref.ScenarioID
+            comparison = __compare_scenario(
+                client, legacy_bucket, legacy_keys[sid], output_bucket,
+                manifest_ref, diff_keys[sid], Path(work),
+            )
+            comparisons.append(comparison)
+            append_job_log(job_id, (
+                f"Scenario {sid}: {'MATCH' if comparison.matches else 'MISMATCH'} "
+                f"({comparison.legacy_only_cells} legacy-only, {comparison.streaming_only_cells} "
+                f"streaming-only cells, {len(comparison.missing_reaches)} missing reaches, "
+                f"grid shift {comparison.grid_shift_rows} rows/{comparison.grid_shift_columns} columns).\n"
+            ))
+        report = json.dumps({
+            "legacy_bucket": legacy_bucket, "legacy_prefix": legacy_prefix,
+            "scenarios": [comparison.model_dump(mode="json") for comparison in comparisons],
+        }, indent=2).encode()
+        client.put_object(Bucket=output_bucket, Key=report_key, Body=report, ContentType="application/json")
+        result.files.append(OutputFile(path="parity/report.json", key=report_key, size_bytes=len(report)))
+        result.files.extend(
+            OutputFile(path=f"parity/{sid}.diff.tif", key=diff_keys[sid],
+                       size_bytes=(Path(work) / sid / "diff.tif").stat().st_size)
+            for sid in (comparison.ScenarioID for comparison in comparisons)
+        )
+    result.parity = comparisons
+    return result.model_dump(mode="json")

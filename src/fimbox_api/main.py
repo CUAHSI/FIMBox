@@ -30,6 +30,7 @@ from .models import (
     JobSummary,
     JobStatus,
     JobSubmitted,
+    ParityJobRequest,
     RasterInfo,
     ScenarioManifest,
     StoredHandFimResult,
@@ -49,7 +50,7 @@ from .rasters import (
     scenario_info, scenario_tile, stored_scenario_manifest,
 )
 from .job_logs import read_job_logs
-from .tasks import hand_fim
+from .tasks import hand_fim, hand_fim_parity
 
 logger = logging.getLogger(__name__)
 app = FastAPI(
@@ -173,6 +174,38 @@ def submit_hand_fim(
 ) -> JobSubmitted:
     """Submit a HAND-FIM job with scenarios and options in the JSON body."""
     return __submit_hand_fim(body.scenarios, body, session)
+
+
+@app.post("/jobs/parity", status_code=202, response_model=JobSubmitted)
+def submit_parity(body: ParityJobRequest, session: AuthenticatedSession) -> JobSubmitted:
+    """Rerun a retained legacy run's scenarios.json with streaming and diff every scenario.
+
+    The job result lists streaming manifests plus per-scenario parity counts; diff GeoTIFFs
+    (1=legacy-only, 2=streaming-only flooding) and parity/report.json go under output_prefix.
+    """
+    if not settings.streaming_enabled:
+        raise HTTPException(status_code=409, detail="Streaming execution is not configured on this server")
+    if not settings.authentication_enabled:
+        raise HTTPException(status_code=409, detail="HydroShare S3 output requires configured authentication")
+    job_id = str(uuid4())
+    create_job_credentials(UUID(job_id), session)
+    try:
+        track_user_job(session.user_id, job_id)
+        hand_fim_parity.apply_async(
+            args=[
+                job_id, body.legacy_bucket, body.legacy_prefix,
+                body.output_bucket, body.output_prefix, body.overwrite,
+            ],
+            task_id=job_id,
+            retry=False,
+            **({"queue": settings.stream_queue} if settings.stream_queue else {}),
+        )
+    except (KombuError, RedisError, OSError):
+        delete_job_credentials(UUID(job_id))
+        untrack_user_job(session.user_id, job_id)
+        raise
+    logger.info("Enqueued HAND-FIM parity job %s", job_id)
+    return JobSubmitted(job_id=job_id, status="queued", status_url=f"/jobs/{job_id}")
 
 
 @app.get("/jobs", response_model=JobList)

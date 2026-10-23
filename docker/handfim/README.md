@@ -100,3 +100,50 @@ Each output tile is cropped to its flooded-cell bounding box before COG
 encoding. Manifest bounds therefore frame inundation rather than empty tile
 padding, including when viewed on the notebook map. The row/column in each
 tile filename still identifies its original processing window.
+
+## Legacy/streaming parity test
+
+The opt-in scientific regression test runs the real legacy `scenario` command,
+prepares lossless streaming inputs from **the same downloaded HUC files**, and
+runs the checkout's streaming computation with local file I/O instead of S3.
+Neither computation is mocked. Run from the repository root with a built
+HAND-FIM image:
+
+```bash
+docker run --rm --platform linux/amd64 \
+  -v "$PWD:/repo:ro" -v "$PWD/data/output:/home/output" \
+  -e FIMBOX_RUN_PARITY=1 \
+  --entrypoint /opt/conda/bin/python cuahsi/handfim:latest \
+  /repo/tests/test_scenario_parity.py -v
+```
+
+By default it uses [`multiple_scenarios.json`](../../test-data/multiple_scenarios.json).
+Select another scenario list by adding, for example,
+`-e FIMBOX_PARITY_SCENARIOS=/repo/test-data/many_hucs_many_reaches.json`.
+Missing legacy HUC caches are downloaded, so this can require network access,
+substantial disk space, and several minutes. Do not run alongside a worker
+using the same HUC cache. Prepared streaming inputs are temporary; generated
+scenario IDs and output directories are unique to each test run.
+
+Artifacts persist under `data/output/scenarios/parity-<run_id>/`:
+
+- `report.json` records flooded-cell counts, legacy-only and streaming-only
+  counts, and up to ten difference coordinates in the reported CRS per scenario.
+- Each scenario directory contains streaming COGs, `manifest.json`, and
+  `diff.tif`: **0 = equal, 1 = legacy-only flooding, 2 = streaming-only flooding**.
+- Legacy scenario TIFFs/COGs and the exact scenario inputs are retained.
+
+Any differing cell or missing streaming reach fails the test with a diagnostic
+report and a nonzero exit code. Comparison uses nearest-neighbor sampling on
+the legacy grid over the **union** of both extents, so added flooding outside
+the legacy crop is not ignored. Cropping, file encoding, nodata representation,
+and tile boundaries do not count as scientific differences. Streaming tiles
+combine as a flood union; documented multi-HUC overlap/resampling differences
+are **reported, not exempted**. The windowed comparison bounds memory usage.
+
+Without `FIMBOX_RUN_PARITY=1`, only the fast synthetic tests of the diff itself
+run; the real scientific test is explicitly skipped. Run these on the host:
+
+```bash
+python -m unittest discover -s tests -p test_scenario_parity.py -v
+```

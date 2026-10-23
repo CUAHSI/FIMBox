@@ -115,6 +115,36 @@ with run-specific tile paths remain readable and are cleaned up when replaced.
 jobs cannot be interrupted. Job metadata and ownership expire according to
 `RESULT_TTL_SECONDS` (default 86400 seconds).
 
+### Legacy/streaming parity jobs
+
+`POST /jobs/parity` checks the streaming implementation against a retained
+legacy run. The body has `legacy_bucket` and `legacy_prefix` (the legacy run's
+`output_prefix`), plus `output_bucket`, `output_prefix`, and optional
+`overwrite` for the new streaming outputs. The worker reads the legacy run's
+`scenarios.json`, confirms every `<ScenarioID>.cog` exists, and reruns the
+same scenarios as a normal streaming job at the output prefix. It then
+compares each legacy COG with the union of that scenario's streaming tiles,
+cell by cell on the legacy grid. Like streaming jobs, parity requires
+`STREAM_INPUT_BUCKET` and authentication, and uses `STREAM_QUEUE` if it is
+set. The output prefix must differ from the legacy prefix.
+
+Poll `GET /jobs/{job_id}` as usual. The result's `parity` list gives, per
+scenario, `matches`, flooded/legacy-only/streaming-only/different cell
+counts, `missing_reaches`, and up to 10 `sample_differences` in the legacy
+CRS. If the streaming mask is offset from legacy by whole pixels (at most 2
+rows/columns, estimated from the flooded-cell centroids), it is realigned
+before counting when that reduces the differences; the offset is reported as
+`grid_shift_rows`/`grid_shift_columns` (positive is south/east), with the
+pre-alignment count in `unaligned_different_cells`. `matches` is false if any
+cell differs after alignment or any reach was missing from the streaming
+dataset; a grid shift alone does not cause a mismatch. Differences are reported, not failed: the job succeeds and
+logs `MATCH`/`MISMATCH` per scenario. `<output_prefix>/parity/report.json`
+holds the full report. `<output_prefix>/parity/<ScenarioID>.diff.tif` is
+drawn after alignment on the legacy grid (padded by 2 pixels) and uses
+0 for equal cells, 1 for legacy-only flooding, and 2 for streaming-only
+flooding. Both are also listed in `files`. Existing parity outputs fail the
+job before computation unless `overwrite` is enabled.
+
 ## Raster viewing
 
 The cloud notebook displays retained outputs by storage path:
@@ -198,3 +228,8 @@ docker compose --env-file /dev/null run --rm --no-deps \
   -v "$PWD/tests:/tests:ro" --entrypoint /opt/conda/bin/python \
   worker /tests/test_container_scenario.py
 ```
+
+For a real scientific comparison (no mocked computation), see the
+[legacy/streaming parity test](../handfim/README.md#legacystreaming-parity-test).
+It fails on differing flooded cells and retains a JSON report and spatial
+difference rasters for diagnosis.

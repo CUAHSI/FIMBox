@@ -1037,6 +1037,51 @@
           }
         }
       }
+    },
+    "/jobs/parity": {
+      "post": {
+        "summary": "Submit Parity",
+        "description": "Rerun a retained legacy run's scenarios.json with streaming and diff every scenario.\n\nThe job result lists streaming manifests plus per-scenario parity counts; diff GeoTIFFs\n(1=legacy-only, 2=streaming-only flooding) and parity/report.json go under output_prefix.\nAuthentication is required only when the server has OAuth credentials configured. See GET /auth/config.",
+        "operationId": "submit_parity_jobs_parity_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ParityJobRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobSubmitted"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2AuthorizationCodeBearer": []
+          },
+          {}
+        ]
+      }
     }
   },
   "components": {
@@ -1377,13 +1422,13 @@
                 "type": "null"
               }
             ],
-            "title": "Output Bucket"
+            "title": "Output Bucket",
+            "default": "resource"
           },
           "output_prefix": {
             "type": "string",
             "maxLength": 900,
-            "title": "Output Prefix",
-            "default": ""
+            "title": "Output Prefix"
           },
           "outputs": {
             "items": {
@@ -1392,12 +1437,36 @@
             "type": "array",
             "title": "Outputs"
           },
+          "execution_mode": {
+            "type": "string",
+            "enum": [
+              "legacy",
+              "streaming"
+            ],
+            "title": "Execution Mode",
+            "default": "legacy"
+          },
           "files": {
             "items": {
               "$ref": "#/components/schemas/OutputFile"
             },
             "type": "array",
             "title": "Files"
+          },
+          "scenario_manifests": {
+            "items": {
+              "$ref": "#/components/schemas/ScenarioManifest"
+            },
+            "type": "array",
+            "title": "Scenario Manifests"
+          },
+          "parity": {
+            "items": {
+              "$ref": "#/components/schemas/ScenarioParity"
+            },
+            "type": "array",
+            "title": "Parity",
+            "description": "Legacy/streaming comparisons; present only for parity jobs."
           },
           "local_output_dir": {
             "anyOf": [
@@ -1409,27 +1478,12 @@
               }
             ],
             "title": "Local Output Dir"
-          },
-          "execution_mode": {
-            "type": "string",
-            "enum": [
-              "legacy",
-              "streaming"
-            ],
-            "title": "Execution Mode",
-            "default": "legacy"
-          },
-          "scenario_manifests": {
-            "items": {
-              "$ref": "#/components/schemas/ScenarioManifest"
-            },
-            "type": "array",
-            "title": "Scenario Manifests"
           }
         },
         "additionalProperties": false,
         "type": "object",
         "required": [
+          "output_prefix",
           "outputs"
         ],
         "title": "StoredHandFimResult",
@@ -1509,9 +1563,6 @@
             "description": "Replace existing S3 objects with matching output keys; by default, conflicting keys fail the job.",
             "default": false
           },
-          "scenarios": {
-            "$ref": "#/components/schemas/HandFimParameters"
-          },
           "execution_mode": {
             "type": "string",
             "enum": [
@@ -1521,6 +1572,9 @@
             "title": "Execution Mode",
             "description": "legacy downloads whole HUCs and writes one COG per scenario. streaming range-reads a prepared cloud-optimized hydrofabric per reach and writes tiled COGs plus a manifest per scenario; it requires output_bucket and a single process.",
             "default": "legacy"
+          },
+          "scenarios": {
+            "$ref": "#/components/schemas/HandFimParameters"
           }
         },
         "additionalProperties": false,
@@ -1729,6 +1783,177 @@
         ],
         "title": "ScenarioManifest",
         "description": "A published per-scenario tile manifest from a streaming job."
+      },
+      "ParityDifference": {
+        "properties": {
+          "x": {
+            "type": "number",
+            "title": "X"
+          },
+          "y": {
+            "type": "number",
+            "title": "Y"
+          },
+          "value": {
+            "type": "integer",
+            "enum": [
+              1,
+              2
+            ],
+            "title": "Value",
+            "description": "1=legacy-only flooding, 2=streaming-only flooding"
+          }
+        },
+        "type": "object",
+        "required": [
+          "x",
+          "y",
+          "value"
+        ],
+        "title": "ParityDifference"
+      },
+      "ParityJobRequest": {
+        "properties": {
+          "output_bucket": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Bucket",
+            "default": "resource"
+          },
+          "output_prefix": {
+            "type": "string",
+            "maxLength": 900,
+            "title": "Output Prefix"
+          },
+          "legacy_bucket": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+            "title": "Legacy Bucket"
+          },
+          "legacy_prefix": {
+            "type": "string",
+            "maxLength": 900,
+            "title": "Legacy Prefix",
+            "description": "Output prefix of a legacy run containing scenarios.json and <ScenarioID>.cog files."
+          },
+          "overwrite": {
+            "type": "boolean",
+            "title": "Overwrite",
+            "description": "Replace existing S3 objects with matching output keys; by default, conflicting keys fail the job.",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "output_prefix",
+          "legacy_bucket",
+          "legacy_prefix"
+        ],
+        "title": "ParityJobRequest",
+        "description": "Rerun a retained legacy run's scenarios with streaming and diff the outputs."
+      },
+      "ScenarioParity": {
+        "properties": {
+          "ScenarioID": {
+            "type": "string",
+            "title": "Scenarioid"
+          },
+          "legacy_key": {
+            "type": "string",
+            "title": "Legacy Key"
+          },
+          "diff_key": {
+            "type": "string",
+            "title": "Diff Key"
+          },
+          "crs": {
+            "type": "string",
+            "title": "Crs"
+          },
+          "legacy_flooded_cells": {
+            "type": "integer",
+            "title": "Legacy Flooded Cells"
+          },
+          "streaming_flooded_cells": {
+            "type": "integer",
+            "title": "Streaming Flooded Cells"
+          },
+          "legacy_only_cells": {
+            "type": "integer",
+            "title": "Legacy Only Cells"
+          },
+          "streaming_only_cells": {
+            "type": "integer",
+            "title": "Streaming Only Cells"
+          },
+          "different_cells": {
+            "type": "integer",
+            "title": "Different Cells"
+          },
+          "grid_shift_rows": {
+            "default": 0,
+            "description": "Streaming rows offset from legacy (positive is south); realigned before counting.",
+            "title": "Grid Shift Rows",
+            "type": "integer"
+          },
+          "grid_shift_columns": {
+            "default": 0,
+            "description": "Streaming columns offset from legacy (positive is east); realigned before counting.",
+            "title": "Grid Shift Columns",
+            "type": "integer"
+          },
+          "unaligned_different_cells": {
+            "default": 0,
+            "description": "Differing cells before grid-shift realignment.",
+            "title": "Unaligned Different Cells",
+            "type": "integer"
+          },
+          "missing_reaches": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Missing Reaches"
+          },
+          "sample_differences": {
+            "items": {
+              "$ref": "#/components/schemas/ParityDifference"
+            },
+            "type": "array",
+            "title": "Sample Differences"
+          },
+          "matches": {
+            "type": "boolean",
+            "title": "Matches"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ScenarioID",
+          "legacy_key",
+          "diff_key",
+          "crs",
+          "legacy_flooded_cells",
+          "streaming_flooded_cells",
+          "legacy_only_cells",
+          "streaming_only_cells",
+          "different_cells",
+          "matches"
+        ],
+        "title": "ScenarioParity",
+        "description": "Cell-level comparison of one legacy scenario COG against its streaming tiles.\n\nCell counts are measured after realigning a small whole-pixel grid shift, which\nis reported separately and does not affect ``matches``."
       }
     },
     "securitySchemes": {

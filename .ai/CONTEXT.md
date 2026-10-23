@@ -184,6 +184,18 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
   require retained S3 keys, validate tile coordinates, and return no-store data.
   Login-response middleware prevents caching/referrer leakage for device routes
   and OAuth callbacks, including error and validation responses.
+  `POST /jobs/parity` (ParityJobRequest: legacy bucket/prefix plus a distinct
+  output destination) queues `hand_fim_parity`; it requires streaming config
+  and authentication, uses STREAM_QUEUE, and releases credentials/tracking if
+  enqueueing fails.
+- **`src/fimbox_api/parity.py`** — `compare_scenario_outputs`: windowed
+  wet-cell diff of a legacy raster against the union of streaming tiles on
+  the legacy grid over both extents. Writes a 0/1/2 (equal/legacy-only/
+  streaming-only) diff GeoTIFF and returns counts plus up to 10 sample
+  coordinates. A whole-pixel offset (rounded flooded-cell centroid delta,
+  at most MAX_GRID_SHIFT=2 px) is realigned when it reduces differences and
+  reported as grid_shift_rows/columns plus unaligned_different_cells; the
+  grid is padded by that limit so shifted cells can't fall off the edge. Shared by the parity task and `tests/test_scenario_parity.py`.
 - **`src/fimbox_api/rasters.py`** — rio-tiler/rasterio metadata and 256px
   Web Mercator window/overview reads. Request-scoped credentials configure
   signed S3 range reads with directory listing disabled. Binary flood=1 is blue,
@@ -192,7 +204,13 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
   `docker/api/Dockerfile` installs native libexpat1 for rasterio in the slim
   Python image and smoke-tests raster imports during the build; the HAND-FIM
   worker base already supplies the library through GDAL.
-- **`src/fimbox_api/tasks.py`** — Real HAND-FIM Celery task. Revalidates input,
+- **`src/fimbox_api/tasks.py`** — Real HAND-FIM Celery task. `hand_fim_parity`
+  reads a legacy run's `scenarios.json`, verifies its `<ScenarioID>.cog` files
+  and parity output conflicts, calls the streaming `hand_fim` path in-process,
+  downloads legacy/tile COGs to a temp dir, diffs them, uploads
+  `parity/<ScenarioID>.diff.tif` and `parity/report.json`, and returns the
+  streaming result with `parity` entries (mismatches don't fail the job).
+  The main task revalidates input,
   substitutes safe job-specific internal scenario names, writes the scenario
   JSON, invokes the existing container `scenario` CLI in a subprocess, verifies
   every COG exists, recursively uploads all files from the job-specific
@@ -475,6 +493,20 @@ uploaded tile by tile.
   (4Gi) consuming the `streaming` queue.
 - Tests: `tests/test_streaming_fim.py` (NOAA-reference equality, tile-size
   invariance, range-only HTTP reads) and `tests/test_streaming_api.py`.
+- **`tests/test_scenario_parity.py`** — Fast raster-diff regressions plus an
+  opt-in real legacy/streaming scenario comparison (`FIMBOX_RUN_PARITY=1` in
+  the HAND-FIM image). Runs the checkout's legacy scenario command, prepares
+  streaming COGs from the same raw HUC cache, and executes streaming science
+  with local storage callbacks (no mocked computation or S3 credentials).
+  Compares wet-cell masks window-by-window on the legacy grid over both
+  extents; any difference or missing streaming reach fails. Unique run outputs
+  retain JSON counts/sample coordinates, manifests, tiles, and categorized
+  difference GeoTIFFs. `FIMBOX_PARITY_SCENARIOS` selects inputs, defaulting to
+  `test-data/multiple_scenarios.json`; commands are in the HAND-FIM guide.
+  The diff function lives in `src/fimbox_api/parity.py`; the test adds `src`
+  to `sys.path` so it still runs directly in the container.
+- **`tests/test_parity_api.py`** — Parity request validation, worker (mocked
+  S3/streaming, real raster diff on synthetic COGs), and endpoint queuing.
 - Not yet validated against a live HydroShare dataset or on Cloud Run.
 
 ## Known gaps / things to watch

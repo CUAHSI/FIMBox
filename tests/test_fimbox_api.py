@@ -280,7 +280,7 @@ class ApiTests(unittest.TestCase):
             response = self.client.get(f"/jobs/{job_id}")
             self.assertEqual(
                 response.json()["result"],
-                {**result, "execution_mode": "legacy", "scenario_manifests": []},
+                {**result, "execution_mode": "legacy", "scenario_manifests": [], "parity": []},
             )
 
     def test_output_download_and_envelope_routes_are_removed(self):

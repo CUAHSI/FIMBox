@@ -70,6 +70,8 @@ class StreamConfig:
 
 def __client(config: StreamConfig, unsigned: bool):
     options = {"s3": {"addressing_style": config.addressing_style}}
+    if "request_checksum_calculation" in Config.OPTION_DEFAULTS:
+        options["request_checksum_calculation"] = "when_required"
     if unsigned:
         return boto3.client(
             "s3", endpoint_url=config.endpoint_url, region_name=config.region,

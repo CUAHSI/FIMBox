@@ -72,10 +72,10 @@ def job_map(
         result: That job's output manifest.
 
     Returns:
-        A widget with a raster selector, map, reload button, and tile-read status.
+        A widget with a raster selector, map, reload button, auto-zoom toggle, and tile-read status.
     """
     from ipyleaflet import ImageOverlay, Map, basemaps
-    from ipywidgets import Button, Dropdown, Label, Layout, VBox
+    from ipywidgets import Button, Checkbox, Dropdown, HBox, Label, Layout, VBox
 
     job_id = UUID(str(job_id))
     if not result.output_bucket:
@@ -96,6 +96,7 @@ def job_map(
     selector = Dropdown(options=files, description="Raster:", layout=Layout(width="95%"))
     status = Label()
     reload_button = Button(description="Reload tiles", tooltip="Retry after a read error or renewed login")
+    auto_zoom = Checkbox(value=True, description="Auto-zoom")
     map_widget = Map(
         basemap=basemaps.OpenStreetMap.Mapnik, scroll_wheel_zoom=True,
         layout=Layout(height="600px"), max_zoom=22,
@@ -163,11 +164,12 @@ def job_map(
             if response.status_code != 200 or not isinstance(response.parsed, RasterInfo):
                 raise RuntimeError(f"Raster metadata request failed: HTTP {response.status_code}.")
             metadata = response.parsed
-            map_widget.min_zoom = metadata.minzoom if kind == "scenario" else 0
-            if map_widget.zoom < map_widget.min_zoom:
-                map_widget.zoom = map_widget.min_zoom
-            west, south, east, north = metadata.bounds
-            map_widget.fit_bounds(((south, west), (north, east)))
+            map_widget.min_zoom = metadata.minzoom if kind == "scenario" and auto_zoom.value else 0
+            if auto_zoom.value:
+                if map_widget.zoom < map_widget.min_zoom:
+                    map_widget.zoom = map_widget.min_zoom
+                west, south, east, north = metadata.bounds
+                map_widget.fit_bounds(((south, west), (north, east)))
         finally:
             changing = False
         render()
@@ -183,8 +185,16 @@ def job_map(
         tile.cache_clear()
         select_changed(None)
 
+    def auto_zoom_changed(change):
+        if change["new"]:
+            select_changed(None)
+        else:
+            map_widget.min_zoom = 0
+            render()
+
     select()
     selector.observe(select_changed, names="value")
     map_widget.observe(render, names=["bounds", "zoom"])
     reload_button.on_click(reload_tiles)
-    return VBox([selector, reload_button, status, map_widget])
+    auto_zoom.observe(auto_zoom_changed, names="value")
+    return VBox([selector, HBox([reload_button, auto_zoom]), status, map_widget])

@@ -448,6 +448,10 @@ uploaded tile by tile.
   Celery args are unchanged; streaming appends `"streaming"` and can route to
   `STREAM_QUEUE`. `src/fimbox_map.py` lists streamed scenarios, sets the map's
   minimum zoom from scenario metadata, and refreshes on bounds/zoom changes.
+  An Auto-zoom checkbox (on by default, beside Reload tiles in a top HBox)
+  gates fitting and minimum-zoom
+  enforcement; disabling it preserves the viewport on selection/reload,
+  while the tile-request minimum-zoom guard remains active.
   The cloud notebook reloads this helper in its map cell for existing kernels.
   The CLI has
   `--execution-mode`.

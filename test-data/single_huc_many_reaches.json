@@ -1,6 +1,6 @@
 [
   {
-    "ScenarioID": "single-huc-senario",
+    "ScenarioID": "single-huc-many-reaches-scenario",
     "Reaches": [
       { "HUC": "03020201", "ReachID": "8780625", "Streamflow": 233 },
       { "HUC": "03020201", "ReachID": "8780659", "Streamflow": 224 },

@@ -285,7 +285,9 @@ class NotebookMapTests(unittest.TestCase):
         with client, patch("ipyleaflet.Map.fit_bounds") as fit_bounds:
             widget = fimbox_map.job_map(client, uuid4(), StoredHandFimResult.from_dict(manifest()))
             fit_bounds.assert_called_once_with(((30, -80), (31, -79)))
-            selector, button, status, map_widget = widget.children
+            selector, controls, status, map_widget = widget.children
+            button, auto_zoom = controls.children
+            self.assertEqual(controls.__class__.__name__, "HBox")
             map_widget.set_trait("bounds", ((30, -80), (31, -79)))
             self.assertGreater(len(map_widget.layers), 1)
             for layer in map_widget.layers[1:]:
@@ -299,6 +301,18 @@ class NotebookMapTests(unittest.TestCase):
             self.assertTrue(any("/rasters/1/" in str(request.url) for request in requests))
             button.click()
             self.assertIn("visible tiles", status.value)
+            self.assertTrue(auto_zoom.value)
+            auto_zoom.value = False
+            fit_bounds.reset_mock()
+            map_widget.center = (30.4, -79.6)
+            map_widget.zoom = 10
+            selector.value = ("file", 0)
+            button.click()
+            fit_bounds.assert_not_called()
+            self.assertEqual(map_widget.center, [30.4, -79.6])
+            self.assertEqual(map_widget.zoom, 10)
+            auto_zoom.value = True
+            fit_bounds.assert_called_once_with(((30, -80), (31, -79)))
             map_widget.close()
             widget.close()
 
@@ -324,7 +338,8 @@ class NotebookMapTests(unittest.TestCase):
         )
         with client, patch("ipyleaflet.Map.fit_bounds"):
             widget = fimbox_map.job_map(client, uuid4(), result)
-            selector, _, status, map_widget = widget.children
+            selector, controls, status, map_widget = widget.children
+            button, auto_zoom = controls.children
             self.assertEqual(selector.value, ("scenario", 0))
             self.assertEqual(map_widget.min_zoom, 11)
             self.assertGreaterEqual(map_widget.zoom, 11)
@@ -339,6 +354,17 @@ class NotebookMapTests(unittest.TestCase):
             self.assertTrue(all(
                 "/scenarios/0/" in str(request.url) for request in requests
             ))
+            auto_zoom.value = False
+            self.assertEqual(map_widget.min_zoom, 0)
+            map_widget.zoom = 9
+            before = len(requests)
+            button.click()
+            self.assertEqual(map_widget.zoom, 9)
+            self.assertIn("Zoom in to level 11", status.value)
+            self.assertFalse(any("/tiles/" in str(request.url) for request in requests[before:]))
+            auto_zoom.value = True
+            self.assertEqual(map_widget.min_zoom, 11)
+            self.assertGreaterEqual(map_widget.zoom, 11)
             widget.close()
             map_widget.close()
 

@@ -97,6 +97,11 @@ an existing connected SDK client, successful job ID, and typed output result.
 See [the notebook guide](../notebooks/README.md). The helper fetches raster
 metadata and visible PNG tiles using generated operations; session tokens stay
 in the kernel. The API must include the matching raster endpoints.
+The **Auto-zoom** checkbox is enabled by default. Disable it to preserve the
+current center and zoom when selecting outputs or reloading tiles. Streaming
+tiles still require the API's minimum display zoom; below it, the map shows
+a zoom-in message instead of requesting tiles. Re-enabling auto-zoom fits the
+selected output again.
 
 ## Regenerate the SDK
 

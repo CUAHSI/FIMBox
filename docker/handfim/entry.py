@@ -66,32 +66,35 @@ def __write_flow_input_file(
     return basepath / output_label
 
 
-def __download_huc_fim(huc_id: str, fim_data_dir: Path, fim_data_version=None) -> None:
+def __download_huc_fim(
+    huc_id: str,
+    feature_ids: List[str],
+    fim_data_version=None,
+    include_rating_curve: bool = False,
+) -> None:
     """
-    Downloads the FIM map for a specific HUC identifier.
+    Downloads the FIM data needed for the requested reaches in a HUC. Only
+    the files the mosaic process reads, for only the branches that contain
+    the reaches, are downloaded (see patches/datadownload.py). Data that was
+    already downloaded by an earlier run is reused, and anything missing
+    (e.g. a branch needed by a new reach) is fetched.
 
     Arguments:
         huc_id - str: The HUC identifier for the watershed.
+        feature_ids - List[str]: The NWM reach identifiers that will be mapped.
+        fim_data_version - str: The FIM data version to download.
+        include_rating_curve - bool: Also download the branch 0 hydroTable,
+            which rating-curve (stage) lookups read.
     Returns:
         None
     """
 
-    if not fim_data_dir.exists():
-        # Download the HUC input data if it does not exist.
-        fm.DownloadHUC8(huc_id, version=fim_data_version)
-    else:
-        print("FIM Data Already Exists. Skipping download.")
-        # if the data already exists, perfom the remaining
-        # setup tasks outlined in the DownloadHUC8 function.
-
-        code_dir, data_dir, output_dir = fm.setup_directories()
-        fm.EnvFile(code_dir)
-
-
-#        HUC_dir = os.path.join(output_dir, f"flood_{huc_id}")
-#        hydrotable_dir = os.path.join(HUC_dir, str(huc_id), "hydrotable.csv")
-#        featureID_dir = os.path.join(HUC_dir, "feature_IDs.csv")
-#        fm.uniqueFID(hydrotable_dir, featureID_dir)
+    fm.DownloadHUC8(
+        huc_id,
+        version=fim_data_version,
+        feature_ids=feature_ids,
+        include_rating_curve=include_rating_curve,
+    )
 
 
 def __generate_fim(huc_id, flow_rate_filepath, label="") -> None:
@@ -432,8 +435,15 @@ def generate_reach_fim(
     fim_data_dir = f"/home/output/flood_{huc_id}/{huc_id}"
     print(f"FIM data directory: {fim_data_dir}")
 
-    # download HUC data if it doesn't exist
-    __download_huc_fim(huc_id, Path(fim_data_dir), fim_data_version="4.5")
+    # download only the HUC data needed for these reaches (reusing any
+    # data that an earlier run already downloaded).
+    # The rating curve is only needed to derive default output labels.
+    __download_huc_fim(
+        huc_id,
+        r_ids,
+        fim_data_version="4.5",
+        include_rating_curve=output_labels is None,
+    )
 
     # generate output file names if not provided
     if output_labels is None:
@@ -608,11 +618,19 @@ def generate_scenario_fim(
             label = f"{scenario_id}__{huc}"
             jobs.append((scenario_id, huc, reach_ids, flow_rates, label))
 
-    # download HUC data for every unique HUC referenced across all scenarios
-    for huc in sorted({huc for _, huc, _, _, _ in jobs}):
+    # Download HUC data once per unique HUC, covering every reach referenced
+    # for that HUC across all scenarios, so the shared watershed cache is
+    # complete before computation starts.
+    reaches_by_huc: Dict[str, List[str]] = {}
+    for _, huc, reach_ids, _, _ in jobs:
+        for reach_id in reach_ids:
+            if reach_id not in reaches_by_huc.setdefault(huc, []):
+                reaches_by_huc[huc].append(reach_id)
+
+    for huc in sorted(reaches_by_huc):
         fim_data_dir = f"/home/output/flood_{huc}/{huc}"
         print(f"FIM data directory: {fim_data_dir}")
-        __download_huc_fim(huc, Path(fim_data_dir), fim_data_version="4.5")
+        __download_huc_fim(huc, reaches_by_huc[huc], fim_data_version="4.5")
 
     # write one flow-rate file per (scenario, HUC) job
     print("Writing input flow files:")

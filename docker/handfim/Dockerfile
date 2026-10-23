@@ -62,6 +62,9 @@ COPY patches/fimserve_pyproject.toml /home/code/FIMServ/pyproject.toml
 # inundate_mosaic_wrapper.py (required for it to emit any progress at all),
 # and force OS-level line-buffering via stdbuf for non-Python subprocesses.
 COPY patches/runFIM.py /home/code/FIMServ/src/fimserve/runFIM.py
+# patch datadownload.py to download only the files (and branches) that the
+# mosaic process reads instead of syncing the entire HUC from S3.
+COPY patches/datadownload.py /home/code/FIMServ/src/fimserve/datadownload.py
 
 RUN cd /home/code/FIMServ \
  && uv pip install --system -e . 

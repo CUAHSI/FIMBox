@@ -64,6 +64,8 @@ making structural changes to the project, so future sessions can rely on it.
 - Tests: `PYTHONPATH=src pixi run python -m unittest discover -s tests -v`.
   Tests cover API/worker/SDK/CLI/auth; scientific computation is mocked.
   Container-only regressions require the HAND-FIM image.
+  Opt-in S3 tests (need the `aws` CLI, download <1 MB):
+  `FIMBOX_RUN_S3_TESTS=1 PYTHONPATH=src pixi run python -m unittest tests.test_datadownload_s3 -v`.
   No repository-wide linter/formatter is configured.
 
 ## External dependencies & patches
@@ -73,7 +75,8 @@ making structural changes to the project, so future sessions can rely on it.
 - `docker/handfim/patches/` intentionally overrides parts of upstream
   `fimserve` (e.g. `fimserve__init__.py` disables most of the original
   package's exports; `runFIM.py` adds a `label` parameter to avoid mosaic
-  output collisions during parallel runs). Treat these as deliberate
+  output collisions during parallel runs; `datadownload.py` downloads only the
+  files/branches the mosaic reads instead of the whole HUC). Treat these as deliberate
   divergences, not bugs to "fix" back to upstream behavior.
 
 ## Conventions
@@ -93,7 +96,13 @@ making structural changes to the project, so future sessions can rely on it.
   class methods — follow this pattern for new internal helpers.
 - Docstrings favor a plain "Arguments:/Returns:" style rather than
   Google/NumPy docstring formats (except in `compute_rating_increments.py`,
-  which uses `====` underlines).
+  which uses `====` underlines, and `tests/test_datadownload_patch.py` and
+  `tests/test_datadownload_s3.py`, which use NumPy style: `Parameters`/`Returns`/`Raises` sections with `----`
+  underlines).
+- Every new function, method, and test (including nested helper functions) must
+  have a docstring: at least a one-line summary, plus the arguments and return
+  value sections whenever it takes parameters or returns something. Update the
+  docstring when you change a function's behavior or signature.
 
 ## Validation notes
 

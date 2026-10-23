@@ -198,6 +198,17 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
 - **`tests/test_container_scenario.py`** — Container-only regression tests
   that load the real `entry.py` and mock computation/downloads to prove that
   future failures and missing HUC rasters propagate. Skipped on the host.
+- **`tests/test_datadownload_patch.py`** — Host-runnable tests loading the
+  patched `datadownload.py` with a fake `aws` that creates the files a filtered
+  sync would fetch. Cover the allow-list, branch selection (including features
+  in several branches), cache reuse with no network, adding a branch for a new
+  reach, `fim_inputs.csv` contents, optional rating curve, and error propagation.
+- **`tests/test_datadownload_s3.py`** — Opt-in integration tests (run only with
+  `FIMBOX_RUN_S3_TESTS=1` and the `aws` CLI on the PATH) that run the patched
+  download helpers against the real public HAND-FIM bucket for HUC 03020201.
+  Download under 1 MB: allow-list sync of one small branch, `branch_ids.csv`
+  parsing, and the hydrotable header (byte-range read) having the
+  `feature_id`/`branch_id` columns. Use NumPy-style docstrings.
 
 ## Google Cloud Terraform (`terraform/`)
 
@@ -248,7 +259,9 @@ single worker per shared watershed cache. `pixi run api` runs FastAPI only.
   `cuahsi/handfim` Docker container (invoked by the Celery worker's
   scenario subprocess). Commands:
   - `reachfim` — Generates FIM for one or more explicit reach IDs + flow rates.
-    Downloads HUC data if needed (`__download_huc_fim`), writes a
+    Downloads only the HUC data needed for the requested reaches
+    (`__download_huc_fim` -> patched `DownloadHUC8`; the rating curve is
+    included only when output labels must be derived), writes a
     `feature_id,discharge` CSV per reach (`__write_flow_input_file`), runs FIM
     generation in parallel via `ProcessPoolExecutor` (`__compute_fim_scenario`
     → `runFIM.runfim`), reorganizes outputs per reach, cleans rasters, and
@@ -317,6 +330,34 @@ single worker per shared watershed cache. `pixi run api` runs FastAPI only.
   directly in `{HUC_code}_inundation/` instead of a per-job subdirectory).
   Fixed by always calling with `label=label` (a keyword argument), which
   binds correctly regardless of which signature is actually in effect.
+
+- **`docker/handfim/patches/datadownload.py`** — Patched replacement for
+  fimserve's `datadownload` module, applied via `COPY` in the Dockerfile.
+  Upstream's `DownloadHUC8` ran an unfiltered `aws s3 sync` of the entire
+  pre-computed HUC (logs, SRC tables, per-branch hydrotables, geopackages,
+  ...). The mosaic step (`inundate_mosaic_wrapper.py` at the pinned SHA) only
+  reads `fim_inputs.csv`, `hydrotable.csv`, and per branch
+  `rem_zeroed_masked_<b>.tif` + `gw_catchments_reaches_filtered_addedAttributes_<b>.tif`
+  (the `*_crosswalked_*.gpkg` catchment polygons are passed along but never
+  opened because `Inundate_gms` hardcodes `hucs=None`; re-check if the pinned
+  SHA changes). The patch downloads in two stages with
+  `--exclude "*" --include <exact path>`: (1) `branch_ids.csv` +
+  `hydrotable.csv`; (2) the two rasters for only the branches whose hydrotable
+  rows contain the requested `feature_ids` (a reach can be in several branches;
+  branch 0 holds almost every feature). Files already on disk are skipped, so
+  cached runs need no network and a new reach only fetches its missing
+  branches. `flood_<huc>/fim_inputs.csv` is rewritten atomically to list
+  every branch whose rasters are on disk (the cache is shared across runs, so
+  earlier runs' branches stay listed); the mosaic runs every listed branch.
+  `include_rating_curve=True` also fetches `branches/0/hydroTable_0.csv`
+  (needed by `compute_rating_increments`, i.e. `reachfim` without labels).
+  Intentional differences from upstream: `DownloadHUC8` takes `feature_ids` /
+  `include_rating_curve` and no longer takes `stream_order`; `uniqueFID` and
+  `feature_IDs.csv` generation were removed (unused, parsed the full
+  hydrotable); `aws` failures raise (`check=True`) and requested files missing
+  from S3 raise `FileNotFoundError`; feature ids absent from the HUC raise
+  `ValueError` (partially missing ids only warn). Uses the `csv` module, not
+  pandas.
 
 - **`docker/handfim/patches/fimserve__init__.py`** — Patched `fimserve/__init__.py`.
   Most of the original package's exports (streamflow retrieval, plotting,

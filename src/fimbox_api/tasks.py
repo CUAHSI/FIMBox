@@ -3,11 +3,13 @@ import logging
 import mimetypes
 import os
 import secrets
+import shlex
 import shutil
 import signal
 import subprocess
 import sys
 from pathlib import Path
+from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
@@ -26,6 +28,103 @@ from .storage import StorageCredentialsError, job_s3_environment, output_file_ke
 logger = logging.getLogger(__name__)
 MANIFEST_FORMAT = "fimbox-scenario-tiles"
 MAX_MANIFEST_BYTES = 8 * 1024 * 1024
+
+
+def __write_output_readme(
+    output_dir: Path, job_id: str, scenarios: HandFimParameters, destination: HandFimJobOptions,
+) -> None:
+    streamed = destination.execution_mode == "streaming"
+    max_procs = 1 if streamed else (
+        destination.max_procs if destination.max_procs is not None else settings.hand_fim_max_procs
+    )
+    scenario_ids = [scenario.ScenarioID for scenario in scenarios.root]
+    output_keys = [
+        output_file_key(destination.output_prefix, f"{sid}/manifest.json" if streamed else f"{sid}.cog")
+        for sid in scenario_ids
+    ]
+    command = [
+        "fimbox", "submit", "--body", "scenarios.json",
+        "--execution-mode", destination.execution_mode, "--max-procs", str(max_procs),
+    ]
+    if destination.output_bucket is not None:
+        command.extend(["--output-bucket", destination.output_bucket, "--output-prefix", "NEW_OUTPUT_PREFIX"])
+    layout = (
+        "Each scenario has a `<ScenarioID>/manifest.json` listing its COG tile keys, geographic bounds, "
+        "and grid metadata. Tiles live at `<ScenarioID>/<huc>/<row>_<col>.cog`. "
+        "HUCs retain their native grids; the map displays the union of flooded cells.\n"
+        if streamed else
+        "Each scenario produces `<ScenarioID>.cog`, a Cloud Optimized GeoTIFF (COG). "
+        "Additional TIFFs and processing files may also be present. "
+        "Legacy mosaics retain the first HUC's value where HUCs overlap.\n"
+    )
+    lines = [
+        "# HAND-FIM scenario outputs\n\n",
+        "These flood inundation extents were computed by FIMBox using the Height Above Nearest Drainage "
+        "(HAND) method and NOAA/OWP inundation-mapping tooling. They represent the supplied reach "
+        "streamflows, not water depth, forecast probabilities, or a guarantee of flooding. "
+        "Flooded cells have value 1; dry/nodata cells are transparent in the FIMBox map. "
+        "Consult each raster's CRS, transform, and nodata metadata for GIS use.\n\n",
+        "## How this run was configured\n\n",
+        f"- Job ID (provenance only): `{job_id}`\n",
+        f"- Worker run started (UTC): `{datetime.now(timezone.utc).isoformat()}`\n",
+        f"- Execution mode: `{destination.execution_mode}`\n",
+        f"- Effective maximum processes: `{max_procs}`\n",
+        f"- Overwrite enabled: `{str(destination.overwrite).lower()}`\n",
+        f"- Scenario count: `{len(scenario_ids)}`\n",
+        f"- Reach entries: `{sum(len(scenario.Reaches) for scenario in scenarios.root)}`\n",
+    ]
+    if destination.output_bucket is not None:
+        root = f"s3://{destination.output_bucket}/"
+        if destination.output_prefix.strip("/"):
+            root += destination.output_prefix.strip("/") + "/"
+        lines.append(f"- Output location: `{root}`\n")
+    if streamed:
+        lines.extend([
+            f"- Prepared input hydrofabric: `s3://{settings.stream_input_bucket}/"
+            f"{settings.stream_input_prefix.strip('/')}`\n",
+            f"- Processing tile size: `{settings.stream_tile_size}` pixels\n",
+            "\nStreaming reads only intersecting hydrofabric blocks and uploads COG tiles directly to S3.\n",
+        ])
+    else:
+        lines.append("\nLegacy processing downloads HUC inputs and mosaics scenario results into COGs.\n")
+    lines.extend([
+        "\n## Files and inputs\n\n",
+        "- [scenarios.json](scenarios.json): the validated input scenario array, reusable as input. "
+        "`ScenarioID` names each scenario; `Reaches` contains eight-digit `HUC` codes, NWM `ReachID` "
+        "identifiers, and `Streamflow` in cubic meters per second (m^3/s).\n",
+        "- [README.md](README.md): this run description.\n\n",
+        layout,
+        "\nScenario outputs relative to this directory:\n\n",
+    ])
+    lines.extend(
+        f"- `{sid}/manifest.json`\n" if streamed else f"- `{sid}.cog`\n" for sid in scenario_ids
+    )
+    lines.extend([
+        "\n## Rerun\n\n",
+        "Install FIMBox, configure its API URL, and authenticate with HydroShare as required by that API. "
+        "Download `scenarios.json`, then run from its directory:\n\n",
+        f"```sh\n{shlex.join(command)}\n```\n\n",
+        "Replace `NEW_OUTPUT_PREFIX` with a new destination prefix to avoid replacing these outputs. "
+        "Rerunning incurs computation costs. The receiving worker must support this execution mode; "
+        "streaming also requires the prepared hydrofabric configuration above. "
+        "Exact reproduction depends on using the same source data and software environment; "
+        "this README does not capture package versions or immutable dataset versions.\n\n",
+        "## View retained outputs\n\n",
+    ])
+    if destination.output_bucket is not None:
+        paths = [f"s3://{destination.output_bucket}/{key}" for key in output_keys]
+        lines.extend([
+            "With an authenticated, connected FIMBox SDK `api_client` and `fimbox[map]` installed:\n\n",
+            "```python\nfrom fimbox_map import output_map\n\n",
+            f"paths = {json.dumps(paths, indent=4)}\ndisplay(output_map(api_client, paths))\n```\n\n",
+            "These paths do not require unexpired job metadata. Retained objects and current HydroShare "
+            "read permission are required. Streaming display may require zooming in. "
+            "Use separate prefixes for independent or concurrent runs. Overwrites are not atomic; "
+            "failed runs can leave partial outputs or mixed old/new tiles.\n",
+        ])
+    else:
+        lines.append("Local-only runs remove all output files during worker cleanup; use S3 to retain them.\n")
+    (output_dir / "README.md").write_text("".join(lines), encoding="utf-8")
 
 
 def __output_files(output_dir: Path) -> list[Path]:
@@ -192,11 +291,15 @@ def __hand_fim_streaming(
     scenario_prefixes = {
         sid: output_file_key(destination.output_prefix, sid) + "/" for sid in scenario_ids
     }
+    scenarios_path = output_dir / "scenarios.json"
+    scenarios_key = output_file_key(destination.output_prefix, scenarios_path.name)
+    readme_path = output_dir / "README.md"
+    readme_key = output_file_key(destination.output_prefix, readme_path.name)
     previous = {}
     if destination.overwrite:
         previous = {sid: __load_manifest(client, bucket, key) for sid, key in manifest_keys.items()}
     else:
-        __reject_existing_s3_keys(client, bucket, list(manifest_keys.values()))
+        __reject_existing_s3_keys(client, bucket, [*manifest_keys.values(), scenarios_key, readme_key])
     published = []
     try:
         __run_scenario(
@@ -228,6 +331,14 @@ def __hand_fim_streaming(
                 bounds=tuple(manifest["bounds_wgs84"]), tile_size=int(manifest["tile_size"]),
                 resolution=min(float(huc["resolution"]) for huc in manifest["hucs"].values()),
             ))
+        client.upload_file(
+            str(scenarios_path), bucket, scenarios_key,
+            ExtraArgs={"ContentType": "application/json"},
+        )
+        client.upload_file(
+            str(readme_path), bucket, readme_key,
+            ExtraArgs={"ContentType": "text/markdown"},
+        )
     except BaseException:
         for sid in published:
             key = manifest_keys[sid]
@@ -265,6 +376,10 @@ def __hand_fim_streaming(
     append_job_log(job_id, "Streaming HAND-FIM manifests published.\n")
     return StoredHandFimResult(
         outputs=[HandFimOutput(ScenarioID=sid) for sid in scenario_ids],
+        files=[
+            OutputFile(path=path.name, key=key, size_bytes=path.stat().st_size)
+            for path, key in ((scenarios_path, scenarios_key), (readme_path, readme_key))
+        ],
         execution_mode="streaming", scenario_manifests=refs, local_output_dir=None,
         **destination.model_dump(include={"output_bucket", "output_prefix"}),
     ).model_dump(mode="json")
@@ -301,6 +416,8 @@ def hand_fim(
         # A redelivered task must not mistake a previous attempt's files for success.
         for path in __output_files(output_dir):
             path.unlink()
+        (output_dir / "scenarios.json").write_text(scenarios.model_dump_json(), encoding="utf-8")
+        __write_output_readme(output_dir, job_id, scenarios, destination)
         if destination.execution_mode == "streaming":
             return __hand_fim_streaming(job_id, scenarios, destination, scenario_file, output_dir)
         __run_scenario(

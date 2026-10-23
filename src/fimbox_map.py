@@ -6,15 +6,14 @@ from collections.abc import Sequence
 from functools import lru_cache
 from typing import TYPE_CHECKING
 from uuid import UUID
+from urllib.parse import urlsplit
 
 import httpx
 
 from fimbox_sdk import AuthenticatedClient, Client
 from fimbox_sdk.api.default import (
-    get_raster_info_jobs_job_id_rasters_file_index_info_get as info_operation,
-    get_raster_tile_jobs_job_id_rasters_file_index_tiles_z_x_y_png_get as tile_operation,
-    get_scenario_info_jobs_job_id_scenarios_scenario_index_info_get as scenario_info_operation,
-    get_scenario_tile_jobs_job_id_scenarios_scenario_index_tiles_z_x_y_png_get as scenario_tile_operation,
+    get_output_info_outputs_info_get as info_operation,
+    get_output_tile_outputs_tiles_z_x_y_png_get as tile_operation,
 )
 from fimbox_sdk.models import RasterInfo, StoredHandFimResult
 
@@ -64,12 +63,26 @@ def __visible_tiles(
 def job_map(
     client: Client | AuthenticatedClient, job_id: str | UUID, result: StoredHandFimResult,
 ) -> "VBox":
-    """Return an ipyleaflet widget for retained HAND-FIM COG/TIFF or streamed scenario outputs.
+    """Compatibility wrapper for mapping a saved result; job_id is no longer looked up."""
+    if not result.output_bucket:
+        raise ValueError("Map viewing requires retained S3 outputs.")
+    paths = [
+        f"s3://{result.output_bucket}/{artifact.key}" for artifact in result.files
+        if artifact.path.lower().endswith((".cog", ".tif", ".tiff")) and artifact.key
+    ]
+    paths.sort(key=lambda path: (not path.lower().endswith(".cog"), path))
+    manifests = result.scenario_manifests if isinstance(result.scenario_manifests, list) else []
+    paths.extend(f"s3://{result.output_bucket}/{manifest.key}" for manifest in manifests)
+    return output_map(client, paths)
+
+
+def output_map(client: Client | AuthenticatedClient, paths: Sequence[str]) -> "VBox":
+    """Return an ipyleaflet widget for retained S3 raster or scenario manifest paths.
 
     Arguments:
         client: Connected generated SDK client. Credentials stay in the kernel.
-        job_id: Successful job owned by the current session.
-        result: That job's output manifest.
+        paths: s3://bucket/key paths to COG/TIFF files or scenario manifest.json files.
+            No job ID or saved job result is required.
 
     Returns:
         A widget with a raster selector, map, reload button, auto-zoom toggle, and tile-read status.
@@ -77,22 +90,22 @@ def job_map(
     from ipyleaflet import ImageOverlay, Map, basemaps
     from ipywidgets import Button, Checkbox, Dropdown, HBox, Label, Layout, VBox
 
-    job_id = UUID(str(job_id))
-    if not result.output_bucket:
-        raise ValueError("Map viewing requires retained S3 outputs.")
-    files = [
-        (artifact.path, ("file", index)) for index, artifact in enumerate(result.files)
-        if artifact.path.lower().endswith((".cog", ".tif", ".tiff")) and artifact.key
-    ]
-    # Prefer a COG over the original TIFF when both are in the manifest.
-    files.sort(key=lambda item: (not item[0].lower().endswith(".cog"), item[0]))
-    manifests = result.scenario_manifests if isinstance(result.scenario_manifests, list) else []
-    files.extend(
-        (f"{manifest.scenario_id} (streamed tiles)", ("scenario", index))
-        for index, manifest in enumerate(manifests)
-    )
+    sources = []
+    files = []
+    for path in paths:
+        parsed = urlsplit(path)
+        key = parsed.path.removeprefix("/")
+        if parsed.scheme != "s3" or not parsed.netloc or parsed.username or parsed.password \
+                or parsed.query or parsed.fragment or not key \
+                or any(part in {"", ".", ".."} for part in key.split("/")):
+            raise ValueError("Map paths must be s3://bucket/key object paths without credentials or queries.")
+        streamed = key.endswith("/manifest.json")
+        if not streamed and not key.lower().endswith((".cog", ".tif", ".tiff")):
+            raise ValueError("Map paths must reference COG/TIFF files or scenario manifest.json files.")
+        sources.append((parsed.netloc, key))
+        files.append((path, ("scenario" if streamed else "file", len(sources) - 1)))
     if not files:
-        raise ValueError("This job has no retained COG/TIFF or streamed scenario outputs.")
+        raise ValueError("Provide at least one retained COG/TIFF or scenario manifest path.")
     selector = Dropdown(options=files, description="Raster:", layout=Layout(width="95%"))
     status = Label()
     reload_button = Button(description="Reload tiles", tooltip="Retry after a read error or renewed login")
@@ -107,15 +120,11 @@ def job_map(
 
     @lru_cache(maxsize=128)
     def tile(source: tuple[str, int], z: int, x: int, y: int) -> str:
-        kind, index = source
-        if kind == "scenario":
-            response = scenario_tile_operation.sync_detailed(
-                client=client, job_id=job_id, scenario_index=index, z=z, x=x, y=y,
-            )
-        else:
-            response = tile_operation.sync_detailed(
-                client=client, job_id=job_id, file_index=index, z=z, x=x, y=y,
-            )
+        _kind, index = source
+        bucket, key = sources[index]
+        response = tile_operation.sync_detailed(
+            client=client, bucket=bucket, key=key, z=z, x=x, y=y,
+        )
         if response.status_code != 200:
             raise RuntimeError(f"Raster tile request failed: HTTP {response.status_code}.")
         if not response.content.startswith(b"\x89PNG\r\n\x1a\n"):
@@ -153,14 +162,8 @@ def job_map(
         map_widget.layers = base_layers
         try:
             kind, index = selector.value
-            if kind == "scenario":
-                response = scenario_info_operation.sync_detailed(
-                    client=client, job_id=job_id, scenario_index=index,
-                )
-            else:
-                response = info_operation.sync_detailed(
-                    client=client, job_id=job_id, file_index=index,
-                )
+            bucket, key = sources[index]
+            response = info_operation.sync_detailed(client=client, bucket=bucket, key=key)
             if response.status_code != 200 or not isinstance(response.parsed, RasterInfo):
                 raise RuntimeError(f"Raster metadata request failed: HTTP {response.status_code}.")
             metadata = response.parsed

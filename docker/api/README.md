@@ -65,6 +65,22 @@ exist and the submitting user must have write access. Uploaded files are
 reported in the job's file manifest. Existing keys cause failure unless
 `overwrite` is enabled.
 
+Both legacy and streaming jobs also save the validated input scenario array as
+`<prefix>/scenarios.json` (`application/json`), preserving scenario IDs, reaches,
+and streamflows in the same format accepted as input. It is included in the
+result's `files` list and retained alongside the S3 outputs after job metadata
+expires. The same overwrite policy applies to this key: use a separate prefix
+for independent runs, or enable `overwrite` to replace it. Local-only jobs still
+remove all files during cleanup.
+
+Both modes also retain `<prefix>/README.md` (`text/markdown`), listed in `files`.
+It describes the HAND-FIM outputs and input units, records the job ID, UTC
+worker start time, execution mode, effective process limit, overwrite setting,
+scenario/reach counts, and output paths. Streaming runs also record the prepared
+hydrofabric location and processing tile size. It includes rerun and path-based
+map examples without credentials. Exact software and immutable dataset versions
+are not captured. The README follows the same overwrite policy as other files.
+
 HydroShare S3 output requires OAuth authentication. For each such job, the API
 requests temporary credentials and stores them in Redis; neither provider
 tokens nor S3 credentials are passed in Celery arguments or returned to the
@@ -78,7 +94,8 @@ S3 credentials to the computation through its environment, never its command
 line. Tiles go directly to `<prefix>/<ScenarioID>/<huc>/<row>_<col>.cog`; the
 `<prefix>/<ScenarioID>/manifest.json` that lists them is published only after
 every scenario succeeds, and the job result reports it in
-`scenario_manifests` (with `files` empty). These stable tile paths make
+`scenario_manifests` (`files` contains `scenarios.json` and `README.md`, not the raster
+tiles). These stable tile paths make
 overwrites non-atomic: readers can see mixed old/new tiles during a replacement,
 and a failed run can leave partially overwritten or unreferenced tiles.
 Failure cleanup retains tiles rather than risking deletion of shared output.
@@ -100,7 +117,20 @@ jobs cannot be interrupted. Job metadata and ownership expire according to
 
 ## Raster viewing
 
-The cloud notebook displays retained rasters through authenticated endpoints:
+The cloud notebook displays retained outputs by storage path:
+
+- `GET /outputs/info?bucket=resource&key=...` returns WGS84 bounds/zoom levels.
+- `GET /outputs/tiles/{z}/{x}/{y}.png?bucket=resource&key=...` renders a tile.
+
+Keys reference COG/TIFF objects or a streaming scenario's `manifest.json`.
+These routes require configured authentication and use the current session's
+HydroShare S3 credentials and permissions, not job ownership or result metadata.
+Credentials are cached separately from jobs and renewed on expiry; no job
+lookup is performed. Scenario metadata is read from the retained manifest,
+and tile keys must stay within its scenario directory. Access continues after
+the 24-hour job TTL while objects exist and the user has read permission.
+
+The original job-scoped endpoints remain available:
 
 - `GET /jobs/{job_id}/rasters/{file_index}/info` returns WGS84 bounds/zoom levels.
 - `GET /jobs/{job_id}/rasters/{file_index}/tiles/{z}/{x}/{y}.png` returns a
@@ -124,8 +154,8 @@ credentials are renewed using the owner's current HydroShare session.
 
 Rebuild/redeploy the API with the updated requirements. No extra public tile
 service or S3 CORS configuration is required. Local metadata-only jobs cannot
-be mapped after cleanup. Job metadata/ownership TTL still limits API access to
-retained S3 rasters. See [the notebook guide](../../notebooks/README.md).
+be mapped after cleanup. Job metadata/ownership TTL limits only the original
+job-scoped routes, not path-based reads. See [the notebook guide](../../notebooks/README.md).
 The slim API image installs the native `libexpat1` runtime needed by rasterio
 and checks raster imports during the build. Python requirements alone do not
 provide this system library. The HAND-FIM worker base already supplies it

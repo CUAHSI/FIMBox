@@ -92,11 +92,16 @@ token private.
 
 ## Notebook raster maps
 
-Install the optional `fimbox[map]` dependency to use `fimbox_map.job_map` with
-an existing connected SDK client, successful job ID, and typed output result.
+Install the optional `fimbox[map]` dependency to use `fimbox_map.output_map` with
+an existing connected SDK client and a list of `s3://bucket/key` paths to
+scenario `manifest.json` files or COG/TIFF outputs. No job ID or result is needed,
+so retained outputs remain viewable after the 24-hour job metadata expiry.
+`job_map(client, job_id, result)` remains a compatibility wrapper that extracts
+paths from a saved result and does not look up the job.
 See [the notebook guide](../notebooks/README.md). The helper fetches raster
 metadata and visible PNG tiles using generated operations; session tokens stay
-in the kernel. The API must include the matching raster endpoints.
+in the kernel. The API must include the matching `/outputs` endpoints, which
+authorize reads using the current session's HydroShare S3 permissions.
 The **Auto-zoom** checkbox is enabled by default. Disable it to preserve the
 current center and zoom when selecting outputs or reloading tiles. Streaming
 tiles still require the API's minimum display zoom; below it, the map shows

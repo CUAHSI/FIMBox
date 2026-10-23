@@ -108,6 +108,18 @@ class StreamingWorkerTests(unittest.TestCase):
         return run
 
     def test_streams_with_credentials_only_in_environment_and_publishes_manifest(self):
+        uploaded = {}
+
+        def upload(path, bucket, key, **kwargs):
+            if key.endswith("/README.md"):
+                self.assertEqual(kwargs["ExtraArgs"], {"ContentType": "text/markdown"})
+                return
+            uploaded["body"] = Path(path).read_bytes()
+            self.assertEqual(bucket, "fim-output")
+            self.assertEqual(key, "data/output/scenarios.json")
+            self.assertEqual(kwargs["ExtraArgs"], {"ContentType": "application/json"})
+
+        self.client.upload_file.side_effect = upload
         with patch.object(tasks.subprocess, "Popen", side_effect=self.spawn()):
             result = tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION, execution_mode="streaming")
         self.assertEqual(self.command[2], "stream-scenario")
@@ -121,10 +133,127 @@ class StreamingWorkerTests(unittest.TestCase):
         self.client.put_object.assert_called_once()
         self.assertEqual(self.client.put_object.call_args.kwargs["Key"], "data/output/s1/manifest.json")
         self.assertEqual(result["execution_mode"], "streaming")
-        self.assertEqual(result["files"], [])
+        self.assertEqual(self.client.upload_file.call_count, 2)
+        self.assertEqual(json.loads(uploaded["body"]), PAYLOAD)
+        self.assertIn({
+            "path": "scenarios.json", "key": "data/output/scenarios.json",
+            "size_bytes": len(uploaded["body"]),
+        }, result["files"])
+        self.assertEqual({file["path"] for file in result["files"]}, {"scenarios.json", "README.md"})
         self.assertEqual(result["scenario_manifests"][0]["key"], "data/output/s1/manifest.json")
         self.assertEqual(result["scenario_manifests"][0]["tile_count"], 1)
         self.client.delete_objects.assert_not_called()
+
+    def test_existing_scenarios_json_is_rejected_before_computing(self):
+        def head(**kwargs):
+            if kwargs["Key"].endswith("/scenarios.json"):
+                return {}
+            raise missing("HeadObject")
+
+        self.client.head_object.side_effect = head
+        with patch.object(tasks.subprocess, "Popen") as run:
+            with self.assertRaisesRegex(RuntimeError, "scenarios.json.*already exists"):
+                tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION, execution_mode="streaming")
+        run.assert_not_called()
+        self.client.upload_file.assert_not_called()
+
+    def test_both_modes_save_all_input_scenarios_at_bucket_root_without_a_prefix(self):
+        payload = [PAYLOAD[0], {**PAYLOAD[0], "ScenarioID": "s2"}]
+        for mode in ("legacy", "streaming"):
+            with self.subTest(mode=mode):
+                uploaded = {}
+
+                def compute(command, **kwargs):
+                    output = self.root / "output" / "scenarios" / self.job_id
+                    for scenario in payload:
+                        sid = scenario["ScenarioID"]
+                        if mode == "streaming":
+                            document = manifest_document(sid, [f"{sid}/03020201/0_0.cog"])
+                            (output / f"{sid}.manifest.json").write_text(json.dumps(document))
+                        else:
+                            (output / f"{sid}.cog").write_bytes(b"test-cog")
+                    return Mock(stdout=io.StringIO(), wait=Mock(return_value=0))
+
+                def upload(path, bucket, key, **kwargs):
+                    if key == "scenarios.json":
+                        uploaded["body"] = Path(path).read_bytes()
+                    elif key == "README.md":
+                        uploaded["readme"] = Path(path).read_bytes()
+                        self.assertEqual(kwargs["ExtraArgs"], {"ContentType": "text/markdown"})
+
+                self.client.upload_file.side_effect = upload
+                with patch.object(tasks.subprocess, "Popen", side_effect=compute), patch.object(
+                    tasks.settings, "hand_fim_max_procs", 3,
+                ):
+                    result = tasks.hand_fim.run(
+                        self.job_id, payload, output_bucket="fim-output", execution_mode=mode,
+                    )
+                self.assertEqual(json.loads(uploaded["body"]), payload)
+                self.assertIn({
+                    "path": "scenarios.json", "key": "scenarios.json",
+                    "size_bytes": len(uploaded["body"]),
+                }, result["files"])
+                readme = uploaded["readme"].decode()
+                self.assertIn({
+                    "path": "README.md", "key": "README.md", "size_bytes": len(uploaded["readme"]),
+                }, result["files"])
+                for text in (
+                    "# HAND-FIM scenario outputs", "scenarios.json", "m^3/s",
+                    f"`{self.job_id}`", f"Execution mode: `{mode}`", "Worker run started (UTC)",
+                    "Scenario count: `2`", "Reach entries: `2`",
+                    f"Effective maximum processes: `{1 if mode == 'streaming' else 3}`",
+                    f"--execution-mode {mode}", "NEW_OUTPUT_PREFIX", "output_map(api_client, paths)",
+                ):
+                    self.assertIn(text, readme)
+                for sid in ("s1", "s2"):
+                    suffix = f"{sid}/manifest.json" if mode == "streaming" else f"{sid}.cog"
+                    self.assertIn(f"s3://fim-output/{suffix}", readme)
+                if mode == "streaming":
+                    self.assertIn("s3://hydrofabric/hand/v1", readme)
+                    self.assertIn("Processing tile size:", readme)
+                for secret in SECRETS.values():
+                    self.assertNotIn(secret, readme)
+
+    def test_existing_readme_is_rejected_before_computing(self):
+        def head(**kwargs):
+            if kwargs["Key"].endswith("/README.md"):
+                return {}
+            raise missing("HeadObject")
+
+        self.client.head_object.side_effect = head
+        with patch.object(tasks.subprocess, "Popen") as run:
+            with self.assertRaisesRegex(RuntimeError, "README.md.*already exists"):
+                tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION, execution_mode="streaming")
+        run.assert_not_called()
+        self.client.upload_file.assert_not_called()
+
+    def test_readme_upload_failure_rolls_back_published_manifest(self):
+        def upload(path, bucket, key, **kwargs):
+            if key.endswith("/README.md"):
+                raise ClientError({"Error": {"Code": "AccessDenied"}}, "PutObject")
+
+        self.client.upload_file.side_effect = upload
+        self.client.get_object.side_effect = lambda **kwargs: {
+            "Body": io.BytesIO(self.client.put_object.call_args.kwargs["Body"]),
+        }
+        with patch.object(tasks.subprocess, "Popen", side_effect=self.spawn()):
+            with self.assertRaises(ClientError):
+                tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION, execution_mode="streaming")
+        self.client.delete_object.assert_called_once_with(Bucket="fim-output", Key="data/output/s1/manifest.json")
+        self.assertFalse((self.root / "output" / "scenarios" / self.job_id).exists())
+
+    def test_scenarios_upload_failure_fails_job_and_rolls_back_published_manifest(self):
+        self.client.upload_file.side_effect = ClientError({"Error": {"Code": "AccessDenied"}}, "PutObject")
+
+        def current_manifest(**kwargs):
+            return {"Body": io.BytesIO(self.client.put_object.call_args.kwargs["Body"])}
+
+        self.client.get_object.side_effect = current_manifest
+        with patch.object(tasks.subprocess, "Popen", side_effect=self.spawn()):
+            with self.assertRaises(ClientError):
+                tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION, execution_mode="streaming")
+        self.client.delete_object.assert_called_once_with(Bucket="fim-output", Key="data/output/s1/manifest.json")
+        self.assertFalse((self.root / "output" / "scenarios" / self.job_id).exists())
 
     def test_tile_outside_scenario_prefix_fails_without_deleting_shared_tiles(self):
         with patch.object(tasks.subprocess, "Popen", side_effect=self.spawn("data/output/other/x.cog")):

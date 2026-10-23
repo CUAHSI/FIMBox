@@ -87,6 +87,29 @@ def scenario_info(manifest: ScenarioManifest, max_tiles: int) -> RasterInfo:
     return RasterInfo(bounds=manifest.bounds, minzoom=minzoom, maxzoom=max(minzoom, min(22, native)))
 
 
+def stored_scenario_manifest(client: Any, bucket: str, key: str) -> ScenarioManifest:
+    """Recover scenario metadata from its retained manifest instead of the job result."""
+    response = client.get_object(Bucket=bucket, Key=key)
+    with response["Body"] as body:
+        content = body.read(MAX_MANIFEST_BYTES + 1)
+    if len(content) > MAX_MANIFEST_BYTES:
+        raise RasterReadError("Scenario tile manifest is too large.")
+    try:
+        document = json.loads(content)
+        if document["format"] != "fimbox-scenario-tiles" or document["version"] != 1:
+            raise ValueError("Unsupported scenario manifest")
+        manifest = ScenarioManifest(
+            ScenarioID=document["scenario_id"], key=key, tile_count=len(document["tiles"]),
+            bounds=document["bounds_wgs84"], tile_size=document["tile_size"],
+            resolution=min(float(huc["resolution"]) for huc in document["hucs"].values()),
+        )
+        if not math.isfinite(manifest.resolution) or not all(math.isfinite(value) for value in manifest.bounds):
+            raise ValueError("Nonfinite scenario metadata")
+        return manifest
+    except (ValueError, KeyError, TypeError, AttributeError):
+        raise RasterReadError("Scenario tile manifest is invalid.") from None
+
+
 def load_scenario_tiles(client: Any, bucket: str, manifest: ScenarioManifest) -> list[tuple[str, tuple]]:
     """
     Loads a published manifest's tile keys and WGS84 bounds, revalidating cached copies by ETag.

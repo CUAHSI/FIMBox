@@ -41,10 +41,12 @@ from .storage import (
     RasterSource,
     raster_source,
     session_s3_client,
+    output_s3_client,
+    output_raster_source,
 )
 from .rasters import (
     RasterReadError, TooManyTilesError, load_scenario_tiles, raster_info, raster_tile,
-    scenario_info, scenario_tile,
+    scenario_info, scenario_tile, stored_scenario_manifest,
 )
 from .job_logs import read_job_logs
 from .tasks import hand_fim
@@ -336,6 +338,65 @@ def get_scenario_tile(
         )
     except TooManyTilesError as error:
         raise HTTPException(status_code=400, detail=str(error)) from None
+    return Response(content=content, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+OutputBucket = Annotated[str, Query(min_length=1, max_length=255, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")]
+OutputKey = Annotated[str, Query(min_length=1, max_length=1024)]
+
+
+def __require_output_path(key: str) -> bool:
+    if not settings.authentication_enabled:
+        raise HTTPException(status_code=409, detail="HydroShare S3 reads require configured authentication")
+    if len(key.encode("utf-8")) > 1024 or any(part in {"", ".", ".."} for part in key.split("/")):
+        raise HTTPException(status_code=400, detail="Invalid output object key")
+    if key.endswith("/manifest.json"):
+        return True
+    if not key.lower().endswith((".cog", ".tif", ".tiff")):
+        raise HTTPException(status_code=400, detail="Output path must reference a raster or scenario manifest.json")
+    return False
+
+
+@app.get("/outputs/info", response_model=RasterInfo)
+def get_output_info(
+    bucket: OutputBucket, key: OutputKey, session: AuthenticatedSession, response: Response,
+) -> RasterInfo:
+    """Read a retained S3 raster or scenario manifest using the current user's storage permissions."""
+    streamed = __require_output_path(key)
+    response.headers["Cache-Control"] = "no-store"
+    if streamed:
+        manifest = stored_scenario_manifest(output_s3_client(session), bucket, key)
+        return scenario_info(manifest, settings.stream_display_max_tiles)
+    return raster_info(output_raster_source(session, bucket, key))
+
+
+@app.get(
+    "/outputs/tiles/{z}/{x}/{y}.png", response_class=Response,
+    responses={200: {"content": {"image/png": {"schema": {"type": "string", "format": "binary"}}}}},
+)
+def get_output_tile(
+    bucket: OutputBucket, key: OutputKey,
+    z: Annotated[int, Path(ge=0, le=22)],
+    x: Annotated[int, Path(ge=0)], y: Annotated[int, Path(ge=0)],
+    session: AuthenticatedSession,
+) -> Response:
+    """Render retained output paths independently of job ownership/result TTLs."""
+    if x >= 2 ** z or y >= 2 ** z:
+        raise HTTPException(status_code=400, detail="Tile coordinates are outside this zoom level")
+    streamed = __require_output_path(key)
+    if streamed:
+        client = output_s3_client(session)
+        manifest = stored_scenario_manifest(client, bucket, key)
+        tiles = load_scenario_tiles(client, bucket, manifest)
+        try:
+            content = scenario_tile(
+                tiles, z, x, y, settings.stream_display_max_tiles,
+                lambda tile_key: output_raster_source(session, bucket, tile_key),
+            )
+        except TooManyTilesError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from None
+    else:
+        content = raster_tile(output_raster_source(session, bucket, key), z, x, y)
     return Response(content=content, media_type="image/png", headers={"Cache-Control": "no-store"})
 
 

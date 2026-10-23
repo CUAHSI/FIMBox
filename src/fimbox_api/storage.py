@@ -1,6 +1,7 @@
 import json
 import logging
 import math
+from hashlib import sha256
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
@@ -37,6 +38,10 @@ class HydroShareS3Credentials(BaseModel):
 
 
 def create_job_credentials(job_id: UUID, session: UserSession) -> None:
+    __store_credentials(JOB_CREDENTIALS_PREFIX + str(job_id), session)
+
+
+def __store_credentials(cache_key: str, session: UserSession) -> None:
     try:
         with httpx.Client(timeout=10, follow_redirects=False) as client:
             response = client.post(
@@ -61,7 +66,7 @@ def create_job_credentials(job_id: UUID, session: UserSession) -> None:
     if ttl < 1:
         raise StorageCredentialsError("HydroShare S3 credentials expired before storage")
     get_redis_client().set(
-        JOB_CREDENTIALS_PREFIX + str(job_id),
+        cache_key,
         json.dumps({
             "access_key": credentials.access_key.get_secret_value(),
             "secret_key": credentials.secret_key.get_secret_value(),
@@ -76,7 +81,11 @@ def delete_job_credentials(job_id: UUID) -> None:
 
 
 def __job_credentials(job_id: UUID) -> HydroShareS3Credentials:
-    raw = get_redis_client().get(JOB_CREDENTIALS_PREFIX + str(job_id))
+    return __cached_credentials(JOB_CREDENTIALS_PREFIX + str(job_id))
+
+
+def __cached_credentials(cache_key: str) -> HydroShareS3Credentials:
+    raw = get_redis_client().get(cache_key)
     if raw is None:
         raise StorageCredentialsError("Job S3 credentials are missing or expired")
     try:
@@ -128,6 +137,24 @@ def session_s3_client(job_id: UUID, session: UserSession):
     return __client(__fresh_credentials(job_id, session))
 
 
+def __session_credentials(session: UserSession) -> HydroShareS3Credentials:
+    cache_key = "storage:session_credentials:" + sha256(
+        session.access_token.get_secret_value().encode()
+    ).hexdigest()
+    if get_redis_client().get(cache_key) is None:
+        __store_credentials(cache_key, session)
+    credentials = __cached_credentials(cache_key)
+    if (credentials.expiry - datetime.now(timezone.utc)).total_seconds() < 120:
+        __store_credentials(cache_key, session)
+        credentials = __cached_credentials(cache_key)
+    return credentials
+
+
+def output_s3_client(session: UserSession):
+    """Read retained outputs using the current user's HydroShare permissions, not job state."""
+    return __client(__session_credentials(session))
+
+
 def __client(credentials: HydroShareS3Credentials):
     return boto3.client(
         "s3",
@@ -152,7 +179,14 @@ class RasterSource:
 
 def raster_source(job_id: UUID, session: UserSession, bucket: str, key: str) -> RasterSource:
     """Configure signed S3 range reads without exposing credentials to clients."""
-    credentials = __fresh_credentials(job_id, session)
+    return __raster_source(__fresh_credentials(job_id, session), bucket, key)
+
+
+def output_raster_source(session: UserSession, bucket: str, key: str) -> RasterSource:
+    return __raster_source(__session_credentials(session), bucket, key)
+
+
+def __raster_source(credentials: HydroShareS3Credentials, bucket: str, key: str) -> RasterSource:
     endpoint = urlsplit(settings.s3_endpoint_url)
     if endpoint.scheme not in {"http", "https"} or not endpoint.netloc or endpoint.path.strip("/"):
         raise StorageCredentialsError("Raster S3 endpoint must be an HTTP(S) origin")

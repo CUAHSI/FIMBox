@@ -104,7 +104,14 @@ actual FIM computation using NOAA/OWP's `inundation-mapping` tooling and the
 - **`tests/test_cloud_notebook.py`** — Cell syntax/editable-import checks and
   mocked SDK/auth/submission/monitoring workflow.
 - **`src/fimbox_map.py`** — Packaged optional `fimbox[map]` ipyleaflet helper.
-  Uses generated raster-info/tile SDK operations in the notebook kernel;
+  `output_map(client, paths)` uses generated `/outputs` info/tile SDK operations
+  for S3 COG/TIFF or scenario manifest paths, without job IDs/results.
+  The API uses current HydroShare session credentials cached independently of
+  job credentials and authorizes via S3 permissions; retained manifest metadata
+  allows maps to reopen after the 24-hour job TTL. Existing job-scoped endpoints
+  retain ownership checks. `job_map` is a saved-result compatibility wrapper.
+  The cloud notebook builds editable manifest paths from destination/scenario names.
+  All SDK requests run in the notebook kernel;
   credentials never enter browser tile URLs. Raster selector prefers COGs,
   viewport requests cap at 64 tiles (coarsening zoom for large views), and a
   bounded 128-tile in-memory cache avoids repeat reads. Displays binary
@@ -193,6 +200,15 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
   under `<prefix>/`; conflicting keys fail before uploads unless overwrite is
   enabled. It streams subprocess output to expiring Redis job logs and returns a
   file manifest plus scenario IDs.
+  Both legacy and streaming modes upload the validated input array as
+  `<prefix>/scenarios.json` with application/json content type and a `files`
+  entry. It follows the output overwrite policy; streaming checks for conflicts
+  before computation and rolls back published manifests if that upload fails.
+  A generated `README.md` accompanies the JSON in both modes and is listed in
+  `files`, with output interpretation, UTC worker start time/job ID, effective
+  process limit, mode/overwrite, counts, streaming source/tile size when relevant,
+  and credential-free CLI rerun/map examples. README conflicts and upload errors
+  use the same failure/overwrite behavior as the scenario JSON.
   Uploads exclude watershed caches and other jobs. A finally block removes the
   job input directory (including TMPDIR), flow files, referenced flood_<HUC>
   download/intermediate trees, and final job output directory on success/failure.

@@ -29,6 +29,33 @@ class CloudNotebookTests(unittest.TestCase):
                 source = "".join(line for line in cell["source"] if not line.startswith("%"))
                 compile(source, cell["id"], "exec")
 
+    def test_map_paths_match_execution_mode_without_a_job_result(self):
+        from types import SimpleNamespace
+
+        from fimbox_sdk.models.hand_fim_job_request_execution_mode import HandFimJobRequestExecutionMode
+
+        for mode, suffix in (
+            (HandFimJobRequestExecutionMode.LEGACY, ".cog"),
+            (HandFimJobRequestExecutionMode.STREAMING, "/manifest.json"),
+        ):
+            for prefix in ("demo/", ""):
+                with self.subTest(mode=mode, prefix=prefix):
+                    helper = Mock()
+                    namespace = {
+                        "EXECUTION_MODE": mode,
+                        "HandFimJobRequestExecutionMode": HandFimJobRequestExecutionMode,
+                        "OUTPUT_BUCKET": "bucket", "OUTPUT_PREFIX": prefix,
+                        "scenarios": [SimpleNamespace(scenario_id="single-reach-scenario")],
+                        "api_client": Mock(), "display": Mock(),
+                    }
+                    with patch("importlib.reload", return_value=helper):
+                        exec(self.sources["map"], namespace)
+                    root = "s3://bucket/demo" if prefix else "s3://bucket"
+                    helper.output_map.assert_called_once_with(
+                        namespace["api_client"], [f"{root}/single-reach-scenario{suffix}"],
+                    )
+                    namespace["display"].assert_called_once_with(helper.output_map.return_value)
+
     def test_scenarios_json_loads_typed_sample_without_submitting(self):
         from fimbox_sdk.models import Scenario
 

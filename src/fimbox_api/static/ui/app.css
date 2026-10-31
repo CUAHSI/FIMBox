@@ -33,12 +33,18 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .preview { margin-top: 12px; border: 1px solid var(--border); border-radius: 4px; }
 .preview h4 { margin: 0; padding: 6px 10px; background: var(--bg); border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; }
 .preview pre, pre.logs { margin: 0; padding: 10px; max-height: 480px; overflow: auto; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+.parquet { padding: 0 10px 10px; }
+.parquet .table-scroll { max-height: 480px; overflow: auto; }
+.parquet table { font-size: 12px; }
+.parquet th { position: sticky; top: 0; background: var(--bg); }
+.parquet td { white-space: nowrap; }
 pre.logs { background: #0d1117; color: #e6edf3; border-radius: 4px; min-height: 80px; }
 fieldset { border: 1px solid var(--border); border-radius: 4px; margin: 8px 0; }
 fieldset legend { display: flex; gap: 6px; align-items: center; }
 fieldset input.num { width: 120px; }
 .split { display: grid; grid-template-columns: 280px 1fr; gap: 16px; }
 aside form { display: flex; flex-direction: column; gap: 6px; margin-top: 16px; }
+aside fieldset { display: flex; flex-direction: column; gap: 6px; margin: 0; }
 .list { list-style: none; padding: 0; margin: 0; max-height: 360px; overflow: auto; }
 .list li { padding: 4px 6px; border-radius: 4px; cursor: pointer; display: flex; justify-content: space-between; gap: 6px; font-family: ui-monospace, monospace; font-size: 12px; }
 .list li:hover, .list li.active { background: #ddf4ff; }

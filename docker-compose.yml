@@ -36,7 +36,7 @@ services:
       S3_REGION: ${S3_REGION:-us-east-1}
       S3_ADDRESSING_STYLE: ${S3_ADDRESSING_STYLE:-path}
       STREAM_INPUT_BUCKET: ${STREAM_INPUT_BUCKET:-resource}
-      STREAM_INPUT_PREFIX: ${STREAM_INPUT_PREFIX:-1edaa4d7b8e54fddb8e2ae4601dc78a9/data/contents}
+      STREAM_INPUT_PREFIX: ${STREAM_INPUT_PREFIX:-1edaa4d7b8e54fddb8e2ae4601dc78a9/data/contents/parquet}
       STREAM_INPUT_UNSIGNED: ${STREAM_INPUT_UNSIGNED:-false}
     ports:
       - "127.0.0.1:${FIMBOX_API_PORT:-8000}:8000"
@@ -59,7 +59,7 @@ services:
       S3_REGION: ${S3_REGION:-us-east-1}
       S3_ADDRESSING_STYLE: ${S3_ADDRESSING_STYLE:-path}
       STREAM_INPUT_BUCKET: ${STREAM_INPUT_BUCKET:-resource}
-      STREAM_INPUT_PREFIX: ${STREAM_INPUT_PREFIX:-1edaa4d7b8e54fddb8e2ae4601dc78a9/data/contents}
+      STREAM_INPUT_PREFIX: ${STREAM_INPUT_PREFIX:-1edaa4d7b8e54fddb8e2ae4601dc78a9/data/contents/parquet}
       STREAM_INPUT_UNSIGNED: ${STREAM_INPUT_UNSIGNED:-false}
     volumes:
       - "${FIMBOX_INPUT_DIR:-./data/input}:/home/data/inputs"

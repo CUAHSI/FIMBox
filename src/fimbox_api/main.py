@@ -23,6 +23,7 @@ from .auth_routes import router as auth_router
 from .celery_app import celery_app
 from .config import settings
 from .models import (
+    CompareJobRequest,
     HandFimJobOptions,
     HandFimJobRequest,
     HandFimParameters,
@@ -51,7 +52,7 @@ from .rasters import (
     scenario_info, scenario_tile, stored_scenario_manifest,
 )
 from .job_logs import read_job_logs
-from .tasks import hand_fim, hand_fim_parity
+from .tasks import hand_fim, hand_fim_compare, hand_fim_parity
 from .ui import STATIC_DIR as UI_STATIC_DIR, router as ui_router
 
 logger = logging.getLogger(__name__)
@@ -223,6 +224,37 @@ def submit_parity(body: ParityJobRequest, session: AuthenticatedSession) -> JobS
         untrack_user_job(session.user_id, job_id)
         raise
     logger.info("Enqueued HAND-FIM parity job %s", job_id)
+    return JobSubmitted(job_id=job_id, status="queued", status_url=f"/jobs/{job_id}")
+
+
+@app.post("/jobs/compare", status_code=202, response_model=JobSubmitted)
+def submit_compare(body: CompareJobRequest, session: AuthenticatedSession) -> JobSubmitted:
+    """Diff the scenarios shared by two retained results without rerunning HAND-FIM.
+
+    Each result may be legacy (<ScenarioID>.cog) or streaming (<ScenarioID>/manifest.json).
+    The job result lists per-scenario parity counts (legacy_* fields describe the base,
+    streaming_* the candidate); diff GeoTIFFs (1=base-only, 2=candidate-only flooding)
+    and parity/report.json go under output_prefix.
+    """
+    if not settings.authentication_enabled:
+        raise HTTPException(status_code=409, detail="HydroShare S3 output requires configured authentication")
+    job_id = str(uuid4())
+    create_job_credentials(UUID(job_id), session)
+    try:
+        track_user_job(session.user_id, job_id)
+        hand_fim_compare.apply_async(
+            args=[
+                job_id, body.base_bucket, body.base_prefix, body.candidate_bucket,
+                body.candidate_prefix, body.output_bucket, body.output_prefix, body.overwrite,
+            ],
+            task_id=job_id,
+            retry=False,
+        )
+    except (KombuError, RedisError, OSError):
+        delete_job_credentials(UUID(job_id))
+        untrack_user_job(session.user_id, job_id)
+        raise
+    logger.info("Enqueued HAND-FIM result comparison job %s", job_id)
     return JobSubmitted(job_id=job_id, status="queued", status_url=f"/jobs/{job_id}")
 
 

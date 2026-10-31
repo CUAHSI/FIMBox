@@ -76,6 +76,27 @@
             <label>Prefix <input name="prefix" placeholder="&lt;resource id&gt;/data/contents/run-1"></label>
             <button type="submit">Open</button>
           </form>
+          <form id="compare-results">
+            <h3>Compare two results</h3>
+            <p class="hint">Diff the flood extents of the scenarios both results share, without rerunning HAND-FIM.</p>
+            <fieldset>
+              <legend>Base</legend>
+              <label>Bucket <input name="base_bucket" value="resource" required></label>
+              <label>Prefix <input name="base_prefix" placeholder="&lt;resource id&gt;/data/contents/run-1"></label>
+            </fieldset>
+            <fieldset>
+              <legend>Candidate</legend>
+              <label>Bucket <input name="candidate_bucket" value="resource" required></label>
+              <label>Prefix <input name="candidate_prefix" placeholder="&lt;resource id&gt;/data/contents/run-2"></label>
+            </fieldset>
+            <fieldset>
+              <legend>Write comparison to</legend>
+              <label>Bucket <input name="output_bucket" value="resource" required></label>
+              <label>Prefix <input name="output_prefix" placeholder="&lt;resource id&gt;/data/contents/compare-1" required></label>
+            </fieldset>
+            <label class="check"><input name="overwrite" type="checkbox"> Overwrite existing comparison</label>
+            <button type="submit">Compare</button>
+          </form>
         </aside>
         <div id="result-view">
           <p class="hint">Select a job or open a retained output location.</p>

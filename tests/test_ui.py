@@ -150,6 +150,67 @@ class UiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.s3.get_object.assert_not_called()
 
+    def serve_parquet(self, content):
+        def get_object(Bucket, Key, Range):
+            start, end = map(int, Range.removeprefix("bytes=").split("-"))
+            return {"Body": io.BytesIO(content[start:end + 1])}
+
+        self.s3.head_object.return_value = {"ContentLength": len(content)}
+        self.s3.get_object.side_effect = get_object
+
+    def parquet_bytes(self, rows=250):
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        table = pa.table({
+            "feature_id": list(range(rows)),
+            "name": [None if i == 1 else "x" * (300 if i == 2 else 3) for i in range(rows)],
+            "blob": [b"\x00\x01"] * rows,
+            "tags": [[i, i + 1] for i in range(rows)],
+        })
+        buffer = io.BytesIO()
+        pq.write_table(table, buffer, row_group_size=100)
+        return buffer.getvalue()
+
+    def test_parquet_preview_returns_schema_and_first_rows(self):
+        self.serve_parquet(self.parquet_bytes())
+        response = self.client.get("/ui/objects/parquet", params={"bucket": "fim", "key": "in/reach.parquet", "limit": 3})
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["num_rows"], 250)
+        self.assertEqual(body["num_row_groups"], 3)
+        self.assertTrue(body["truncated"])
+        self.assertEqual(body["columns"], [
+            {"name": "feature_id", "type": "int64"},
+            {"name": "name", "type": "string"},
+            {"name": "blob", "type": "binary"},
+            {"name": "tags", "type": "list<element: int64>"},
+        ])
+        self.assertEqual(body["rows"][0], ["0", "xxx", "<2 bytes>", "[0, 1]"])
+        self.assertIsNone(body["rows"][1][1])
+        self.assertEqual(len(body["rows"][2][1]), ui.PARQUET_MAX_CELL_CHARS)
+        self.assertEqual(len(body["rows"]), 3)
+        for call in self.s3.get_object.call_args_list:
+            self.assertIn("Range", call.kwargs)
+
+    def test_parquet_preview_validates_input(self):
+        response = self.client.get("/ui/objects/parquet", params={"bucket": "fim", "key": "in/a.json"})
+        self.assertEqual(response.status_code, 400)
+        response = self.client.get("/ui/objects/parquet", params={"bucket": "fim", "key": "in/a.parquet", "limit": 0})
+        self.assertEqual(response.status_code, 422)
+        self.serve_parquet(b"not a parquet file at all")
+        response = self.client.get("/ui/objects/parquet", params={"bucket": "fim", "key": "in/a.parquet"})
+        self.assertEqual(response.status_code, 422)
+
+    def test_parquet_preview_limits_bytes_read_and_maps_storage_errors(self):
+        self.serve_parquet(self.parquet_bytes())
+        with patch.object(ui, "PARQUET_MAX_READ_BYTES", 16):
+            response = self.client.get("/ui/objects/parquet", params={"bucket": "fim", "key": "in/a.parquet"})
+        self.assertEqual(response.status_code, 413)
+        self.s3.head_object.side_effect = client_error("NoSuchKey")
+        response = self.client.get("/ui/objects/parquet", params={"bucket": "fim", "key": "in/a.parquet"})
+        self.assertEqual(response.status_code, 404)
+
     def test_storage_errors_are_mapped(self):
         for code, status in (("NoSuchKey", 404), ("AccessDenied", 403), ("SlowDown", 503)):
             self.s3.get_object.side_effect = client_error(code)

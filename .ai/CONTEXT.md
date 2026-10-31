@@ -198,6 +198,8 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
       `test-data` and sets `EXAMPLES_DIR`
     - `/ui/objects`: one-level S3 listing
     - `/ui/objects/preview`: the first 512 KiB of a text file
+    - `/ui/objects/parquet`: pyarrow schema, counts, and first rows (limit
+      1-200) through a seekable ranged-GET reader with a 64 MiB read budget
     - `/ui/objects/download`: a 5-minute presigned GET URL
   - Paths reject empty, `.`, and `..` segments. S3 errors map to 404, 403, or
     503.
@@ -213,6 +215,9 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
     - result views: README (safe markdown subset), parameters, files, and a
       Leaflet map over `/outputs/tiles` that fetches tiles with the bearer
       token
+    - a "Compare two results" form (`POST /jobs/compare`, prefilled by
+      "Compare as base/candidate" on any opened result); comparison jobs show
+      base/candidate links, a parity table with "Map diff", and diff layers
   - Tests are in `tests/test_ui.py`.
 - **`src/fimbox_api/celery_app.py`** — JSON-only Celery configuration and
   task discovery, started-state tracking, late acknowledgement, and a
@@ -242,9 +247,12 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
   `POST /jobs/parity` (ParityJobRequest: legacy bucket/prefix plus a distinct
   output destination) queues `hand_fim_parity`; it requires streaming config
   and authentication, uses STREAM_QUEUE, and releases credentials/tracking if
-  enqueueing fails.
+  enqueueing fails. `POST /jobs/compare` (CompareJobRequest: base and
+  candidate bucket/prefix plus a distinct output destination) queues
+  `hand_fim_compare` on the default queue; it needs authentication only.
 - **`src/fimbox_api/parity.py`** — `compare_scenario_outputs`: windowed
-  wet-cell diff of a legacy raster against the union of streaming tiles on
+  wet-cell diff of a legacy raster (or a list of base tiles, unioned; the
+  first defines the grid) against the union of streaming tiles on
   the legacy grid over both extents. Writes a 0/1/2 (equal/legacy-only/
   streaming-only) diff GeoTIFF and returns counts plus up to 10 sample
   coordinates. A whole-pixel offset (rounded flooded-cell centroid delta,
@@ -298,6 +306,10 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
   downloads legacy/tile COGs to a temp dir, diffs them, uploads
   `parity/<ScenarioID>.diff.tif` and `parity/report.json`, and returns the
   streaming result with `parity` entries (mismatches don't fail the job).
+  `hand_fim_compare` diffs the ScenarioIDs shared by two retained results
+  (each `<sid>/manifest.json` tiles or `<sid>.cog`) without rerunning HAND-FIM,
+  writes the same parity files, and returns `parity` (legacy_* = base,
+  streaming_* = candidate) plus `compared` locations/skipped scenarios.
   The main task revalidates input,
   substitutes safe job-specific internal scenario names, writes the scenario
   JSON, invokes the existing container `scenario` CLI in a subprocess, verifies
@@ -621,6 +633,9 @@ uploaded tile by tile.
   to `sys.path` so it still runs directly in the container.
 - **`tests/test_parity_api.py`** — Parity request validation, worker (mocked
   S3/streaming, real raster diff on synthetic COGs), and endpoint queuing.
+- **`tests/test_compare_api.py`** — Two-result comparison: request validation,
+  multi-tile base diff, worker (mocked S3, legacy/streaming either side),
+  endpoint queuing/rollback, and the diff tile colormap.
 - Not yet validated against a live HydroShare dataset or on Cloud Run.
 
 ## Known gaps / things to watch

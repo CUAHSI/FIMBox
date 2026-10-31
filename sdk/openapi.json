@@ -1082,6 +1082,51 @@
           {}
         ]
       }
+    },
+    "/jobs/compare": {
+      "post": {
+        "summary": "Submit Compare",
+        "description": "Diff the scenarios shared by two retained results without rerunning HAND-FIM.\n\nEach result may be legacy (<ScenarioID>.cog) or streaming (<ScenarioID>/manifest.json).\nThe job result lists per-scenario parity counts (legacy_* fields describe the base,\nstreaming_* the candidate); diff GeoTIFFs (1=base-only, 2=candidate-only flooding)\nand parity/report.json go under output_prefix.\nAuthentication is required only when the server has OAuth credentials configured. See GET /auth/config.",
+        "operationId": "submit_compare_jobs_compare_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompareJobRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobSubmitted"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2AuthorizationCodeBearer": []
+          },
+          {}
+        ]
+      }
     }
   },
   "components": {
@@ -1468,7 +1513,18 @@
             },
             "type": "array",
             "title": "Parity",
-            "description": "Legacy/streaming comparisons; present only for parity jobs."
+            "description": "Legacy/streaming comparisons; present only for parity and comparison jobs. For comparison jobs legacy_* fields describe the base and streaming_* the candidate."
+          },
+          "compared": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ComparedResults"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Compared result locations; present only for comparison jobs."
           },
           "local_output_dir": {
             "anyOf": [
@@ -1917,22 +1973,22 @@
             "title": "Different Cells"
           },
           "grid_shift_rows": {
-            "default": 0,
-            "description": "Streaming rows offset from legacy (positive is south); realigned before counting.",
+            "type": "integer",
             "title": "Grid Shift Rows",
-            "type": "integer"
+            "description": "Streaming rows offset from legacy (positive is south); realigned before counting.",
+            "default": 0
           },
           "grid_shift_columns": {
-            "default": 0,
-            "description": "Streaming columns offset from legacy (positive is east); realigned before counting.",
+            "type": "integer",
             "title": "Grid Shift Columns",
-            "type": "integer"
+            "description": "Streaming columns offset from legacy (positive is east); realigned before counting.",
+            "default": 0
           },
           "unaligned_different_cells": {
-            "default": 0,
-            "description": "Differing cells before grid-shift realignment.",
+            "type": "integer",
             "title": "Unaligned Different Cells",
-            "type": "integer"
+            "description": "Differing cells before grid-shift realignment.",
+            "default": 0
           },
           "missing_reaches": {
             "items": {
@@ -1968,6 +2024,110 @@
         ],
         "title": "ScenarioParity",
         "description": "Cell-level comparison of one legacy scenario COG against its streaming tiles.\n\nCell counts are measured after realigning a small whole-pixel grid shift, which\nis reported separately and does not affect ``matches``."
+      },
+      "CompareJobRequest": {
+        "properties": {
+          "output_bucket": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Bucket",
+            "default": "resource"
+          },
+          "output_prefix": {
+            "type": "string",
+            "maxLength": 900,
+            "title": "Output Prefix"
+          },
+          "base_bucket": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+            "title": "Base Bucket"
+          },
+          "base_prefix": {
+            "type": "string",
+            "maxLength": 900,
+            "title": "Base Prefix",
+            "description": "Output prefix of the base result containing scenarios.json and <ScenarioID>.cog or <ScenarioID>/manifest.json outputs."
+          },
+          "candidate_bucket": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+            "title": "Candidate Bucket"
+          },
+          "candidate_prefix": {
+            "type": "string",
+            "maxLength": 900,
+            "title": "Candidate Prefix",
+            "description": "Output prefix of the result compared against the base."
+          },
+          "overwrite": {
+            "type": "boolean",
+            "title": "Overwrite",
+            "description": "Replace existing parity objects under output_prefix; by default, conflicting keys fail the job.",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "output_prefix",
+          "base_bucket",
+          "base_prefix",
+          "candidate_bucket",
+          "candidate_prefix"
+        ],
+        "title": "CompareJobRequest",
+        "description": "Diff two retained results' scenario flood masks without rerunning HAND-FIM."
+      },
+      "ComparedResults": {
+        "properties": {
+          "base_bucket": {
+            "type": "string",
+            "title": "Base Bucket"
+          },
+          "base_prefix": {
+            "type": "string",
+            "title": "Base Prefix"
+          },
+          "candidate_bucket": {
+            "type": "string",
+            "title": "Candidate Bucket"
+          },
+          "candidate_prefix": {
+            "type": "string",
+            "title": "Candidate Prefix"
+          },
+          "skipped_scenarios": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Skipped Scenarios",
+            "description": "ScenarioIDs present in only one of the two results."
+          }
+        },
+        "type": "object",
+        "required": [
+          "base_bucket",
+          "base_prefix",
+          "candidate_bucket",
+          "candidate_prefix"
+        ],
+        "title": "ComparedResults",
+        "description": "The two retained results diffed by a comparison job."
       }
     },
     "securitySchemes": {

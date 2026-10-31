@@ -160,6 +160,26 @@ drawn after alignment on the legacy grid (padded by 2 pixels) and uses
 flooding. Both are also listed in `files`. Existing parity outputs fail the
 job before computation unless `overwrite` is enabled.
 
+### Comparing two results
+
+`POST /jobs/compare` diffs two retained results without rerunning HAND-FIM,
+for example a legacy run against a streaming run, or two runs with different
+settings. The body has `base_bucket`/`base_prefix` and
+`candidate_bucket`/`candidate_prefix` (each an earlier job's output location),
+plus `output_bucket`, `output_prefix`, and optional `overwrite`. The output
+prefix must differ from both results, and the endpoint requires
+authentication but not streaming configuration.
+
+The worker reads both `scenarios.json` files and compares the ScenarioIDs they
+share; any others are listed in the result's `compared.skipped_scenarios`, and
+the job fails if none are shared. For each result, a scenario's flood mask is
+its `<ScenarioID>/manifest.json` tiles if present, otherwise `<ScenarioID>.cog`.
+The comparison uses the same grid-shift handling and outputs as parity jobs.
+In the result's `parity` entries and the diff rasters, `legacy_*` fields and
+value 1 describe the base, and `streaming_*` fields and value 2 describe the
+candidate. `/outputs/tiles` and the job raster routes draw `*.diff.tif` files
+with red for base-only and orange for candidate-only flooding.
+
 ## Web page
 
 `GET /ui` serves a browser page with three tabs:
@@ -176,7 +196,12 @@ job before computation unless `overwrite` is enabled.
   - the `scenarios.json` parameters, with an "Edit and resubmit" button
   - a browser for the output files
   - a Leaflet map built from the authenticated `/outputs/info|tiles` routes
-  - parity reports
+  - parity reports, with each scenario's diff raster on the map
+
+  The **Compare two results** form submits `POST /jobs/compare`; "Compare as
+  base"/"Compare as candidate" on an opened result fills it in. A comparison
+  job's view links to both results and shows its input parameters from the
+  base result.
 
   Any retained output prefix can also be opened directly, even after the
   job's 24-hour metadata has expired.
@@ -191,6 +216,10 @@ the SDK:
 
 - folder listing
 - previews of the first 512 KiB of text files
+- Parquet table previews: the schema, row/row-group counts, and up to 200 rows
+  (100 on the page) from the first batch. The API reads only the footer and
+  the needed column chunks with ranged S3 GETs, stops after 64 MiB (413), and
+  shortens long cells to 200 characters
 - download links
 
 Downloads are short-lived (5 minute) presigned S3 URLs signed with the user's

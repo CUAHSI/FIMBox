@@ -305,6 +305,32 @@ async function previewObject(container, bucket, key, linkHandler) {
   }
 }
 
+async function previewParquet(container, bucket, key) {
+  container.replaceChildren(el("p", { className: "hint", text: `Loading ${key}…` }));
+  try {
+    const preview = await api(`/ui/objects/parquet?${query({ bucket, key, limit: 100 })}`);
+    const summary = `${preview.num_rows.toLocaleString()} rows · ${preview.columns.length} columns · `
+      + `${preview.num_row_groups} row group${preview.num_row_groups === 1 ? "" : "s"} · ${formatBytes(preview.size_bytes)}`;
+    const schema = el("details", {},
+      el("summary", { text: "Schema" }),
+      el("table", {}, el("tbody", {}, ...preview.columns.map((column) =>
+        el("tr", {}, el("td", { text: column.name }), el("td", { className: "hint", text: column.type }))))));
+    const rows = el("table", {},
+      el("thead", {}, el("tr", {}, ...preview.columns.map((column) => el("th", { text: column.name, title: column.type })))),
+      el("tbody", {}, ...preview.rows.map((row) =>
+        el("tr", {}, ...row.map((cell) => el("td", { text: cell ?? "null", className: cell === null ? "hint" : "" }))))));
+    container.replaceChildren(
+      el("h4", {}, el("span", { text: key.split("/").pop() }),
+        el("span", {},
+          preview.truncated ? el("span", { className: "hint", text: `first ${preview.rows.length} rows ` }) : null,
+          el("button", { type: "button", className: "small", text: "Download", onclick: () => downloadObject(bucket, key) }))),
+      el("div", { className: "parquet" }, el("p", { className: "hint", text: summary }), schema, el("div", { className: "table-scroll" }, rows)),
+    );
+  } catch (error) {
+    container.replaceChildren(el("p", { className: "message error", text: `Preview failed: ${error.message}` }));
+  }
+}
+
 function createBrowser(container, { bucket, root, onRaster, linkHandler }) {
   const crumbs = el("div", { className: "breadcrumb" });
   const table = el("table");
@@ -331,6 +357,11 @@ function createBrowser(container, { bucket, root, onRaster, linkHandler }) {
       actions.append(el("button", { type: "button", className: "small", text: "View", onclick: () => {
         preview.hidden = false;
         previewObject(preview, bucket, file.key, linkHandler);
+      } }), " ");
+    } else if (hasSuffix(file.name, [".parquet"])) {
+      actions.append(el("button", { type: "button", className: "small", text: "View", onclick: () => {
+        preview.hidden = false;
+        previewParquet(preview, bucket, file.key);
       } }), " ");
     }
     if (onRaster && (hasSuffix(file.name, RASTER_SUFFIXES) || file.name === "manifest.json")) {
@@ -587,10 +618,18 @@ function renderParameters(container, scenarios, bucket, key) {
     table);
 }
 
-function renderParity(container, parity) {
+const DIFF_LEGEND = "Differences: red cells flood only in the {base}, orange cells only in the {candidate}.";
+
+function parityLabels(compared) {
+  return compared ? { base: "base", candidate: "candidate", Base: "Base", Candidate: "Candidate" }
+    : { base: "legacy", candidate: "streaming", Base: "Legacy", Candidate: "Streaming" };
+}
+
+function renderParity(container, parity, compared, onMap) {
   if (!parity || !parity.length) return;
-  const table = el("table", {}, el("tr", {}, ...["ScenarioID", "Matches", "Legacy cells", "Streaming cells",
-    "Legacy-only", "Streaming-only", "Grid shift (rows, cols)", "Missing reaches"].map((text) => el("th", { text }))));
+  const labels = parityLabels(compared);
+  const table = el("table", {}, el("tr", {}, ...["ScenarioID", "Matches", `${labels.Base} cells`, `${labels.Candidate} cells`,
+    `${labels.Base}-only`, `${labels.Candidate}-only`, "Grid shift (rows, cols)", "Missing reaches", ""].map((text) => el("th", { text }))));
   for (const item of parity) {
     table.append(el("tr", {},
       el("td", { text: item.ScenarioID }),
@@ -600,9 +639,17 @@ function renderParity(container, parity) {
       el("td", { className: "num", text: item.legacy_only_cells }),
       el("td", { className: "num", text: item.streaming_only_cells }),
       el("td", { text: `${item.grid_shift_rows}, ${item.grid_shift_columns}` }),
-      el("td", { text: (item.missing_reaches || []).join(", ") })));
+      el("td", { text: (item.missing_reaches || []).join(", ") }),
+      el("td", {}, onMap ? el("button", { type: "button", className: "small", text: "Map diff",
+        onclick: () => onMap({ name: `${item.ScenarioID} differences`, key: item.diff_key }) }) : "")));
   }
-  container.replaceChildren(el("h3", { text: "Legacy/streaming parity" }), table);
+  const matched = parity.filter((item) => item.matches).length;
+  container.replaceChildren(
+    el("h3", { text: compared ? "Result comparison" : "Legacy/streaming parity" }),
+    el("p", { text: `${matched} of ${parity.length} scenarios match. ` +
+      DIFF_LEGEND.replace("{base}", labels.base).replace("{candidate}", labels.candidate) +
+      " Grid shifts of up to two cells are realigned before counting." }),
+    table);
 }
 
 function authTileLayer(bucket, key, info) {
@@ -627,7 +674,7 @@ function authTileLayer(bucket, key, info) {
   });
 }
 
-function createResultMap(view, bucket) {
+function createResultMap(view, bucket, legend = "Flooded cells are shown in blue; toggle scenarios with the layer control.") {
   const status = $(".map-status", view);
   const container = $(".map", view);
   if (!window.L) { status.textContent = "The map library could not be loaded."; container.hidden = true; return null; }
@@ -639,12 +686,14 @@ function createResultMap(view, bucket) {
   const map = L.map(container, { minZoom: 2 });
   L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
     maxZoom: 19, attribution: "&copy; OpenStreetMap contributors",
+    // OSM blocks tile requests without a Referer; send only the origin, not the page path.
+    referrerPolicy: "strict-origin",
   }).addTo(map);
   map.setView([39, -98], 4);
   const control = L.control.layers(null, null, { collapsed: false }).addTo(map);
   const added = new Set();
   const notes = [];
-  status.textContent = "Flooded cells are shown in blue; toggle scenarios with the layer control.";
+  status.textContent = legend;
   view.addEventListener("tabchange", (event) => { if (event.detail.name === "map") map.invalidateSize(); });
 
   async function add(layer, fit) {
@@ -665,7 +714,7 @@ function createResultMap(view, bucket) {
     } catch (error) {
       notes.push(`${layer.name}: ${error.message}`);
     }
-    status.textContent = ["Flooded cells are shown in blue; toggle scenarios with the layer control.", ...notes].join(" ");
+    status.textContent = [legend, ...notes].join(" ");
   }
   return { add };
 }
@@ -673,7 +722,11 @@ function createResultMap(view, bucket) {
 async function loadOutputDetails(view, bucket, prefix, result) {
   const root = joinKey(prefix);
   const readmeKey = joinKey(root, "README.md");
-  const scenariosKey = joinKey(root, "scenarios.json");
+  const compared = result && result.compared;
+  // Comparison jobs write only parity files; their parameters are the base result's scenarios.
+  const scenariosBucket = compared ? compared.base_bucket : bucket;
+  const scenariosKey = compared ? joinKey(compared.base_prefix, "scenarios.json") : joinKey(root, "scenarios.json");
+  const parity = (result && result.parity) || [];
   let browser = null;
   const linkHandler = (target) => {
     if (/^[A-Za-z0-9._-][A-Za-z0-9._/-]*$/.test(target) && !target.split("/").includes("..")) {
@@ -692,31 +745,41 @@ async function loadOutputDetails(view, bucket, prefix, result) {
   let layers = [];
   const ensureMap = () => {
     if (map === undefined) {
-      map = createResultMap(view, bucket);
+      const labels = parityLabels(compared);
+      map = createResultMap(view, bucket, parity.length
+        ? `Flooded cells are shown in blue. ${DIFF_LEGEND.replace("{base}", labels.base).replace("{candidate}", labels.candidate)}`
+        : undefined);
       if (map) layers.forEach((layer, index) => map.add(layer, index === 0));
       if (map && !layers.length) $(".map-status", view).textContent = "No scenario rasters found; use Map on a file in the Files tab.";
     }
     return map;
   };
-  const showRaster = (key) => {
+  const showLayer = (layer) => {
     activateTab("result", "map", view);
     const current = ensureMap();
-    if (current) current.add({ name: key.slice(root.length).replace(/^\//, ""), key }, true);
+    if (current) current.add(layer, true);
   };
+  const showRaster = (key) => showLayer({ name: key.slice(root.length).replace(/^\//, ""), key });
   browser = createBrowser($(".files", view), { bucket, root, linkHandler, onRaster: showRaster });
   view.addEventListener("tabchange", (event) => { if (event.detail.name === "map") ensureMap(); });
+  renderParity($(".parity", view), parity, compared, showLayer);
 
   const readme = $(".readme", view);
-  readme.replaceChildren(el("p", { className: "hint", text: "Loading README…" }));
-  api(`/ui/objects/preview?${query({ bucket, key: readmeKey })}`)
-    .then((preview) => readme.replaceChildren(renderMarkdown(preview.text, linkHandler)))
-    .catch((error) => readme.replaceChildren(el("p", { className: "hint", text: `README.md unavailable: ${error.message}` })));
+  if (compared) {
+    readme.replaceChildren(el("p", { className: "hint",
+      text: "Comparison jobs write parity/report.json and one parity/<ScenarioID>.diff.tif per scenario; input parameters are the base result's." }));
+  } else {
+    readme.replaceChildren(el("p", { className: "hint", text: "Loading README…" }));
+    api(`/ui/objects/preview?${query({ bucket, key: readmeKey })}`)
+      .then((preview) => readme.replaceChildren(renderMarkdown(preview.text, linkHandler)))
+      .catch((error) => readme.replaceChildren(el("p", { className: "hint", text: `README.md unavailable: ${error.message}` })));
+  }
 
   let scenarios = [];
   try {
-    const preview = await api(`/ui/objects/preview?${query({ bucket, key: scenariosKey })}`);
+    const preview = await api(`/ui/objects/preview?${query({ bucket: scenariosBucket, key: scenariosKey })}`);
     scenarios = JSON.parse(preview.text);
-    renderParameters($(".parameters", view), scenarios, bucket, scenariosKey);
+    renderParameters($(".parameters", view), scenarios, scenariosBucket, scenariosKey);
   } catch (error) {
     $(".parameters", view).replaceChildren(el("p", { className: "hint", text: `scenarios.json unavailable: ${error.message}` }));
   }
@@ -740,6 +803,9 @@ async function loadOutputDetails(view, bucket, prefix, result) {
       }
     } catch { /* the Files tab reports listing errors */ }
   }
+  const diffLayers = parity.map((item) => ({ name: `${item.ScenarioID} differences`, key: item.diff_key }));
+  // Comparison jobs write no scenario rasters of their own; their map shows only differences.
+  layers = compared ? diffLayers : [...layers, ...diffLayers];
   // Layers discovered after the map opened are added now.
   if (map) layers.forEach((layer, index) => map.add(layer, index === 0));
 }
@@ -783,10 +849,15 @@ async function openJob(jobId) {
   const result = job.result;
   const location = result && result.output_bucket
     ? `s3://${result.output_bucket}/${joinKey(result.output_prefix)}` : null;
+  const compared = result && result.compared;
   addSummary(view, [
     ["Status", el("span", { className: `status ${job.status}`, text: job.status })],
     ["Error", job.error],
-    ["Execution mode", result && result.execution_mode],
+    ["Job type", compared ? "Result comparison" : null],
+    ["Base", compared ? locationLink(compared.base_bucket, compared.base_prefix) : null],
+    ["Candidate", compared ? locationLink(compared.candidate_bucket, compared.candidate_prefix) : null],
+    ["Skipped scenarios", compared && compared.skipped_scenarios.join(", ")],
+    ["Execution mode", result && !compared ? result.execution_mode : null],
     ["Scenarios", result && (result.outputs || []).map((output) => output.ScenarioID).join(", ")],
     ["Output location", location],
     ["Output files", result && (result.files || []).length],
@@ -798,7 +869,7 @@ async function openJob(jobId) {
     } })));
   }
   startLogPolling(view, jobId, job.status);
-  renderParity($(".parity", view), result && result.parity);
+  if (result && result.output_bucket && !compared) $("dl.summary", view).after(compareButtons(result.output_bucket, result.output_prefix));
   if (result && result.output_bucket) {
     loadOutputDetails(view, result.output_bucket, result.output_prefix, result);
   } else {
@@ -812,18 +883,80 @@ async function openJob(jobId) {
   if (["queued", "started", "failure"].includes(job.status)) activateTab("result", "logs", view);
 }
 
-function openOutput(event) {
-  event.preventDefault();
-  if (!state.config.authentication_enabled) { showMessage("Retained outputs require HydroShare authentication on this server.", true); return; }
-  if (!authReady()) { showMessage("Sign in with HydroShare to open retained outputs.", true); return; }
-  const bucket = event.target.elements.bucket.value.trim();
-  const prefix = joinKey(event.target.elements.prefix.value);
+function requireRetainedAccess(action) {
+  if (!state.config.authentication_enabled) { showMessage("Retained outputs require HydroShare authentication on this server.", true); return false; }
+  if (!authReady()) { showMessage(`Sign in with HydroShare to ${action}.`, true); return false; }
+  return true;
+}
+
+function openLocation(bucket, prefix) {
+  if (!requireRetainedAccess("open retained outputs")) return;
+  prefix = joinKey(prefix);
   state.currentJob = null;
   for (const item of document.querySelectorAll("#job-list li")) item.classList.remove("active");
   const view = newResultView(`s3://${bucket}/${prefix}`);
   addSummary(view, [["Output location", `s3://${bucket}/${prefix}`]]);
+  $("dl.summary", view).after(compareButtons(bucket, prefix));
   $("[data-tabs=result] [data-tab=logs]", view).hidden = true;
   loadOutputDetails(view, bucket, prefix, null);
+}
+
+function openOutput(event) {
+  event.preventDefault();
+  openLocation(event.target.elements.bucket.value.trim(), event.target.elements.prefix.value);
+}
+
+function locationLink(bucket, prefix) {
+  return el("a", { href: "#", text: `s3://${bucket}/${joinKey(prefix)}`, onclick: (event) => {
+    event.preventDefault();
+    openLocation(bucket, prefix);
+  } });
+}
+
+function compareButtons(bucket, prefix) {
+  const use = (side) => () => {
+    const form = $("#compare-results");
+    form.elements[`${side}_bucket`].value = bucket;
+    form.elements[`${side}_prefix`].value = joinKey(prefix);
+    const base = joinKey(form.elements.base_prefix.value.trim());
+    const candidate = joinKey(form.elements.candidate_prefix.value.trim());
+    if (base && candidate && !form.elements.output_prefix.value.trim()) {
+      const parent = base.split("/").slice(0, -1);
+      const name = (key) => key.split("/").pop();
+      form.elements.output_bucket.value = form.elements.base_bucket.value;
+      form.elements.output_prefix.value = joinKey(...parent, `compare-${name(base)}-vs-${name(candidate)}`);
+    }
+    form.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    showMessage(`Set the comparison ${side} to s3://${bucket}/${joinKey(prefix)}.`);
+  };
+  return el("div", { className: "row" },
+    el("button", { type: "button", text: "Compare as base", onclick: use("base") }),
+    el("button", { type: "button", text: "Compare as candidate", onclick: use("candidate") }));
+}
+
+async function submitCompare(event) {
+  event.preventDefault();
+  if (!requireRetainedAccess("compare results")) return;
+  const form = event.target;
+  const value = (name) => form.elements[name].value.trim();
+  const body = {
+    base_bucket: value("base_bucket"), base_prefix: joinKey(value("base_prefix")),
+    candidate_bucket: value("candidate_bucket"), candidate_prefix: joinKey(value("candidate_prefix")),
+    output_bucket: value("output_bucket"), output_prefix: joinKey(value("output_prefix")),
+    overwrite: form.elements.overwrite.checked,
+  };
+  const button = $("button[type=submit]", form);
+  button.disabled = true;
+  try {
+    const submitted = await api("/jobs/compare", { method: "POST", json: body });
+    showMessage(`Comparison job ${submitted.job_id} submitted (${submitted.status}).`);
+    await loadJobs();
+    openJob(submitted.job_id);
+  } catch (error) {
+    showMessage(`Comparison failed:\n${error.message}`, true);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 // ---------- Startup ----------
@@ -865,6 +998,7 @@ async function start() {
   $("#job-options").addEventListener("submit", submitJob);
   $("#jobs-refresh").addEventListener("click", loadJobs);
   $("#open-output").addEventListener("submit", openOutput);
+  $("#compare-results").addEventListener("submit", submitCompare);
   setupJobOptions();
   renderScenarioEditor();
   loadExamples();

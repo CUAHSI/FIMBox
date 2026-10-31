@@ -5,6 +5,7 @@ generated SDK contract is unchanged. Job submission/status and map tiles reuse t
 public API routes.
 """
 
+import io
 import json
 import logging
 from datetime import datetime
@@ -12,6 +13,8 @@ from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import quote
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 from botocore.exceptions import ClientError
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
@@ -28,6 +31,9 @@ PREVIEW_SUFFIXES = (".json", ".md", ".txt", ".csv", ".log", ".xml", ".yaml", ".y
 PREVIEW_MAX_BYTES = 512 * 1024
 DOWNLOAD_URL_SECONDS = 300
 LIST_MAX_KEYS = 1000
+PARQUET_MAX_ROWS = 200
+PARQUET_MAX_READ_BYTES = 64 * 1024 * 1024
+PARQUET_MAX_CELL_CHARS = 200
 
 router = APIRouter(prefix="/ui", include_in_schema=False)
 AuthenticatedSession = Annotated[UserSession, Depends(get_authenticated_session)]
@@ -79,6 +85,21 @@ class ObjectPreview(BaseModel):
     key: str
     size_bytes: int
     text: str
+    truncated: bool
+
+
+class ParquetColumn(BaseModel):
+    name: str
+    type: str
+
+
+class ParquetPreview(BaseModel):
+    key: str
+    size_bytes: int
+    num_rows: int
+    num_row_groups: int
+    columns: list[ParquetColumn]
+    rows: list[list[str | None]]
     truncated: bool
 
 
@@ -208,6 +229,84 @@ def preview_object(bucket: Bucket, key: Key, session: AuthenticatedSession) -> O
     size = int(content_range.rsplit("/", 1)[1]) if "/" in content_range and not content_range.endswith("*") else len(content)
     return ObjectPreview(
         key=key, size_bytes=size, text=content.decode("utf-8", errors="replace"), truncated=size > len(content),
+    )
+
+
+class __RangeReader(io.RawIOBase):
+    """Seekable read-only view of an S3 object that fetches byte ranges on demand."""
+
+    def __init__(self, client, bucket: str, key: str, size: int, budget: int):
+        self.__client, self.__bucket, self.__key = client, bucket, key
+        self.__size, self.__budget, self.__position = size, budget, 0
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def tell(self) -> int:
+        return self.__position
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        base = {io.SEEK_SET: 0, io.SEEK_CUR: self.__position, io.SEEK_END: self.__size}[whence]
+        self.__position = max(0, base + offset)
+        return self.__position
+
+    def readinto(self, buffer) -> int:
+        length = min(len(buffer), self.__size - self.__position)
+        if length <= 0:
+            return 0
+        if length > self.__budget:
+            raise HTTPException(status_code=413, detail="Parquet preview would read too much data; download instead")
+        self.__budget -= length
+        end = self.__position + length - 1
+        response = self.__client.get_object(Bucket=self.__bucket, Key=self.__key, Range=f"bytes={self.__position}-{end}")
+        data = response["Body"].read(length)
+        buffer[:len(data)] = data
+        self.__position += len(data)
+        return len(data)
+
+
+def __parquet_cell(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        text = f"<{len(value)} bytes>"
+    elif isinstance(value, (dict, list)):
+        text = json.dumps(value, default=str)
+    else:
+        text = str(value)
+    return text if len(text) <= PARQUET_MAX_CELL_CHARS else text[:PARQUET_MAX_CELL_CHARS - 1] + "…"
+
+
+@router.get("/objects/parquet", response_model=ParquetPreview)
+def preview_parquet(
+    bucket: Bucket, key: Key, session: AuthenticatedSession,
+    limit: Annotated[int, Query(ge=1, le=PARQUET_MAX_ROWS)] = 50,
+) -> ParquetPreview:
+    """Return a Parquet object's schema and first rows, reading only the needed byte ranges."""
+    key = __clean_path(key, folder=False)
+    if not key.lower().endswith(".parquet"):
+        raise HTTPException(status_code=400, detail="Only .parquet files can be previewed as tables")
+    client = __s3_client(bucket, key, session)
+    try:
+        size = client.head_object(Bucket=bucket, Key=key)["ContentLength"]
+        reader = __RangeReader(client, bucket, key, size, PARQUET_MAX_READ_BYTES)
+        parquet = pq.ParquetFile(io.BufferedReader(reader, buffer_size=256 * 1024))
+        batch = next(parquet.iter_batches(batch_size=limit), None)
+    except ClientError as error:
+        raise __s3_error(error) from None
+    except pa.ArrowException as error:
+        raise HTTPException(status_code=422, detail=f"Not a readable Parquet file: {error}") from None
+    rows = [] if batch is None else [
+        [__parquet_cell(value) for value in row.values()] for row in batch.to_pylist()
+    ]
+    metadata = parquet.metadata
+    return ParquetPreview(
+        key=key, size_bytes=size, num_rows=metadata.num_rows, num_row_groups=metadata.num_row_groups,
+        columns=[ParquetColumn(name=field.name, type=str(field.type)) for field in parquet.schema_arrow],
+        rows=rows, truncated=metadata.num_rows > len(rows),
     )
 
 

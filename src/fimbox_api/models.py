@@ -147,6 +147,55 @@ class ParityJobRequest(OutputDestination):
         return self
 
 
+class CompareJobRequest(OutputDestination):
+    """Diff two retained results' scenario flood masks without rerunning HAND-FIM."""
+
+    base_bucket: str = Field(min_length=1, max_length=255, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    base_prefix: str = Field(
+        max_length=900,
+        description="Output prefix of the base result containing scenarios.json and <ScenarioID>.cog "
+                    "or <ScenarioID>/manifest.json outputs.",
+    )
+    candidate_bucket: str = Field(min_length=1, max_length=255, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    candidate_prefix: str = Field(
+        max_length=900, description="Output prefix of the result compared against the base.",
+    )
+    overwrite: bool = Field(
+        default=False,
+        description="Replace existing parity objects under output_prefix; by default, conflicting keys fail the job.",
+    )
+
+    @model_validator(mode="after")
+    def validate_compare_locations(self) -> "CompareJobRequest":
+        if self.output_bucket is None:
+            raise ValueError("result comparison requires output_bucket")
+        if not self.output_prefix.strip("/"):
+            raise ValueError("result comparison requires output_prefix, e.g. <resource id>/data/contents/compare-1")
+        sources = []
+        for name in ("base", "candidate"):
+            prefix = getattr(self, f"{name}_prefix")
+            if any(part in {".", ".."} for part in prefix.split("/")):
+                raise ValueError(f"{name}_prefix must not contain '.' or '..' segments")
+            sources.append((getattr(self, f"{name}_bucket"), prefix.strip("/")))
+        if sources[0] == sources[1]:
+            raise ValueError("base and candidate must be different results")
+        if (self.output_bucket, self.output_prefix.strip("/")) in sources:
+            raise ValueError("output_prefix must differ from the compared results' prefixes")
+        return self
+
+
+class ComparedResults(BaseModel):
+    """The two retained results diffed by a comparison job."""
+
+    base_bucket: str
+    base_prefix: str
+    candidate_bucket: str
+    candidate_prefix: str
+    skipped_scenarios: list[str] = Field(
+        default_factory=list, description="ScenarioIDs present in only one of the two results.",
+    )
+
+
 class ParityDifference(BaseModel):
     x: float
     y: float
@@ -191,7 +240,11 @@ class StoredHandFimResult(HandFimResult, OutputDestination):
     scenario_manifests: list[ScenarioManifest] = Field(default_factory=list)
     parity: list[ScenarioParity] = Field(
         default_factory=list,
-        description="Legacy/streaming comparisons; present only for parity jobs.",
+        description="Legacy/streaming comparisons; present only for parity and comparison jobs. "
+                    "For comparison jobs legacy_* fields describe the base and streaming_* the candidate.",
+    )
+    compared: ComparedResults | None = Field(
+        default=None, description="Compared result locations; present only for comparison jobs.",
     )
     local_output_dir: str | None = None
 

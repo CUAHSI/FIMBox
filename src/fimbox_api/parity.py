@@ -23,19 +23,22 @@ def __windows(width: int, height: int):
             yield Window(col, row, min(WINDOW_SIZE, width - col), min(WINDOW_SIZE, height - row))
 
 
+def __flooded(views, window: Window) -> np.ndarray:
+    mask = np.zeros((int(window.height), int(window.width)), dtype=bool)
+    for view in views:
+        mask |= view.read(1, window=window, masked=True).filled(0) == 1
+    return mask
+
+
 def __masks(legacy, streaming, window: Window) -> tuple[np.ndarray, np.ndarray]:
-    expected = legacy.read(1, window=window, masked=True).filled(0) == 1
-    actual = np.zeros(expected.shape, dtype=bool)
-    for view in streaming:
-        actual |= view.read(1, window=window, masked=True).filled(0) == 1
-    return expected, actual
+    return __flooded(legacy, window), __flooded(streaming, window)
 
 
 def __compare(legacy, streaming, transform: Affine, width: int, height: int, output=None) -> dict:
     """Count flooded and differing cells, optionally writing the diff raster.
 
     Arguments:
-        legacy: Legacy view on the comparison grid.
+        legacy: Legacy (base) views on the comparison grid, combined as a flood union.
         streaming: Streaming views on the (possibly shifted) comparison grid.
         transform: Comparison grid transform, used for sample coordinates.
         width: Comparison grid width.
@@ -77,7 +80,7 @@ def __compare(legacy, streaming, transform: Affine, width: int, height: int, out
     return report
 
 
-def compare_scenario_outputs(legacy_path: Path, tile_paths: list[Path], diff_path: Path) -> dict:
+def compare_scenario_outputs(legacy_path: Path | list[Path], tile_paths: list[Path], diff_path: Path) -> dict:
     """Compare flood masks over their union extent, allowing a small whole-pixel grid shift.
 
     The streaming mask is realigned by the rounded offset between the two masks'
@@ -86,7 +89,8 @@ def compare_scenario_outputs(legacy_path: Path, tile_paths: list[Path], diff_pat
     ``grid_shift_rows``/``grid_shift_columns`` instead of as differing cells.
 
     Arguments:
-        legacy_path: Legacy scenario raster; its grid and CRS define the comparison grid.
+        legacy_path: Legacy (base) scenario raster, or base tile rasters combined as a
+            flood union; the first raster's grid and CRS define the comparison grid.
         tile_paths: Streaming tile rasters, combined as a flood union.
         diff_path: GeoTIFF to write on the legacy grid, after alignment
             (0=equal, 1=legacy-only flooding, 2=streaming-only flooding).
@@ -97,12 +101,16 @@ def compare_scenario_outputs(legacy_path: Path, tile_paths: list[Path], diff_pat
     """
 
     with ExitStack() as stack:
-        legacy = stack.enter_context(rasterio.open(legacy_path))
+        base_paths = legacy_path if isinstance(legacy_path, list) else [legacy_path]
+        if not base_paths:
+            raise ValueError("Parity comparison requires at least one base raster")
+        bases = [stack.enter_context(rasterio.open(path)) for path in base_paths]
+        legacy = bases[0]
         tiles = [stack.enter_context(rasterio.open(path)) for path in tile_paths]
         transform = legacy.transform
         if transform.b or transform.d or transform.a <= 0 or transform.e >= 0:
             raise ValueError("Parity comparison requires a north-up legacy raster")
-        sources = [legacy, *tiles]
+        sources = [*bases, *tiles]
         if any(source.count != 1 or source.crs is None for source in sources):
             raise ValueError("Parity comparison requires single-band georeferenced rasters")
         bounds = [
@@ -130,10 +138,13 @@ def compare_scenario_outputs(legacy_path: Path, tile_paths: list[Path], diff_pat
                 for source in tiles
             ]
 
-        legacy_view = stack.enter_context(WarpedVRT(
-            legacy, crs=legacy.crs, transform=transform, width=width, height=height,
-            dtype="float32", nodata=float("nan"), resampling=Resampling.nearest,
-        ))
+        legacy_view = [
+            stack.enter_context(WarpedVRT(
+                source, crs=legacy.crs, transform=transform, width=width, height=height,
+                dtype="float32", nodata=float("nan"), resampling=Resampling.nearest,
+            ))
+            for source in bases
+        ]
         unaligned = __compare(legacy_view, views(0, 0), transform, width, height)
         shift = (0, 0)
         expected_centroid, actual_centroid = unaligned["centroids"]

@@ -1,2 +1,1 @@
 -r requirements.txt
-pyarrow>=15.0.2

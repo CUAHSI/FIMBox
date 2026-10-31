@@ -23,7 +23,7 @@ from schemas.hand_fim_schema import HandFimOutput
 from .celery_app import celery_app
 from .config import settings
 from .models import (
-    STREAMING_MODES, HandFimParameters, HandFimJobOptions, OutputFile, ScenarioManifest, ScenarioParity,
+    STREAMING_MODES, ComparedResults, HandFimParameters, HandFimJobOptions, OutputFile, ScenarioManifest, ScenarioParity,
     StoredHandFimResult,
 )
 from .job_logs import append_job_log, clear_job_logs
@@ -192,6 +192,11 @@ def __reject_existing_s3_keys(client: Any, bucket: str, keys: list[str]) -> None
             code = error.response.get("Error", {}).get("Code")
             if code in {"404", "NoSuchKey", "NotFound"}:
                 continue
+            if code in {"403", "AccessDenied", "Forbidden"}:
+                raise RuntimeError(
+                    f"HydroShare S3 denied access to output s3://{bucket}/{key}; write to a resource "
+                    "you can edit, under <resource id>/data/contents/"
+                ) from None
             raise
         raise RuntimeError(
             f"S3 output object s3://{bucket}/{key} already exists; "
@@ -510,16 +515,16 @@ def __legacy_scenarios(client: Any, bucket: str, prefix: str) -> HandFimParamete
         response = client.get_object(Bucket=bucket, Key=key)
     except ClientError as error:
         if __is_missing(error):
-            raise RuntimeError(f"Legacy run has no s3://{bucket}/{key}") from None
+            raise RuntimeError(f"Retained run has no s3://{bucket}/{key}") from None
         raise
     with response["Body"] as body:
         content = body.read(MAX_MANIFEST_BYTES + 1)
     if len(content) > MAX_MANIFEST_BYTES:
-        raise RuntimeError(f"Legacy s3://{bucket}/{key} is too large")
+        raise RuntimeError(f"Retained s3://{bucket}/{key} is too large")
     try:
         return HandFimParameters.model_validate_json(content)
     except ValueError:
-        raise RuntimeError(f"Legacy s3://{bucket}/{key} is not a valid scenario list") from None
+        raise RuntimeError(f"Retained s3://{bucket}/{key} is not a valid scenario list") from None
 
 
 def __require_s3_keys(client: Any, bucket: str, keys: list[str]) -> None:
@@ -532,13 +537,8 @@ def __require_s3_keys(client: Any, bucket: str, keys: list[str]) -> None:
             raise
 
 
-def __compare_scenario(
-    client: Any, legacy_bucket: str, legacy_key: str, bucket: str,
-    manifest_ref: ScenarioManifest, diff_key: str, work_dir: Path,
-) -> ScenarioParity:
-    sid = manifest_ref.ScenarioID
-    manifest = __load_manifest(client, bucket, manifest_ref.key)
-    scenario_prefix = manifest_ref.key.removesuffix("manifest.json")
+def __manifest_tile_keys(manifest: Any, manifest_key: str, sid: str) -> list[str]:
+    scenario_prefix = manifest_key.removesuffix("manifest.json")
     tiles = manifest.get("tiles") if isinstance(manifest, dict) else None
     if not isinstance(tiles, list):
         raise RuntimeError(f"Streaming manifest for scenario {sid!r} is unavailable")
@@ -548,6 +548,16 @@ def __compare_scenario(
         or not key.endswith(".cog") or ".." in key.split("/") for key in keys
     ):
         raise RuntimeError(f"Streaming manifest for scenario {sid!r} has an invalid tile key")
+    return keys
+
+
+def __compare_scenario(
+    client: Any, legacy_bucket: str, legacy_key: str, bucket: str,
+    manifest_ref: ScenarioManifest, diff_key: str, work_dir: Path,
+) -> ScenarioParity:
+    sid = manifest_ref.ScenarioID
+    manifest = __load_manifest(client, bucket, manifest_ref.key)
+    keys = __manifest_tile_keys(manifest, manifest_ref.key, sid)
     scenario_dir = work_dir / sid
     scenario_dir.mkdir()
     legacy_path = scenario_dir / "legacy.cog"
@@ -626,3 +636,123 @@ def hand_fim_parity(
         )
     result.parity = comparisons
     return result.model_dump(mode="json")
+
+
+def __result_scenario_rasters(
+    client: Any, bucket: str, prefix: str, sid: str, directory: Path,
+) -> tuple[str, list[Path], list[str]]:
+    """Download one scenario's retained flood rasters from a legacy or streaming result.
+
+    Arguments:
+        client: Job-scoped S3 client.
+        bucket: Result bucket.
+        prefix: Result output prefix.
+        sid: ScenarioID to resolve.
+        directory: Empty local directory to download into.
+    Returns:
+        The scenario's raster or manifest key, local raster paths, and missing reaches.
+    """
+    manifest_key = output_file_key(prefix, f"{sid}/manifest.json")
+    manifest = __load_manifest(client, bucket, manifest_key)
+    if manifest is None:
+        key = output_file_key(prefix, f"{sid}.cog")
+        try:
+            client.head_object(Bucket=bucket, Key=key)
+        except ClientError as error:
+            if __is_missing(error):
+                raise RuntimeError(
+                    f"Scenario {sid!r} has neither s3://{bucket}/{key} nor s3://{bucket}/{manifest_key}"
+                ) from None
+            raise
+        keys, missing = [key], []
+    else:
+        keys = __manifest_tile_keys(manifest, manifest_key, sid)
+        missing = [str(reach) for reach in manifest.get("missing_reaches", [])]
+        key = manifest_key
+    paths = []
+    for index, tile_key in enumerate(keys):
+        paths.append(directory / f"{index}.cog")
+        client.download_file(bucket, tile_key, str(paths[-1]))
+    return key, paths, missing
+
+
+@celery_app.task(name="fimbox_api.tasks.hand_fim_compare")
+def hand_fim_compare(
+    job_id: str,
+    base_bucket: str,
+    base_prefix: str,
+    candidate_bucket: str,
+    candidate_prefix: str,
+    output_bucket: str,
+    output_prefix: str = "",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Diff the flood masks of the scenarios shared by two retained results."""
+    job_id = str(UUID(job_id))
+    client = s3_client(UUID(job_id))
+    base = __legacy_scenarios(client, base_bucket, base_prefix)
+    candidate = __legacy_scenarios(client, candidate_bucket, candidate_prefix)
+    base_ids = [scenario.ScenarioID for scenario in base.root]
+    candidate_ids = {scenario.ScenarioID for scenario in candidate.root}
+    scenario_ids = [sid for sid in base_ids if sid in candidate_ids]
+    skipped = sorted(set(base_ids) ^ candidate_ids)
+    if not scenario_ids:
+        raise RuntimeError("The two results have no ScenarioIDs in common")
+    if skipped:
+        append_job_log(job_id, f"Skipping scenarios present in only one result: {', '.join(skipped)}.\n")
+    diff_keys = {sid: output_file_key(output_prefix, f"parity/{sid}.diff.tif") for sid in scenario_ids}
+    report_key = output_file_key(output_prefix, "parity/report.json")
+    if not overwrite:
+        __reject_existing_s3_keys(client, output_bucket, [report_key, *diff_keys.values()])
+    compared = ComparedResults(
+        base_bucket=base_bucket, base_prefix=base_prefix, candidate_bucket=candidate_bucket,
+        candidate_prefix=candidate_prefix, skipped_scenarios=skipped,
+    )
+    comparisons, files = [], []
+    with tempfile.TemporaryDirectory(prefix=f"compare-{job_id}-", dir=settings.hand_fim_input_dir) as work:
+        for index, sid in enumerate(scenario_ids):
+            append_job_log(job_id, f"Comparing scenario {sid} ({index + 1}/{len(scenario_ids)}).\n")
+            scenario_dir = Path(work) / str(index)
+            (scenario_dir / "base").mkdir(parents=True)
+            (scenario_dir / "candidate").mkdir()
+            base_key, base_paths, base_missing = __result_scenario_rasters(
+                client, base_bucket, base_prefix, sid, scenario_dir / "base",
+            )
+            _, candidate_paths, candidate_missing = __result_scenario_rasters(
+                client, candidate_bucket, candidate_prefix, sid, scenario_dir / "candidate",
+            )
+            diff_path = scenario_dir / "diff.tif"
+            report = compare_scenario_outputs(base_paths, candidate_paths, diff_path)
+            client.upload_file(str(diff_path), output_bucket, diff_keys[sid], ExtraArgs={"ContentType": "image/tiff"})
+            files.append(OutputFile(
+                path=f"parity/{sid}.diff.tif", key=diff_keys[sid], size_bytes=diff_path.stat().st_size,
+            ))
+            missing = list(dict.fromkeys(base_missing + candidate_missing))
+            comparison = ScenarioParity(
+                ScenarioID=sid, legacy_key=base_key, diff_key=diff_keys[sid], missing_reaches=missing,
+                matches=report["different_cells"] == 0 and not missing,
+                **{name: report[name] for name in (
+                    "crs", "legacy_flooded_cells", "streaming_flooded_cells", "legacy_only_cells",
+                    "streaming_only_cells", "different_cells", "sample_differences",
+                    "grid_shift_rows", "grid_shift_columns", "unaligned_different_cells",
+                )},
+            )
+            comparisons.append(comparison)
+            append_job_log(job_id, (
+                f"Scenario {sid}: {'MATCH' if comparison.matches else 'MISMATCH'} "
+                f"({comparison.legacy_only_cells} base-only, {comparison.streaming_only_cells} "
+                f"candidate-only cells, {len(missing)} missing reaches, "
+                f"grid shift {comparison.grid_shift_rows} rows/{comparison.grid_shift_columns} columns).\n"
+            ))
+    report = json.dumps({
+        **compared.model_dump(mode="json"),
+        "values": "1=base-only flooding, 2=candidate-only flooding",
+        "scenarios": [comparison.model_dump(mode="json") for comparison in comparisons],
+    }, indent=2).encode()
+    client.put_object(Bucket=output_bucket, Key=report_key, Body=report, ContentType="application/json")
+    files.insert(0, OutputFile(path="parity/report.json", key=report_key, size_bytes=len(report)))
+    return StoredHandFimResult(
+        outputs=[HandFimOutput(ScenarioID=sid) for sid in scenario_ids],
+        output_bucket=output_bucket, output_prefix=output_prefix,
+        files=files, parity=comparisons, compared=compared,
+    ).model_dump(mode="json")

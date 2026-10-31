@@ -629,10 +629,132 @@ function targetExists() {
   return state.scenarios.some((scenario) => scenario.Reaches.includes(picker.target));
 }
 
+// ---------- Reach streamflow lookups ----------
+
+const NWPS_REACHES_URL = "https://api.water.noaa.gov/nwps/v1/reaches";
+const NWPS_SERIES = [
+  { key: "analysisAssimilation", param: null, label: "Recent analysis" },
+  { key: "shortRange", param: "short_range", label: "Short-range forecast" },
+  { key: "mediumRangeBlend", param: "medium_range_blend", label: "Medium-range forecast" },
+  { key: "longRange", param: "long_range", label: "Long-range forecast" },
+];
+const FT3_TO_M3 = 0.0283168466;
+const RETROSPECTIVE_RANGE = { min: "1979-02-01", max: "2023-02-01" };
+
+function roundFlow(flow) { return Number(flow.toFixed(3)); }
+
+function formatTime(value) { return new Date(value).toLocaleString(); }
+
+// Ensemble forecasts (medium/long range) publish members plus a "mean"; others publish "series".
+function nwpsPoints(section) {
+  const series = section?.series ?? section?.mean;
+  if (!Array.isArray(series?.data)) return [];
+  const factor = /ft/.test(series.units || "") ? FT3_TO_M3 : 1;
+  return series.data
+    .filter((point) => Number.isFinite(point.flow) && point.flow >= 0)
+    .map((point) => ({ time: point.validTime, flow: point.flow * factor }));
+}
+
+function applyStreamflow(flow, reach) {
+  if (!targetExists()) { showMessage("That reach row no longer exists.", true); return; }
+  if (reach.huc) picker.target.HUC = reach.huc;
+  picker.target.ReachID = reach.reachId;
+  picker.target.Streamflow = roundFlow(flow);
+  renderScenarioEditor();
+  showMessage(`Set reach ${reach.reachId} streamflow to ${roundFlow(flow)} m³/s.`);
+}
+
+function flowButton(label, point, reach) {
+  return el("button", {
+    type: "button", className: "small", text: `${label}: ${roundFlow(point.flow)} m³/s`,
+    title: point.time ? formatTime(point.time) : undefined, onclick: () => applyStreamflow(point.flow, reach),
+  });
+}
+
+function peakPoint(points) { return points.reduce((best, point) => (point.flow > best.flow ? point : best)); }
+
+async function showNwpsFlows(container, reach, lookup) {
+  container.replaceChildren(el("span", { className: "hint", text: "Loading NOAA NWPS flows…" }));
+  const base = `${NWPS_REACHES_URL}/${encodeURIComponent(reach.reachId)}/streamflow`;
+  // NWPS accepts a single series per request; omitting it returns the analysis.
+  const results = await Promise.allSettled(NWPS_SERIES.map((series) =>
+    fetchPublicJson(series.param ? `${base}?${query({ series: series.param })}` : base)));
+  if (lookup !== picker.lookup) return;
+  const rows = [];
+  let forecasts = 0;
+  results.forEach((result, index) => {
+    const series = NWPS_SERIES[index];
+    const points = result.status === "fulfilled" ? nwpsPoints(result.value[series.key]) : [];
+    if (!points.length) return;
+    if (series.param) forecasts++;
+    const buttons = series.param ? [] : [flowButton("Use latest", points[points.length - 1], reach)];
+    buttons.push(flowButton("Use peak", peakPoint(points), reach));
+    rows.push(el("div", { className: "row" }, el("span", {
+      text: `${series.label} (${formatTime(points[0].time)} – ${formatTime(points[points.length - 1].time)})`,
+    }), buttons));
+  });
+  if (rows.length) {
+    if (!forecasts) rows.push(el("span", { className: "hint", text: "NWPS currently has no forecast flows for this reach." }));
+    container.replaceChildren(...rows);
+    return;
+  }
+  const failure = results.find((result) => result.status === "rejected");
+  container.replaceChildren(el("span", {
+    className: failure ? "error" : "hint",
+    text: failure ? `NWPS lookup failed: ${failure.reason.message}` : "NWPS has no recent or forecast flows for this reach.",
+  }));
+}
+
+function historicFlowControls(reach) {
+  const start = el("input", { type: "date", ...RETROSPECTIVE_RANGE, value: "2023-01-01", required: true });
+  const end = el("input", { type: "date", ...RETROSPECTIVE_RANGE, value: "2023-01-31", required: true });
+  const output = el("div", { className: "row" });
+  const button = el("button", { type: "button", className: "small", text: "Look up", onclick: async () => {
+    const lookup = picker.lookup;
+    button.disabled = true;
+    output.replaceChildren(el("span", { className: "hint", text: "Reading the NWM retrospective; this can take 10–30 seconds…" }));
+    try {
+      const body = await api(`/ui/streamflow/retrospective?${query({ reach_id: reach.reachId, start: start.value, end: end.value })}`);
+      if (lookup !== picker.lookup) return;
+      output.replaceChildren(
+        el("span", { text: `${body.start.slice(0, 10)} to ${body.end.slice(0, 10)}: min ${roundFlow(body.min)}, mean ${roundFlow(body.mean)} m³/s` }),
+        flowButton("Use max", { flow: body.max, time: body.max_time }, reach),
+        el("span", { className: "hint", text: `peak at ${formatTime(body.max_time)}` }),
+        flowButton("Use mean", { flow: body.mean }, reach));
+    } catch (error) {
+      if (lookup === picker.lookup) output.replaceChildren(el("span", { className: "error", text: error.message }));
+    } finally {
+      button.disabled = false;
+    }
+  } });
+  return [
+    el("h4", { text: `Historic (NWM v3.0 retrospective, ${RETROSPECTIVE_RANGE.min} to ${RETROSPECTIVE_RANGE.max}, up to 92 days)` }),
+    el("div", { className: "row" }, el("label", { text: "From " }, start), el("label", { text: "to " }, end), button),
+    output,
+  ];
+}
+
+function showStreamflows(reach) {
+  const box = $("#picker-flows");
+  const recent = el("div");
+  box.replaceChildren(
+    el("h4", { text: `Streamflow for reach ${reach.reachId} — recent and forecast (NOAA NWPS)` }),
+    recent, ...historicFlowControls(reach));
+  box.hidden = false;
+  showNwpsFlows(recent, reach, picker.lookup);
+}
+
+function hideStreamflows() {
+  const box = $("#picker-flows");
+  box.hidden = true;
+  box.replaceChildren();
+}
+
 async function pickReachAt(latlng) {
   const result = $("#picker-result");
   const lookup = ++picker.lookup;
   result.replaceChildren(el("span", { className: "hint", text: "Looking up reach and HUC8…" }));
+  hideStreamflows();
   try {
     const found = await lookupReach(latlng);
     if (lookup !== picker.lookup) return;
@@ -646,6 +768,7 @@ async function pickReachAt(latlng) {
         renderScenarioEditor();
         showMessage(`Set reach ${found.reachId} in HUC8 ${found.huc}.`);
       } }));
+    showStreamflows({ reachId: found.reachId, huc: found.huc });
   } catch (error) {
     if (lookup === picker.lookup) result.replaceChildren(el("span", { className: "error", text: error.message }));
   }
@@ -659,6 +782,7 @@ async function showCurrentReach(reachId) {
     if (lookup !== picker.lookup || !feature) return;
     highlightReach(feature, true);
     $("#picker-result").replaceChildren(el("span", { className: "hint", text: `Current ReachID ${reachId} is highlighted.` }));
+    showStreamflows({ reachId });
   } catch (error) {
     if (lookup === picker.lookup) {
       $("#picker-result").replaceChildren(el("span", { className: "hint", text: `Current ReachID ${reachId} was not found in NHDPlus.` }));
@@ -671,6 +795,7 @@ function openReachPicker(scenario, reach, reachIndex) {
   picker.target = reach;
   $("#picker-title").textContent = `Pick a reach for ${scenario.ScenarioID || "this scenario"}, row ${reachIndex + 1}`;
   $("#picker-result").replaceChildren();
+  hideStreamflows();
   $("#reach-picker").hidden = false;
   const map = ensurePickerMap();
   map.invalidateSize();
@@ -683,6 +808,7 @@ function openReachPicker(scenario, reach, reachIndex) {
 function closeReachPicker() {
   picker.target = null;
   picker.lookup++;
+  hideStreamflows();
   $("#reach-picker").hidden = true;
 }
 

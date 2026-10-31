@@ -242,6 +242,28 @@ class UiTests(unittest.TestCase):
                 response = self.client.get("/ui/scenarios/load", params={"url": "https://example.org/s.json"})
             self.assertEqual(response.status_code, status)
 
+    def test_retrospective_streamflow_uses_whole_utc_days_and_maps_errors(self):
+        flows = {
+            "reach_id": 7, "start": ui.datetime(2018, 9, 1, tzinfo=ui.UTC), "end": ui.datetime(2018, 9, 1, 23, tzinfo=ui.UTC),
+            "flows": [1.0, None], "min": 1.0, "mean": 1.0, "max": 1.0, "max_time": ui.datetime(2018, 9, 1, tzinfo=ui.UTC),
+        }
+        params = {"reach_id": 7, "start": "2018-09-01", "end": "2018-09-01"}
+        with patch.object(ui.retrospective, "streamflow", return_value=flows) as streamflow:
+            response = self.client.get("/ui/streamflow/retrospective", params=params)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["flows"], [1.0, None])
+        streamflow.assert_called_once_with(
+            7, ui.datetime(2018, 9, 1, tzinfo=ui.UTC), ui.datetime(2018, 9, 1, 23, tzinfo=ui.UTC),
+        )
+        for error, status in (
+            (ui.retrospective.RetrospectiveError("Reach 7 is not in the NWM v3.0 retrospective"), 400),
+            (httpx.ConnectTimeout("slow"), 502),
+        ):
+            with patch.object(ui.retrospective, "streamflow", side_effect=error):
+                response = self.client.get("/ui/streamflow/retrospective", params=params)
+            self.assertEqual(response.status_code, status)
+        self.assertEqual(self.client.get("/ui/streamflow/retrospective", params={**params, "reach_id": 0}).status_code, 422)
+
     def test_storage_errors_are_mapped(self):
         for code, status in (("NoSuchKey", 404), ("AccessDenied", 403), ("SlowDown", 503)):
             self.s3.get_object.side_effect = client_error(code)

@@ -9,7 +9,7 @@ import io
 import json
 import logging
 import re
-from datetime import datetime
+from datetime import UTC, date, datetime, time
 from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import quote
@@ -17,12 +17,13 @@ from urllib.parse import quote
 import httpx
 import pyarrow as pa
 import pyarrow.parquet as pq
+import zstandard
 from botocore.exceptions import ClientError
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from . import remote_json
+from . import remote_json, retrospective
 from .auth import UserSession, get_authenticated_session
 from .config import settings
 from .models import ExecutionMode
@@ -109,6 +110,17 @@ class ParquetPreview(BaseModel):
 class LoadedScenarios(BaseModel):
     source: str
     scenarios: list[Any]
+
+
+class RetrospectiveFlows(BaseModel):
+    reach_id: int
+    start: datetime
+    end: datetime
+    flows: list[float | None]
+    min: float
+    mean: float
+    max: float
+    max_time: datetime
 
 
 class DownloadLink(BaseModel):
@@ -354,6 +366,25 @@ def load_scenarios(
     if not isinstance(value, list):
         raise HTTPException(status_code=422, detail="Scenario JSON must be an array of scenarios")
     return LoadedScenarios(source=url, scenarios=value)
+
+
+@router.get("/streamflow/retrospective", response_model=RetrospectiveFlows)
+def retrospective_streamflow(
+    reach_id: Annotated[int, Query(gt=0)], start: date, end: date, session: AuthenticatedSession,
+) -> RetrospectiveFlows:
+    """Hourly NWM v3.0 retrospective streamflow (m³/s) for a reach over whole UTC days."""
+    try:
+        flows = retrospective.streamflow(
+            reach_id,
+            datetime.combine(start, time(0), UTC),
+            datetime.combine(end, time(23), UTC),
+        )
+    except retrospective.RetrospectiveError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from None
+    except (httpx.HTTPError, zstandard.ZstdError) as error:
+        logger.warning("NWM retrospective read failed: %s", error)
+        raise HTTPException(status_code=502, detail="Could not read the NWM retrospective dataset") from None
+    return RetrospectiveFlows(**flows)
 
 
 @router.get("/objects/download", response_model=DownloadLink)

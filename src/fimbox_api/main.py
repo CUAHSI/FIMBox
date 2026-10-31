@@ -74,7 +74,7 @@ UI_CONTENT_SECURITY_POLICY = (
     "default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' https://unpkg.com; "
     "img-src 'self' data: blob: https://tile.openstreetmap.org https://hydro.nationalmap.gov https://watersgeo.epa.gov; "
     # Public USGS reach (NLDI) and HUC8 (WBD) lookups for the scenario map picker.
-    "connect-src 'self' https://api.water.usgs.gov https://hydro.nationalmap.gov; "
+    "connect-src 'self' https://api.water.usgs.gov https://hydro.nationalmap.gov https://api.water.noaa.gov; "
     "base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
 )
 

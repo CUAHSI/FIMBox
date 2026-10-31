@@ -194,6 +194,13 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
     pinned to the checked IP (keeping the Host header and SNI)
   - no environment proxies; limits of 2 MiB, 10 s, and 5 redirects
   - raises `RemoteJsonError`; tested in `tests/test_remote_json.py`
+- **`src/fimbox_api/retrospective.py`** — `streamflow(reach_id, start, end)`
+  reads hourly flows for one reach from the public NWM v3.0 retrospective Zarr
+  (`chrtout.zarr` on `noaa-nwm-retrospective-3-0-pds`) with plain GETs and
+  `zstandard`: a process-cached sorted `feature_id` index, then one
+  672-hour x 30000-feature int32 chunk per 28 days (scale 0.01, missing
+  -999900). Clips to 1979-02-01T01Z..2023-02-01T00Z, caps 92 days, raises
+  `RetrospectiveError`; tested in `tests/test_retrospective.py`.
 - **`src/fimbox_api/ui.py`** — `/ui` router, excluded from OpenAPI so it is not
   part of the SDK contract:
   - `GET /ui` serves `static/ui/index.html`. `main.py` mounts `/ui/static`
@@ -211,6 +218,9 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
       `s3://` uses the user's S3 client; `https://` uses `remote_json.py`.
       The page also uploads files client-side and supports
       `/ui?scenarios_url=`.
+    - `/ui/streamflow/retrospective?reach_id=&start=&end=`: hourly NWM v3.0
+      retrospective flows over whole UTC days via `retrospective.py`
+      (`RetrospectiveError` → 400, HTTP/zstd errors → 502).
   - Paths reject empty, `.`, and `..` segments. S3 errors map to 404, 403, or
     503.
   - Reads use the user's HydroShare S3 client, or `anonymous_s3_client()`
@@ -225,7 +235,11 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
       view (`hudigit <= 8`, with retries). The WBD HUC8 polygon layer is
       scale-limited, and tile bursts get intermittent 503s. a click calls
       NLDI `comid/position` and the WBD HUC8 query from the browser.
-      `main.py`'s CSP allowlists these origins.
+      `main.py`'s CSP allowlists these origins. A picked or current reach
+      gets a streamflow panel: NOAA NWPS analysis/forecast series fetched from
+      the browser (ft³/s → m³/s, one `series` per request; forecasts may be
+      empty) and a retrospective date-range lookup; "Use" buttons set the
+      row's Streamflow (plus HUC/ReachID).
     - job submission and log polling
     - result views: README (safe markdown subset), parameters, files, and a
       Leaflet map over `/outputs/tiles` that fetches tiles with the bearer

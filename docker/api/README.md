@@ -199,6 +199,17 @@ with red for base-only and orange for candidate-only flooding.
   ReachID (the NHDPlus COMID, which NWM uses as its reach ID). The lookups
   call the public USGS NLDI and WBD services directly from the browser. A
   picked reach must still exist in the HAND hydrofabric.
+
+  Below the map, the picked (or current) reach's streamflows can set the row's
+  Streamflow in m³/s:
+  - recent analysis and short/medium/long-range forecasts from NOAA NWPS
+    (`api.water.noaa.gov`, converted from ft³/s), with "Use latest"/"Use peak".
+    NWPS forecast series are sometimes empty, which the page reports.
+  - historic flows for a date range of up to 92 days from the NWM v3.0
+    retrospective (1979-02-01 to 2023-02-01), with "Use max"/"Use mean". The
+    API reads the public `noaa-nwm-retrospective-3-0-pds` Zarr store through
+    `GET /ui/streamflow/retrospective`; each 28 days is one ~10 MB chunk, so a
+    lookup can take 10–30 seconds.
 - **Results** lists your jobs, streams their logs, and lets you cancel queued
   jobs. For retained S3 output it shows several views:
   - the generated `README.md`, whose relative links open files or map layers
@@ -242,7 +253,7 @@ access key ID, but not the secret. When `STREAM_INPUT_UNSIGNED=true`, unsigned
 requests read the input dataset. Leaflet loads from unpkg and basemap tiles
 come from OpenStreetMap. The reach picker loads overlay images from
 `hydro.nationalmap.gov` and `watersgeo.epa.gov`, and it queries
-`api.water.usgs.gov` and `hydro.nationalmap.gov`. The page's CSP permits only
+`api.water.usgs.gov`, `hydro.nationalmap.gov`, and `api.water.noaa.gov`. The page's CSP permits only
 those origins. Examples
 are read from `EXAMPLES_DIR`, which the API image sets to `/app/test-data`.
 

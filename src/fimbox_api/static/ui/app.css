@@ -57,6 +57,9 @@ dl.summary dt { font-weight: 600; } dl.summary dd { margin: 0; word-break: break
 .picker { margin: 12px 0; padding: 8px; border: 1px solid var(--border); border-radius: 4px; }
 #picker-map { height: 420px; cursor: crosshair; }
 .picker .error { color: #cf222e; }
+.flows { margin-top: 8px; }
+.flows h4 { margin: 8px 0 4px; }
+.flows .row { gap: 6px; flex-wrap: wrap; align-items: center; }
 .readme { max-width: 900px; }
 .readme pre { background: var(--bg); padding: 8px; overflow: auto; }
 .readme code { background: var(--bg); padding: 0 3px; border-radius: 3px; font-size: 12px; }

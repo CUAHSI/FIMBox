@@ -8,3 +8,4 @@ httpx==0.28.1
 python-multipart==0.0.20
 rio-tiler==7.9.2
 pyarrow>=15.0.2
+zstandard>=0.23.0

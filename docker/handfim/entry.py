@@ -94,18 +94,21 @@ def __download_huc_fim(huc_id: str, fim_data_dir: Path, fim_data_version=None) -
 #        fm.uniqueFID(hydrotable_dir, featureID_dir)
 
 
-def __generate_fim(huc_id, flow_rate_filepath, label="") -> None:
+def __generate_fim(huc_id, flow_rate_filepath, label="", updated_legacy: bool = False) -> None:
     """
     Generates a FIM map for a specific HUC and input flow rate file.
 
     Arguments:
         huc_id - str: The HUC identifier for the watershed.
         flow_rate_filepath - pathlib.Path: The path to the flow rate file.
+        updated_legacy - bool: Use the separately pinned newer NOAA checkout.
     Returns:
         pathlib.Path: The path to the generated FIM map.
     """
 
-    code_dir = "/home/code/inundation-mapping"
+    code_dir = "/home/code/inundation-mapping-updated" if updated_legacy else "/home/code/inundation-mapping"
+    if updated_legacy and not Path(code_dir, "tools", "inundate_mosaic_wrapper.py").is_file():
+        raise RuntimeError("Updated NOAA code is missing; rebuild the HAND-FIM image")
     output_dir = "/home/output"
     # Pass `label` as a keyword argument: the installed FIMServ `runfim`
     # (from CUAHSI/FIMserv@mods-for-docker-execution) has `depth` as its 5th
@@ -187,12 +190,12 @@ def __clean_fim_geotiff(
         dst.write(cropped_data.astype(rasterio.float32), 1)
 
 
-def __compute_fim_scenario(i, huc_id, reach_id, flow_rate_filepath, label):
+def __compute_fim_scenario(i, huc_id, reach_id, flow_rate_filepath, label, updated_legacy: bool = False):
     print(
         f"Computing FIM for {huc_id}:{reach_id} - input:{flow_rate_filepath}  - label: {label} \t [{i+1}]",
         flush=True,
     )
-    __generate_fim(huc_id, flow_rate_filepath, label)
+    __generate_fim(huc_id, flow_rate_filepath, label, updated_legacy)
 
 
 def __load_scenarios(json_path: Path) -> List[dict]:
@@ -559,6 +562,9 @@ def generate_scenario_fim(
             help="The subdirectory where the FIM maps will be saved.",
         ),
     ] = None,
+    updated_legacy: Annotated[
+        bool, typer.Option("--updated-legacy", help="Run NOAA v4.8.14.0 instead of the original legacy code."),
+    ] = False,
 ) -> None:
     """
     Generates one FIM GeoTIFF per scenario defined in a JSON scenario file.
@@ -577,6 +583,7 @@ def generate_scenario_fim(
             /home/data/inputs (the mounted input directory).
         max_procs - int: Number of concurrent processes to run.
         subdir - str: Optional output subdirectory.
+        updated_legacy - bool: Use NOAA v4.8.14.0 for inundation and mosaicking.
 
     Returns:
     ========
@@ -633,6 +640,7 @@ def generate_scenario_fim(
                     "+".join(reach_ids),
                     flow_rate_filepaths[label],
                     label,
+                    updated_legacy,
                 )
             )
 
@@ -725,6 +733,13 @@ def generate_streaming_scenario_fim(
         Path,
         typer.Argument(..., help="Directory for the per-scenario tile manifests."),
     ],
+    updated: Annotated[
+        bool,
+        typer.Option(
+            "--updated",
+            help="Classify pixels with NOAA inundation-mapping v4.8.14.0's own kernel (updatedstreaming).",
+        ),
+    ] = False,
 ) -> None:
     """
     Streams scenario inundation from a prepared cloud-optimized hydrofabric.
@@ -738,6 +753,7 @@ def generate_streaming_scenario_fim(
     ==========
         json_file - Path: Path to the scenario JSON file.
         output_dir - Path: Directory where <ScenarioID>.manifest.json files are written.
+        updated - bool: Use the updated NOAA checkout's flood rule, matching --updated-legacy.
 
     Returns:
     ========
@@ -750,8 +766,13 @@ def generate_streaming_scenario_fim(
 
     scenarios = __load_scenarios(json_file)
     try:
+        rule = None
+        if updated:
+            import noaa_stream_rule
+
+            rule = noaa_stream_rule.updated_rule()
         stream_storage.run_streaming(
-            scenarios, output_dir, streamFIM, stream_storage.StreamConfig.from_env(),
+            scenarios, output_dir, streamFIM, stream_storage.StreamConfig.from_env(), rule=rule,
         )
     except (streamFIM.StreamingInputError, RuntimeError) as error:
         print(f"Streaming HAND-FIM failed: {error}")

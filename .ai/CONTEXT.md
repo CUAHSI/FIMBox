@@ -12,6 +12,34 @@ that container (`docker/handfim/`), a second Typer CLI (`entry.py`) drives the
 actual FIM computation using NOAA/OWP's `inundation-mapping` tooling and the
 `fimserve` package (vendored/patched under `docker/handfim/patches/`).
 
+`execution_mode="updatedlegacy"` (SDK enum `UPDATEDLEGACY`) follows the legacy
+worker/output path, passing `scenario --updated-legacy` to the container.
+It selects the independent `/home/code/inundation-mapping-updated` checkout,
+pinned in the Dockerfile to NOAA v4.8.14.0 / b4459b5d4dd71e67f84a5656d7109237e21903ed.
+Original legacy stays on 9d39cb85. Both use the same downloaded hydrofabric;
+the newer code replaces the faulty mosaic and also adds a ~3 cm depth cutoff,
+so streaming parity may expose genuine scientific differences. Updated runs
+retain ordinary COGs/scenarios.json and can be references for `/jobs/parity`.
+`FIMBOX_PARITY_EXECUTION_MODE=updatedlegacy` selects it in the container parity
+test and additionally requires zero grid shift. `tests/test_updated_legacy.py`
+covers checkout routing, missing-code failure, CLI flag, and a real synthetic
+FIMserv/new NOAA run inside the image. New upstream imports need geocube/fsspec.
+
+`execution_mode="updatedstreaming"` (SDK `UPDATEDSTREAMING`) follows the
+streaming path (`HandFimJobOptions.streamed`, stream queue, S3 required,
+max_procs 1) and passes `stream-scenario --updated`. `streamFIM.run_scenario`
+accepts a `rule` (FloodRule: BranchPlan -> per-window classifier; default
+`pinned_rule`); `BranchPlan.ratings` keeps ordered (feature_id, discharge,
+discharge_cms, stage) rows. `docker/handfim/noaa_stream_rule.py` builds a rule
+from the updated checkout's `__subset_hydroTable_to_forecast` and numba
+`__go_fast_mapping` (0.03048 m minimum depth), so it matches `updatedlegacy`
+exactly on HUC 03020201. Parity accepts `execution_mode` (streaming modes
+only; appended to Celery args only when non-default). Container test:
+`tests/test_updated_streaming.py` (compares with NOAA `inundate()`).
+The NOAA loader registers the canonical `inundation` module name: Numba's
+precompiled kernel cache imports that name when restoring its environment.
+Container regression tests exercise cache reuse across fresh processes.
+
 ## User documentation
 
 - **`readme.md`** — Concise local quickstart and links to the focused guides.
@@ -197,6 +225,39 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
   at most MAX_GRID_SHIFT=2 px) is realigned when it reduces differences and
   reported as grid_shift_rows/columns plus unaligned_different_cells; the
   grid is padded by that limit so shifted cells can't fall off the edge. Shared by the parity task and `tests/test_scenario_parity.py`.
+  Evidence for the downloaded HUC 03020201 / reach 8780625 / 7 m3/s case is in
+  [`docs/legacy-output-offset-evidence.md`](../docs/legacy-output-offset-evidence.md):
+  identical legacy/streaming arrays, but legacy is 10 m grid-north. Independent
+  NOAA branch 0 REM/catchment/rating reconstruction matches streaming exactly
+  (0 differences), versus 486 for legacy without realignment. Follow-up
+  reproduction locates the defect in pinned NOAA `overlapping_inundation.py`:
+  the 30x30 partition map-coordinate round trip produces row offsets
+  3905.999999999977 / 4339.999999999977; `merge_data` writes these float windows,
+  landing one row north although reads sample the intended rows. An isolated
+  run of the pinned window methods plus Rasterio writes reproduces the
+  downloaded legacy mask AND transform; nearest-integer destination windows
+  restore the streaming transform. No production patch or historical-job
+  intermediate trace yet; do not apply a blanket one-row output shift.
+  `tools/visualize_legacy_offset.py` plus `tools/legacy_offset_report.html`
+  generate a self-contained offline visual report for this specific case:
+  actual NOAA source REM/catchment crop, independently reconstructed flooding
+  from documented rating brackets, native-grid output overlays, difference
+  colors, zoom/pan, pixel inspector, and an explicitly demonstrative one-row
+  legacy shift toggle. Generated local report:
+  `res_download/parity/legacy-offset-report.html` (not committed). Generation
+  needs NumPy/Rasterio and public NOAA access; viewing needs only a browser.
+  Tests: `tests/test_offset_visualization.py` (source rule, native placement,
+  grid rejection, safe JSON embedding). `tests/test_legacy_mosaic_offset.py`
+  runs the real pinned `OverlapWindowMerge.merge_rasters` on a sparse branch 0
+  marker raster, intercepts `write_band`, and asserts the call at
+  `merge_data` L437 uses row_off just below 3906 (3905.999999999971 in-image),
+  moving native row 4281 to 4280; rounding that window keeps row 4281. It skips
+  unless `overlapping_inundation` imports; run it in `cuahsi/handfim` with
+  `PYTHONPATH=/home/code/inundation-mapping/tools` (command in evidence doc).
+  NOAA deleted `overlapping_inundation.py` in v4.8.14.0 (PR #1650, 2025-10-10);
+  latest `dev` mosaics with `rasterio.merge.merge(method="max")`, which placed
+  the marker test case correctly. The defect is specific to the pinned commit;
+  rerun parity before moving the NOAA pin.
 - **`src/fimbox_api/rasters.py`** — rio-tiler/rasterio metadata and 256px
   Web Mercator window/overview reads. Request-scoped credentials configure
   signed S3 range reads with directory listing disabled. Binary flood=1 is blue,
@@ -432,8 +493,9 @@ uploaded tile by tile.
 
 - **`docker/handfim/prepare_streaming_dataset.py`** — Offline tool (not run per
   request): `prepare_huc` converts a downloaded `flood_<huc>/<huc>` directory
-  into `dataset.json`, `hucs/<huc>/huc.json` (written last), lossless 512-px
-  REM/catchment COGs per branch, and per-reach JSONs with HydroID ratings
+  into `dataset.parquet`, `hucs/<huc>/huc.parquet` (written last), lossless 512-px
+  REM/catchment COGs per branch, and per-reach Snappy-compressed Parquet files
+  with HydroID ratings
   (lake rows dropped) and the COG blocks each reach occupies. `download_huc`
   (run first by the CLI) fetches only those inputs from the public
   `ciroh-owp-hand-fim` bucket (us-east-2, unsigned, `hand_fim_<version>/`)
@@ -443,15 +505,34 @@ uploaded tile by tile.
   source order and uses the first matching row's forecast, as NOAA does.
   HUC 03030002 branch 0 contains HydroID 11690624 mapped to three features;
   this is supported, not rejected as an ambiguous mapping.
+  Dataset version 3 uses Parquet-only metadata and reach indexes. Dataset
+  metadata is a single row (`format`, `version`, `block_size`, `fim_version`).
+  HUC metadata has one row per branch: common `huc`, `crs`, six-coefficient
+  float64 `transform`, reference `width`/`height`, `block_size`; branch columns
+  `branch`, `rem`, `catchments`, `row_off`, `col_off`, `branch_width`/`branch_height`.
+  IDs are strings, dimensions/offsets int64, version/block size int32.
+  The reader reconstructs the planning dictionary via `read_index_parquet`.
+  Each reach
+  table has one row per branch/HydroID, string `huc`/`feature_id`/`branch`,
+  int64 `hydroid`, float64-list `discharge_cms`/`stage`, nullable int64-list
+  `row_order`, and `blocks` (lists of int32 row/column pairs, union per reach
+  and branch). All tables use Snappy compression for viewer compatibility;
+  existing Zstandard files remain readable by the worker (no schema/version change).
+  COG rasters are unchanged.
+  JSON prepared metadata and older dataset versions are not supported.
+  Preparation requires a new output root when migrating (rejects `dataset.json`
+  and incompatible Parquet roots). Job-output scenario manifests stay JSON.
+  PyArrow is an explicit HAND-FIM and test dependency; rebuild images for version 3.
 - HydroShare upload compatibility: the HydroShare S3 gateway was observed
-  storing AWS chunked-upload framing in both JSON indexes and COGs. Recent
+  storing AWS chunked-upload framing in uploaded indexes and COGs. Recent
   external AWS CLI uploads must set
   `AWS_REQUEST_CHECKSUM_CALCULATION=when_required`; affected datasets need
   re-uploading from the original local files. The API/worker boto3 1.35.99
   pin predates the new optional checksum defaults (and does not accept the
   `request_checksum_calculation` Config option).
 - **`docker/handfim/patches/streamFIM.py`** — Copied into fimserve. Pure
-  science/tiling: `plan_huc` (first discharge per feature, stage
+  science/tiling: `read_index_parquet` decodes metadata and reach tables into the planning
+  representation; `plan_huc` (first discharge per feature, stage
   interpolation), `schedule_tiles` (fixed tile_size windows on each HUC's native
   grid), `compute_tile` (reads only scheduled blocks, `stage > rem`, max across
   branches), `encode_tile` (binary uint8 COG), `run_scenario` (returns the
@@ -463,8 +544,14 @@ uploaded tile by tile.
   `entry.py stream-scenario` command: `StreamConfig.from_env` (FIMBOX_STREAM_*,
   FIMBOX_S3_*, AWS_*), boto3 index reads, GDAL `s3://` range reads, per-tile
   `put_object`, local `<sid>.manifest.json`.
-  Invalid index JSON reports the full S3 object location and upload remediation
+  Invalid index Parquet reports the full S3 object location and upload remediation
   without including object contents; bounded reads enforce the index size limit.
+  `run_streaming(rule=...)` forwards an optional flood rule to `run_scenario`.
+- **`docker/handfim/noaa_stream_rule.py`** — `updatedstreaming` flood rule:
+  `load_inundation` imports only the updated NOAA `tools/inundation.py`
+  (RuntimeError "rebuild the HAND-FIM image" if absent); `updated_rule` turns
+  BranchPlan ratings into NOAA hydro-table/forecast frames and classifies
+  windows with NOAA's kernel (copies inputs; kernel mutates in place).
 - API: `models.HandFimJobOptions.execution_mode` (streaming requires S3 output
   and one process); `config` STREAM_* settings; `storage.job_s3_environment`
   (credentials for the subprocess environment, rejects near-expiry);

@@ -129,7 +129,7 @@ def __submit_hand_fim(
             "msg": "This deployment requires a HydroShare output_bucket",
             "type": "value_error",
         }])
-    if destination.execution_mode == "streaming" and not settings.streaming_enabled:
+    if destination.streamed and not settings.streaming_enabled:
         raise HTTPException(status_code=409, detail="Streaming execution is not configured on this server")
     job_id = str(uuid4())
     if destination.output_bucket is not None:
@@ -147,13 +147,13 @@ def __submit_hand_fim(
                 destination.max_procs,
                 destination.overwrite,
                 # Legacy jobs keep the original arguments so older workers still accept them.
-                *(["streaming"] if destination.execution_mode == "streaming" else []),
+                *([destination.execution_mode] if destination.execution_mode != "legacy" else []),
             ],
             task_id=job_id,
             retry=False,
             **(
                 {"queue": settings.stream_queue}
-                if destination.execution_mode == "streaming" and settings.stream_queue else {}
+                if destination.streamed and settings.stream_queue else {}
             ),
         )
     except (KombuError, RedisError, OSError):
@@ -195,6 +195,8 @@ def submit_parity(body: ParityJobRequest, session: AuthenticatedSession) -> JobS
             args=[
                 job_id, body.legacy_bucket, body.legacy_prefix,
                 body.output_bucket, body.output_prefix, body.overwrite,
+                # Default parity jobs keep the original arguments so older workers still accept them.
+                *([body.execution_mode] if body.execution_mode != "streaming" else []),
             ],
             task_id=job_id,
             retry=False,

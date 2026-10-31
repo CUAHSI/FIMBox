@@ -86,7 +86,15 @@ requests temporary credentials and stores them in Redis; neither provider
 tokens nor S3 credentials are passed in Celery arguments or returned to the
 client. There is no static AWS-credential fallback.
 
-`execution_mode` defaults to `legacy`. `streaming` runs the
+`execution_mode` defaults to `legacy`. `updatedlegacy` runs the same FIMserv
+workflow with separately pinned NOAA v4.8.14.0, using the same inputs and
+producing the same COG layout. It is intended for comparison against the
+original legacy implementation and streaming; rebuild the base/worker image
+before selecting it. See [updated legacy mode](../handfim/README.md#updated-legacy-mode).
+`updatedstreaming` is streaming with NOAA v4.8.14.0's own per-pixel rule
+(including its ~3 cm minimum depth); it has the same requirements as
+`streaming`. See [updated streaming mode](../handfim/README.md#updated-streaming-mode).
+`streaming` runs the
 [streaming HAND-FIM mode](../handfim/README.md#streaming-mode): it requires
 `output_bucket`, permits only `max_procs` 1, and returns 409 unless the
 deployment sets `STREAM_INPUT_BUCKET`. The worker passes the job's temporary
@@ -127,6 +135,13 @@ compares each legacy COG with the union of that scenario's streaming tiles,
 cell by cell on the legacy grid. Like streaming jobs, parity requires
 `STREAM_INPUT_BUCKET` and authentication, and uses `STREAM_QUEUE` if it is
 set. The output prefix must differ from the legacy prefix.
+
+The retained reference may also be an `updatedlegacy` run: pass its bucket
+and prefix as `legacy_bucket` and `legacy_prefix`. The parity endpoint does
+not rerun the reference; it compares its saved COGs against a fresh streaming run.
+Set the optional `execution_mode` to `updatedstreaming` (default `streaming`)
+to rerun with NOAA's newer rule; this is the like-for-like check against an
+`updatedlegacy` reference.
 
 Poll `GET /jobs/{job_id}` as usual. The result's `parity` list gives, per
 scenario, `matches`, flooded/legacy-only/streaming-only/different cell

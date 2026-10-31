@@ -46,6 +46,13 @@ RUN git clone --depth 1 https://github.com/NOAA-OWP/inundation-mapping.git /home
  && git fetch origin ${SHA} \
  && git checkout ${SHA}
 
+# Keep the original legacy checkout untouched for reproducible comparisons.
+ARG UPDATED_NOAA_SHA=b4459b5d4dd71e67f84a5656d7109237e21903ed
+RUN git init /home/code/inundation-mapping-updated \
+ && git -C /home/code/inundation-mapping-updated remote add origin https://github.com/NOAA-OWP/inundation-mapping.git \
+ && git -C /home/code/inundation-mapping-updated fetch --depth 1 origin ${UPDATED_NOAA_SHA} \
+ && git -C /home/code/inundation-mapping-updated checkout FETCH_HEAD
+
 
 # Install FIMServ, patch the FIMServ library to allow 
 # running flood_inundation calculations concurrently
@@ -74,13 +81,12 @@ RUN cd /home/code/FIMServ \
 COPY compute_rating_increments.py /home/compute_rating_increments.py
 COPY entry.py /home/entry.py
 COPY stream_storage.py /home/stream_storage.py
+COPY noaa_stream_rule.py /home/noaa_stream_rule.py
 COPY prepare_streaming_dataset.py /home/prepare_streaming_dataset.py
 RUN mkdir -p /home/data/inputs
 
 # Set bash as the default command
 ENTRYPOINT ["/opt/conda/bin/python", "entry.py"]
 CMD ["--help"]
-
-
 
 

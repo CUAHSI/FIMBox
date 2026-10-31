@@ -20,10 +20,13 @@ Scientific behavior mirrors the pinned NOAA inundation-mapping code
 * Branch mosaics take the maximum signed HydroID, so a pixel is flooded when any
   branch floods it. Output tiles are 1 (flooded) and NaN (otherwise).
 
+``run_scenario`` accepts another per-branch flood rule (see ``FloodRule``); the
+container's ``noaa_stream_rule`` uses NOAA's own newer kernel this way.
+
 Tiles use the native grid of each HUC's branch 0; HUCs are never resampled to a
 shared grid. Overlapping tiles from neighboring HUCs combine as a flood union.
 
-The module depends only on NumPy and Rasterio so it can be tested without the
+The module depends only on NumPy, PyArrow, and Rasterio so it can be tested without the
 fimserve or NOAA packages. Callers supply object access functions.
 """
 
@@ -32,6 +35,8 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 import rasterio
 from rasterio.crs import CRS
 from rasterio.io import MemoryFile
@@ -41,7 +46,7 @@ from rasterio.warp import transform_bounds
 from rasterio.windows import Window
 
 DATASET_FORMAT = "fimbox-hand-stream"
-DATASET_VERSION = 1
+DATASET_VERSION = 3
 MANIFEST_FORMAT = "fimbox-scenario-tiles"
 MANIFEST_VERSION = 1
 DEFAULT_TILE_SIZE = 2048
@@ -60,13 +65,99 @@ GDAL_STREAMING_OPTIONS = {
     "GDAL_NUM_THREADS": 1,
 }
 
-ReadJson = Callable[[str], dict | None]
+ReadIndex = Callable[[str], dict | None]
 RasterPath = Callable[[str], str]
 WriteTile = Callable[[str, bytes], str]
+# (feature_id, requested discharge, rating discharge_cms, rating stage) in hydro-table order.
+RatingRow = tuple[str, float, float, float]
+# Classifies one (REM, catchments) window of a branch; returns the flooded mask.
+FloodCells = Callable[[np.ndarray, np.ndarray], np.ndarray]
+FloodRule = Callable[["BranchPlan"], FloodCells]
 
 
 class StreamingInputError(RuntimeError):
     """The prepared dataset or request cannot produce a valid streaming result."""
+
+
+def __parquet_rows(content: bytes) -> list[dict]:
+    try:
+        rows = pq.read_table(pa.BufferReader(content), use_threads=False).to_pylist()
+    except (pa.ArrowException, OSError) as error:
+        raise StreamingInputError("Prepared dataset index is not valid Parquet") from error
+    __require(bool(rows), "Prepared Parquet index is empty")
+    return rows
+
+
+def read_index_parquet(key: str, content: bytes) -> dict:
+    """Decodes dataset, HUC, or reach tables into the planning representation."""
+
+    if "/reaches/" in key and key.endswith(".parquet"):
+        return read_reach_parquet(content)
+    rows = __parquet_rows(content)
+    if key == "dataset.parquet":
+        __require(len(rows) == 1, "Prepared dataset metadata must contain exactly one row")
+        __require(
+            all(name in rows[0] for name in ("format", "version", "block_size", "fim_version")),
+            "Prepared dataset metadata is missing required columns",
+        )
+        return rows[0]
+    __require(key.endswith("/huc.parquet"), f"Unsupported prepared index path: {key}")
+    grid_columns = ("huc", "crs", "transform", "width", "height", "block_size")
+    branch_columns = ("branch", "rem", "catchments", "row_off", "col_off", "branch_width", "branch_height")
+    __require(
+        all(name in rows[0] for name in (*grid_columns, *branch_columns)),
+        "Prepared HUC metadata is missing required columns",
+    )
+    metadata = {name: rows[0][name] for name in grid_columns}
+    branches = {}
+    for row in rows:
+        __require(
+            all(row[name] == metadata[name] for name in grid_columns),
+            "Prepared HUC metadata has inconsistent reference grids",
+        )
+        branch = row["branch"]
+        __require(isinstance(branch, str) and branch not in branches, "Prepared HUC metadata has invalid branches")
+        branches[branch] = {
+            "rem": row["rem"], "catchments": row["catchments"],
+            "row_off": row["row_off"], "col_off": row["col_off"],
+            "width": row["branch_width"], "height": row["branch_height"],
+        }
+    return {**metadata, "branches": branches}
+
+
+def read_reach_parquet(content: bytes) -> dict:
+    """Decodes a prepared Parquet reach index into the planning representation."""
+
+    rows = __parquet_rows(content)
+    feature_id = rows[0].get("feature_id")
+    huc = rows[0].get("huc")
+    branches: dict[str, dict] = {}
+    for row in rows:
+        __require(
+            row.get("feature_id") == feature_id and row.get("huc") == huc,
+            "Prepared Parquet reach index mixes reaches or HUCs",
+        )
+        __require(
+            all(name in row for name in ("branch", "hydroid", "discharge_cms", "stage", "row_order", "blocks")),
+            "Prepared Parquet reach index is missing required columns",
+        )
+        __require(
+            isinstance(row["discharge_cms"], list) and isinstance(row["stage"], list)
+            and len(row["discharge_cms"]) == len(row["stage"]) > 0
+            and (row["row_order"] is None or (
+                isinstance(row["row_order"], list)
+                and len(row["row_order"]) == len(row["stage"]))),
+            "Prepared Parquet reach index has invalid rating arrays",
+        )
+        entry = branches.setdefault(row["branch"], {
+            "branch": row["branch"], "hydroids": [], "blocks": row["blocks"],
+        })
+        __require(entry["blocks"] == row["blocks"], "Prepared Parquet reach index has inconsistent blocks")
+        entry["hydroids"].append({
+            "id": row["hydroid"], "discharge_cms": row["discharge_cms"], "stage": row["stage"],
+            **({"row_order": row["row_order"]} if row["row_order"] is not None else {}),
+        })
+    return {"huc": huc, "feature_id": feature_id, "branches": list(branches.values())}
 
 
 @dataclass
@@ -80,6 +171,7 @@ class BranchPlan:
     height: int
     stages: dict[int, np.float32] = field(default_factory=dict)
     blocks: set[tuple[int, int]] = field(default_factory=set)
+    ratings: dict[int, list[RatingRow]] = field(default_factory=dict)
 
     def lookup(self) -> tuple[np.ndarray, np.ndarray]:
         hydroids = np.array(sorted(self.stages), dtype=np.int64)
@@ -130,6 +222,20 @@ def flooded_cells(
         return known & (rem >= 0) & (stages[index] > rem)
 
 
+def pinned_rule(plan: BranchPlan) -> FloodCells:
+    """
+    Default flood rule mirroring the pinned NOAA code (see module docstring).
+
+    Arguments:
+        plan: Branch plan with interpolated stages.
+    Returns:
+        A function that classifies one branch window.
+    """
+
+    hydroids, stages = plan.lookup()
+    return lambda rem, catchments: flooded_cells(rem, catchments, hydroids, stages)
+
+
 def first_discharges(reaches: Iterable[dict]) -> dict[str, dict[str, float]]:
     """
     Groups scenario reaches by HUC, keeping each feature ID's first discharge.
@@ -162,7 +268,7 @@ def __validate_huc(huc: str, metadata: dict) -> None:
 
 
 def plan_huc(
-    huc: str, discharges: dict[str, float], read_json: ReadJson,
+    huc: str, discharges: dict[str, float], read_index: ReadIndex,
 ) -> tuple[dict, list[BranchPlan], list[str]]:
     """
     Resolves requested reaches to branches, stages, and occupied COG blocks.
@@ -170,25 +276,26 @@ def plan_huc(
     Arguments:
         huc: Eight-digit HUC identifier.
         discharges: Feature ID to discharge for reaches in this HUC.
-        read_json: Reads a dataset-relative JSON object, returning None if absent.
+        read_index: Reads a decoded Parquet metadata or reach table; None if absent.
     Returns:
         The HUC metadata, branch plans that contain flooded candidates, and
         the requested feature IDs that are absent from the prepared dataset.
     """
 
-    metadata = read_json(f"hucs/{huc}/huc.json")
+    metadata = read_index(f"hucs/{huc}/huc.parquet")
     if metadata is None:
         raise StreamingInputError(f"HUC {huc} is not in the prepared streaming dataset")
     __validate_huc(huc, metadata)
     plans: dict[str, BranchPlan] = {}
-    ratings: dict[tuple[str, int], list[tuple[float, dict]]] = {}
+    ratings: dict[tuple[str, int], list[tuple[str, float, dict]]] = {}
     missing = []
     for feature_id, discharge in discharges.items():
-        reach = read_json(f"hucs/{huc}/reaches/{feature_id}.json")
+        reach = read_index(f"hucs/{huc}/reaches/{feature_id}.parquet")
         if reach is None:
             missing.append(feature_id)
             continue
         __require(str(reach.get("feature_id")) == feature_id, f"Reach {feature_id} index is inconsistent")
+        __require(reach.get("huc") == huc, f"Reach {feature_id} index has an inconsistent HUC")
         for entry in reach.get("branches", []):
             branch = str(entry["branch"])
             source = metadata["branches"].get(branch)
@@ -199,28 +306,31 @@ def plan_huc(
                 width=int(source["width"]), height=int(source["height"]),
             ))
             for rating in entry.get("hydroids", []):
-                ratings.setdefault((branch, int(rating["id"])), []).append((discharge, rating))
+                ratings.setdefault((branch, int(rating["id"])), []).append((feature_id, discharge, rating))
             plan.blocks.update((int(row), int(col)) for row, col in entry.get("blocks", []))
     for (branch, hydroid), curves in ratings.items():
         if len(curves) == 1:
-            discharge, rating = curves[0]
-            plans[branch].stages[hydroid] = stage_for_discharge(
-                discharge, rating["discharge_cms"], rating["stage"],
-            )
+            feature_id, discharge, rating = curves[0]
+            rows = [(feature_id, discharge, q, h) for q, h in zip(rating["discharge_cms"], rating["stage"])]
         else:
-            rows = []
-            for discharge, rating in curves:
+            ordered = []
+            for feature_id, discharge, rating in curves:
                 order = rating.get("row_order")
                 __require(
                     isinstance(order, list)
                     and len(order) == len(rating["discharge_cms"]) == len(rating["stage"]),
                     f"Shared HydroID {hydroid} in branch {branch} needs row order; reprepare the HUC",
                 )
-                rows.extend(zip(order, rating["discharge_cms"], rating["stage"], [discharge] * len(order)))
-            rows.sort(key=lambda row: row[0])
-            plans[branch].stages[hydroid] = stage_for_discharge(
-                rows[0][3], [row[1] for row in rows], [row[2] for row in rows],
-            )
+                ordered.extend(
+                    (position, (feature_id, discharge, q, h))
+                    for position, q, h in zip(order, rating["discharge_cms"], rating["stage"])
+                )
+            ordered.sort(key=lambda row: row[0])
+            rows = [row for _, row in ordered]
+        plans[branch].ratings[hydroid] = rows
+        plans[branch].stages[hydroid] = stage_for_discharge(
+            rows[0][1], [row[2] for row in rows], [row[3] for row in rows],
+        )
     return metadata, [plans[b] for b in sorted(plans, key=__branch_order) if plans[b].blocks], missing
 
 
@@ -288,7 +398,7 @@ def __check_source(dataset, plan: BranchPlan, transform: Affine, crs: CRS, name:
 def compute_tile(
     metadata: dict,
     plans: list[BranchPlan],
-    lookups: list[tuple[np.ndarray, np.ndarray]],
+    rules: list[FloodCells],
     tile: tuple[int, int],
     parts: list[tuple[int, Window, Window]],
     tile_size: int,
@@ -300,7 +410,7 @@ def compute_tile(
     Arguments:
         metadata: HUC metadata with the reference grid.
         plans: Branch plans referenced by ``parts``.
-        lookups: Sorted HydroID and stage arrays aligned with ``plans``.
+        rules: Window flood classifiers aligned with ``plans``.
         tile: Output tile (row, column).
         parts: Scheduled (plan index, source window, tile window) entries.
         tile_size: Output tile width and height in pixels.
@@ -320,7 +430,6 @@ def compute_tile(
         by_plan.setdefault(index, []).append((source_window, tile_window))
     for index in sorted(by_plan):
         plan = plans[index]
-        hydroids, stages = lookups[index]
         with rasterio.open(raster_path(plan.rem)) as rem, rasterio.open(raster_path(plan.catchments)) as catchments:
             __check_source(rem, plan, transform, crs, "REM")
             __check_source(catchments, plan, transform, crs, "catchments")
@@ -328,7 +437,7 @@ def compute_tile(
                 rem_values = rem.read(1, window=source_window)
                 catchment_values = catchments.read(1, window=source_window)
                 rows, cols = tile_window.toslices()
-                flooded[rows, cols] |= flooded_cells(rem_values, catchment_values, hydroids, stages)
+                flooded[rows, cols] |= rules[index](rem_values, catchment_values)
                 del rem_values, catchment_values
     tile_transform = transform * Affine.translation(tile_col * tile_size, tile_row * tile_size)
     return flooded, tile_transform
@@ -365,13 +474,14 @@ def encode_tile(flooded: np.ndarray, transform: Affine, crs: CRS) -> bytes:
 
 def run_scenario(
     scenario: dict,
-    read_json: ReadJson,
+    read_index: ReadIndex,
     raster_path: RasterPath,
     write_tile: WriteTile,
     tile_size: int = DEFAULT_TILE_SIZE,
     max_blocks: int = DEFAULT_MAX_BLOCKS,
     max_tiles: int = DEFAULT_MAX_TILES,
     log: Callable[[str], None] = print,
+    rule: FloodRule = pinned_rule,
 ) -> dict:
     """
     Streams one scenario's inundation into independently written COG tiles.
@@ -380,30 +490,31 @@ def run_scenario(
 
     Arguments:
         scenario: Scenario dictionary with ScenarioID and Reaches.
-        read_json: Reads a dataset-relative JSON object, returning None if absent.
+        read_index: Reads a decoded Parquet metadata or reach table; None if absent.
         raster_path: Converts a dataset-relative raster key to a Rasterio path.
         write_tile: Persists one encoded tile under a relative name; returns its key.
         tile_size: Output tile width and height in pixels; a multiple of 512.
         max_blocks: Admission limit for scheduled source blocks per scenario.
         max_tiles: Admission limit for output tiles per scenario.
         log: Progress output function.
+        rule: Builds each branch's window flood classifier; defaults to ``pinned_rule``.
     Returns:
         The scenario tile manifest.
     """
 
     __require(tile_size > 0 and tile_size % 512 == 0, "Streaming tile size must be a positive multiple of 512")
-    dataset = read_json("dataset.json")
+    dataset = read_index("dataset.parquet")
     __require(
         dataset is not None and dataset.get("format") == DATASET_FORMAT
         and dataset.get("version") == DATASET_VERSION,
-        "Prepared streaming dataset is missing or has an unsupported format",
+        "Prepared streaming dataset is missing or has an unsupported format; prepare a version 3 Parquet dataset",
     )
     scenario_id = scenario["ScenarioID"]
     tiles = []
     hucs = {}
     missing_reaches = []
     for huc, discharges in sorted(first_discharges(scenario["Reaches"]).items()):
-        metadata, plans, missing = plan_huc(huc, discharges, read_json)
+        metadata, plans, missing = plan_huc(huc, discharges, read_index)
         missing_reaches.extend(f"{huc}:{feature_id}" for feature_id in missing)
         for feature_id in missing:
             log(f"[{scenario_id}] reach {feature_id} is not in HUC {huc}'s prepared index; skipping")
@@ -419,11 +530,11 @@ def run_scenario(
         )
         crs = CRS.from_user_input(metadata["crs"])
         hucs[huc] = {"crs": crs.to_string(), "resolution": abs(metadata["transform"][0])}
-        lookups = [plan.lookup() for plan in plans]
+        rules = [rule(plan) for plan in plans]
         log(f"[{scenario_id}] HUC {huc}: {len(plans)} branches, {block_count} blocks, {len(schedule)} tiles")
         for tile in sorted(schedule):
             flooded, transform = compute_tile(
-                metadata, plans, lookups, tile, schedule.pop(tile), tile_size, raster_path,
+                metadata, plans, rules, tile, schedule.pop(tile), tile_size, raster_path,
             )
             if not flooded.any():
                 continue

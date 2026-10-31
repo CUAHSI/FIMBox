@@ -23,7 +23,8 @@ from schemas.hand_fim_schema import HandFimOutput
 from .celery_app import celery_app
 from .config import settings
 from .models import (
-    HandFimParameters, HandFimJobOptions, OutputFile, ScenarioManifest, ScenarioParity, StoredHandFimResult,
+    STREAMING_MODES, HandFimParameters, HandFimJobOptions, OutputFile, ScenarioManifest, ScenarioParity,
+    StoredHandFimResult,
 )
 from .job_logs import append_job_log, clear_job_logs
 from .parity import compare_scenario_outputs
@@ -37,7 +38,7 @@ MAX_MANIFEST_BYTES = 8 * 1024 * 1024
 def __write_output_readme(
     output_dir: Path, job_id: str, scenarios: HandFimParameters, destination: HandFimJobOptions,
 ) -> None:
-    streamed = destination.execution_mode == "streaming"
+    streamed = destination.streamed
     max_procs = 1 if streamed else (
         destination.max_procs if destination.max_procs is not None else settings.hand_fim_max_procs
     )
@@ -307,7 +308,10 @@ def __hand_fim_streaming(
     published = []
     try:
         __run_scenario(
-            [sys.executable, str(settings.hand_fim_entry), "stream-scenario", str(scenario_file), str(output_dir)],
+            [
+                sys.executable, str(settings.hand_fim_entry), "stream-scenario", str(scenario_file), str(output_dir),
+                *(["--updated"] if destination.execution_mode == "updatedstreaming" else []),
+            ],
             job_id,
             {
                 **job_s3_environment(UUID(job_id), settings.stream_min_credential_seconds),
@@ -384,7 +388,7 @@ def __hand_fim_streaming(
             OutputFile(path=path.name, key=key, size_bytes=path.stat().st_size)
             for path, key in ((scenarios_path, scenarios_key), (readme_path, readme_key))
         ],
-        execution_mode="streaming", scenario_manifests=refs, local_output_dir=None,
+        execution_mode=destination.execution_mode, scenario_manifests=refs, local_output_dir=None,
         **destination.model_dump(include={"output_bucket", "output_prefix"}),
     ).model_dump(mode="json")
 
@@ -422,7 +426,7 @@ def hand_fim(
             path.unlink()
         (output_dir / "scenarios.json").write_text(scenarios.model_dump_json(), encoding="utf-8")
         __write_output_readme(output_dir, job_id, scenarios, destination)
-        if destination.execution_mode == "streaming":
+        if destination.streamed:
             return __hand_fim_streaming(job_id, scenarios, destination, scenario_file, output_dir)
         __run_scenario(
             [
@@ -432,6 +436,7 @@ def hand_fim(
                 str(scenario_file),
                 str(destination.max_procs if destination.max_procs is not None else settings.hand_fim_max_procs),
                 job_id,
+                *(["--updated-legacy"] if destination.execution_mode == "updatedlegacy" else []),
             ],
             job_id,
         )
@@ -484,6 +489,7 @@ def hand_fim(
         append_job_log(job_id, "HAND-FIM outputs prepared; cleaning local files.\n")
         return StoredHandFimResult(
             outputs=outputs, files=files,
+            execution_mode=destination.execution_mode,
             local_output_dir=None,
             **destination.model_dump(include={"output_bucket", "output_prefix"}),
         ).model_dump(mode="json")
@@ -573,9 +579,12 @@ def hand_fim_parity(
     output_bucket: str,
     output_prefix: str = "",
     overwrite: bool = False,
+    execution_mode: str = "streaming",
 ) -> dict[str, Any]:
     """Rerun a retained legacy run's scenarios with streaming, then diff each scenario's flood mask."""
     job_id = str(UUID(job_id))
+    if execution_mode not in STREAMING_MODES:
+        raise ValueError(f"Parity requires a streaming execution_mode, not {execution_mode!r}")
     client = s3_client(UUID(job_id))
     scenarios = __legacy_scenarios(client, legacy_bucket, legacy_prefix)
     scenario_ids = [scenario.ScenarioID for scenario in scenarios.root]
@@ -586,9 +595,9 @@ def hand_fim_parity(
     if not overwrite:
         __reject_existing_s3_keys(client, output_bucket, [report_key, *diff_keys.values()])
     result = StoredHandFimResult.model_validate(hand_fim(
-        job_id, scenarios.model_dump(mode="json"), output_bucket, output_prefix, None, overwrite, "streaming",
+        job_id, scenarios.model_dump(mode="json"), output_bucket, output_prefix, None, overwrite, execution_mode,
     ))
-    append_job_log(job_id, "Comparing streaming tiles with legacy scenario outputs.\n")
+    append_job_log(job_id, f"Comparing {execution_mode} tiles with legacy scenario outputs.\n")
     with tempfile.TemporaryDirectory(prefix=f"parity-{job_id}-", dir=settings.hand_fim_input_dir) as work:
         comparisons = []
         for manifest_ref in result.scenario_manifests:

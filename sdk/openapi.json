@@ -1441,7 +1441,9 @@
             "type": "string",
             "enum": [
               "legacy",
-              "streaming"
+              "updatedlegacy",
+              "streaming",
+              "updatedstreaming"
             ],
             "title": "Execution Mode",
             "default": "legacy"
@@ -1567,10 +1569,12 @@
             "type": "string",
             "enum": [
               "legacy",
-              "streaming"
+              "updatedlegacy",
+              "streaming",
+              "updatedstreaming"
             ],
             "title": "Execution Mode",
-            "description": "legacy downloads whole HUCs and writes one COG per scenario. streaming range-reads a prepared cloud-optimized hydrofabric per reach and writes tiled COGs plus a manifest per scenario; it requires output_bucket and a single process.",
+            "description": "legacy downloads whole HUCs and writes one COG per scenario. updatedlegacy uses the same workflow with NOAA v4.8.14.0 instead of the original pinned code. streaming range-reads a prepared cloud-optimized hydrofabric per reach and writes tiled COGs plus a manifest per scenario; it requires output_bucket and a single process. updatedstreaming is streaming with NOAA v4.8.14.0's own flood kernel, matching updatedlegacy.",
             "default": "legacy"
           },
           "scenarios": {
@@ -1852,6 +1856,16 @@
             "title": "Overwrite",
             "description": "Replace existing S3 objects with matching output keys; by default, conflicting keys fail the job.",
             "default": false
+          },
+          "execution_mode": {
+            "type": "string",
+            "enum": [
+              "streaming",
+              "updatedstreaming"
+            ],
+            "title": "Execution Mode",
+            "description": "Streaming mode to rerun; use updatedstreaming to compare against an updatedlegacy run.",
+            "default": "streaming"
           }
         },
         "additionalProperties": false,

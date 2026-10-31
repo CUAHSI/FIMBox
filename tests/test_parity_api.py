@@ -110,6 +110,14 @@ class ParityWorkerTests(unittest.TestCase):
     def run_parity(self, overwrite=False):
         return tasks.hand_fim_parity.run(self.job_id, **REQUEST, overwrite=overwrite)
 
+    def test_updatedstreaming_parity_reruns_with_noaa_rule_and_rejects_legacy_modes(self):
+        tasks.hand_fim_parity.run(self.job_id, **REQUEST, execution_mode="updatedstreaming")
+        self.hand_fim.assert_called_once_with(
+            self.job_id, PAYLOAD, "fim-output", "runs/streaming", None, False, "updatedstreaming",
+        )
+        with self.assertRaisesRegex(ValueError, "streaming execution_mode"):
+            tasks.hand_fim_parity.run(self.job_id, **REQUEST, execution_mode="updatedlegacy")
+
     def test_matching_outputs_rerun_legacy_scenarios_with_streaming_and_publish_report(self):
         result = self.run_parity()
         self.hand_fim.assert_called_once_with(
@@ -205,6 +213,15 @@ class ParityApiTests(unittest.TestCase):
         with patch.object(main.settings, "stream_queue", "streaming"):
             _response, enqueue = self.submit()
         self.assertEqual(enqueue.call_args.kwargs["queue"], "streaming")
+
+    def test_updatedstreaming_parity_mode_is_appended_and_legacy_modes_rejected(self):
+        response, enqueue = self.submit(execution_mode="updatedstreaming")
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(enqueue.call_args.kwargs["args"][-1], "updatedstreaming")
+        self.assertEqual(len(enqueue.call_args.kwargs["args"]), 7)
+        response, enqueue = self.submit(execution_mode="updatedlegacy")
+        self.assertEqual(response.status_code, 422)
+        enqueue.assert_not_called()
 
     def test_parity_requires_streaming_authentication_and_valid_locations(self):
         with patch.object(main.settings, "stream_input_bucket", ""):

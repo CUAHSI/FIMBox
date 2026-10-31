@@ -11,6 +11,8 @@ from unittest.mock import Mock, patch
 from uuid import uuid4
 
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 import rasterio
 from botocore.exceptions import ClientError
 from fastapi.testclient import TestClient
@@ -61,6 +63,21 @@ class StreamingOptionTests(unittest.TestCase):
             HandFimJobOptions(**DESTINATION, execution_mode="streaming", max_procs=2)
         self.assertEqual(HandFimJobOptions(**DESTINATION).execution_mode, "legacy")
 
+    def test_updatedlegacy_accepts_local_output_and_multiple_processes(self):
+        options = HandFimJobOptions(
+            output_bucket=None, output_prefix="", execution_mode="updatedlegacy", max_procs=2,
+        )
+        self.assertEqual(options.execution_mode, "updatedlegacy")
+        self.assertFalse(options.streamed)
+
+    def test_updatedstreaming_has_streaming_constraints(self):
+        options = HandFimJobOptions(**DESTINATION, execution_mode="updatedstreaming")
+        self.assertTrue(options.streamed)
+        with self.assertRaisesRegex(ValidationError, "updatedstreaming execution_mode requires output_bucket"):
+            HandFimJobOptions(output_bucket=None, output_prefix="", execution_mode="updatedstreaming")
+        with self.assertRaisesRegex(ValidationError, "one process"):
+            HandFimJobOptions(**DESTINATION, execution_mode="updatedstreaming", max_procs=2)
+
 
 class _Lazy(dict):
     """Manifest document computed when the worker reads it (after the attempt ID exists)."""
@@ -103,7 +120,7 @@ class StreamingWorkerTests(unittest.TestCase):
             self.command, self.env = command, env
             prefix = "data/output/s1"
             document = manifest_document("s1", [tile_key or f"{prefix}/03020201/0_0.cog"])
-            Path(command[-1], "s1.manifest.json").write_text(json.dumps(document))
+            Path(command[4], "s1.manifest.json").write_text(json.dumps(document))
             return Mock(stdout=io.StringIO("streamed\n"), wait=Mock(return_value=0))
         return run
 
@@ -143,6 +160,16 @@ class StreamingWorkerTests(unittest.TestCase):
         self.assertEqual(result["scenario_manifests"][0]["key"], "data/output/s1/manifest.json")
         self.assertEqual(result["scenario_manifests"][0]["tile_count"], 1)
         self.client.delete_objects.assert_not_called()
+
+    def test_updatedstreaming_selects_noaa_rule_and_preserves_result_mode(self):
+        with patch.object(tasks.subprocess, "Popen", side_effect=self.spawn()):
+            result = tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION, execution_mode="updatedstreaming")
+        self.assertEqual(self.command[2], "stream-scenario")
+        self.assertIn("--updated", self.command)
+        self.assertEqual(result["execution_mode"], "updatedstreaming")
+        with patch.object(tasks.subprocess, "Popen", side_effect=self.spawn()):
+            tasks.hand_fim.run(str(uuid4()), PAYLOAD, **DESTINATION, execution_mode="streaming")
+        self.assertNotIn("--updated", self.command)
 
     def test_existing_scenarios_json_is_rejected_before_computing(self):
         def head(**kwargs):
@@ -378,6 +405,17 @@ class StreamingApiTests(unittest.TestCase):
         _response, enqueue = self.submit()
         self.assertEqual(len(enqueue.call_args.kwargs["args"]), 6)
 
+    def test_updatedstreaming_submission_uses_stream_queue_and_configuration(self):
+        with patch.object(main.settings, "stream_queue", "streaming"):
+            response, enqueue = self.submit(execution_mode="updatedstreaming")
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(enqueue.call_args.kwargs["args"][-1], "updatedstreaming")
+        self.assertEqual(enqueue.call_args.kwargs["queue"], "streaming")
+        with patch.object(main.settings, "stream_input_bucket", ""):
+            response, enqueue = self.submit(execution_mode="updatedstreaming")
+        self.assertEqual(response.status_code, 409)
+        enqueue.assert_not_called()
+
     def test_streaming_submission_requires_configuration_and_valid_options(self):
         with patch.object(main.settings, "stream_input_bucket", ""):
             response, enqueue = self.submit(execution_mode="streaming")
@@ -511,6 +549,48 @@ class StreamStorageTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "FIMBOX_STREAM_INPUT_BUCKET"):
             self.config(FIMBOX_STREAM_INPUT_BUCKET="")
 
+    def test_reads_parquet_reach_indexes_and_reports_corrupt_objects(self):
+        table = pa.Table.from_pylist([{
+            "huc": "03030002", "feature_id": "11", "branch": "0", "hydroid": 123,
+            "discharge_cms": [0.0, 10.0], "stage": [0.0, 2.0],
+            "row_order": None, "blocks": [[0, 1]],
+        }])
+        with pa.BufferOutputStream() as output:
+            pq.write_table(table, output)
+            valid = output.getvalue().to_pybytes()
+        key = "hucs/03030002/reaches/11.parquet"
+        for content in (valid, b"invalid parquet"):
+            with self.subTest(valid=content == valid):
+                client = Mock()
+                client.get_object.side_effect = lambda **kwargs: {
+                    "Body": io.BytesIO(content), "ContentLength": len(content),
+                }
+
+                def run_scenario(scenario, read_index, *args, **kwargs):
+                    reach = read_index(key)
+                    self.assertEqual(reach["feature_id"], "11")
+                    self.assertEqual(reach["branches"][0]["hydroids"][0]["stage"], [0.0, 2.0])
+                    return {"tiles": []}
+
+                module = SimpleNamespace(
+                    GDAL_STREAMING_OPTIONS={}, run_scenario=run_scenario,
+                    read_index_parquet=stream.read_index_parquet,
+                    StreamingInputError=stream.StreamingInputError,
+                    dumps_manifest=stream.dumps_manifest,
+                )
+                with tempfile.TemporaryDirectory() as directory, patch.object(
+                    stream_storage.boto3, "client", side_effect=[client, Mock()],
+                ):
+                    if content == valid:
+                        stream_storage.run_streaming(
+                            [{"ScenarioID": "s1"}], Path(directory), module, self.config(), log=lambda _: None,
+                        )
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, f"s3://hydrofabric/hand/v1/{key}"):
+                            stream_storage.run_streaming(
+                                [{"ScenarioID": "s1"}], Path(directory), module, self.config(),
+                            )
+
     def test_invalid_index_reports_location_without_exposing_content(self):
         for content in (b'5a\r\n{"ok":true}\r\n0\r\n\r\n', b'{"private": invalid}', b'[]'):
             with self.subTest(content=content):
@@ -519,15 +599,19 @@ class StreamStorageTests(unittest.TestCase):
                     "Body": io.BytesIO(content), "ContentLength": len(content),
                 }
 
-                def run_scenario(scenario, read_json, *args, **kwargs):
-                    read_json("hucs/03030002/huc.json")
+                def run_scenario(scenario, read_index, *args, **kwargs):
+                    read_index("hucs/03030002/huc.parquet")
 
-                module = SimpleNamespace(GDAL_STREAMING_OPTIONS={}, run_scenario=run_scenario)
+                module = SimpleNamespace(
+                    GDAL_STREAMING_OPTIONS={}, run_scenario=run_scenario,
+                    read_index_parquet=stream.read_index_parquet,
+                    StreamingInputError=stream.StreamingInputError,
+                )
                 with tempfile.TemporaryDirectory() as directory, patch.object(
                     stream_storage.boto3, "client", side_effect=[input_client, Mock()],
                 ):
                     with self.assertRaisesRegex(
-                        RuntimeError, "s3://hydrofabric/hand/v1/hucs/03030002/huc.json",
+                        RuntimeError, "s3://hydrofabric/hand/v1/hucs/03030002/huc.parquet",
                     ) as raised:
                         stream_storage.run_streaming(
                             [{"ScenarioID": "s1"}], Path(directory), module, self.config(),
@@ -536,15 +620,19 @@ class StreamStorageTests(unittest.TestCase):
 
     def test_reads_index_writes_tiles_and_manifests(self):
         input_client, output_client = Mock(), Mock()
+        dataset = {"format": stream.DATASET_FORMAT, "version": 3, "block_size": 512, "fim_version": "4.5.2.11"}
+        with pa.BufferOutputStream() as output:
+            pq.write_table(pa.Table.from_pylist([dataset]), output)
+            content = output.getvalue().to_pybytes()
         input_client.get_object.side_effect = lambda Bucket, Key: (
-            {"Body": io.BytesIO(b'{"ok": true}'), "ContentLength": 12} if Key == "hand/v1/dataset.json"
+            {"Body": io.BytesIO(content), "ContentLength": len(content)} if Key == "hand/v1/dataset.parquet"
             else (_ for _ in ()).throw(ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject"))
         )
         seen = {}
 
-        def run_scenario(scenario, read_json, raster_path, write_tile, tile_size, log):
+        def run_scenario(scenario, read_index, raster_path, write_tile, tile_size, log):
             seen.update(
-                dataset=read_json("dataset.json"), absent=read_json("hucs/x/huc.json"),
+                dataset=read_index("dataset.parquet"), absent=read_index("hucs/x/huc.parquet"),
                 raster=raster_path("hucs/x/rem.tif"), key=write_tile("x/0_0.cog", b"tile"),
                 tile_size=tile_size,
             )
@@ -552,6 +640,8 @@ class StreamStorageTests(unittest.TestCase):
 
         module = SimpleNamespace(
             GDAL_STREAMING_OPTIONS={}, run_scenario=run_scenario,
+            read_index_parquet=stream.read_index_parquet,
+            StreamingInputError=stream.StreamingInputError,
             dumps_manifest=lambda manifest: json.dumps(manifest).encode(),
         )
         with tempfile.TemporaryDirectory() as directory, patch.object(
@@ -561,12 +651,28 @@ class StreamStorageTests(unittest.TestCase):
                 [{"ScenarioID": "s1"}], Path(directory), module, self.config(), log=lambda _: None,
             )
             self.assertEqual(json.loads(paths[0].read_text()), {"tiles": [{"key": "data/output/s1/x/0_0.cog"}]})
-        self.assertEqual(seen["dataset"], {"ok": True})
+        self.assertEqual(seen["dataset"], dataset)
         self.assertIsNone(seen["absent"])
         self.assertEqual(seen["raster"], "s3://hydrofabric/hand/v1/hucs/x/rem.tif")
         self.assertEqual(seen["tile_size"], 2048)
         output_client.put_object.assert_called_once()
         self.assertEqual(output_client.put_object.call_args.kwargs["Bucket"], "fim-output")
+
+    def test_custom_flood_rule_is_forwarded_only_when_given(self):
+        calls = []
+        module = SimpleNamespace(
+            GDAL_STREAMING_OPTIONS={},
+            run_scenario=lambda *args, **kwargs: calls.append(kwargs) or {"tiles": []},
+            dumps_manifest=lambda manifest: b"{}",
+        )
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(stream_storage.boto3, "client", return_value=Mock()):
+            stream_storage.run_streaming([{"ScenarioID": "s1"}], Path(directory), module, self.config(), log=lambda _: None)
+            stream_storage.run_streaming(
+                [{"ScenarioID": "s2"}], Path(directory), module, self.config(), log=lambda _: None, rule="noaa",
+            )
+        self.assertNotIn("rule", calls[0])
+        self.assertEqual(calls[1]["rule"], "noaa")
 
 
 class JobEnvironmentTests(unittest.TestCase):

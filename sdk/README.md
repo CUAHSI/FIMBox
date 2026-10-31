@@ -47,6 +47,17 @@ whether to overwrite existing output objects (default no). Explicit
 selects the opt-in streaming computation; it requires `--output-bucket`, and
 the field is omitted from legacy requests.
 
+`--execution-mode updatedlegacy` runs the normal FIMserv/COG workflow with
+NOAA v4.8.14.0 instead of the original pinned NOAA code. In SDK submissions,
+select `HandFimJobRequestExecutionMode.UPDATEDLEGACY`. Rebuild the worker
+first; use a separate output prefix and pass it to the parity endpoint as
+the reference run. See [updated legacy mode](../docker/handfim/README.md#updated-legacy-mode).
+
+`--execution-mode updatedstreaming` (`HandFimJobRequestExecutionMode.UPDATEDSTREAMING`)
+streams with NOAA v4.8.14.0's own per-pixel rule, matching `updatedlegacy`; it
+has the same requirements as streaming. See
+[updated streaming mode](../docker/handfim/README.md#updated-streaming-mode).
+
 Submissions using `--body` remain noninteractive for job options; pass
 `--output-bucket` explicitly when the deployment requires it:
 

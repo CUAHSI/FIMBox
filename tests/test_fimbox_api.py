@@ -91,6 +91,15 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 202)
         self.assertEqual(enqueue.call_args.kwargs["args"][-1], True)
 
+    def test_submit_forwards_updatedlegacy_without_stream_queue(self):
+        with patch.object(tasks.hand_fim, "apply_async") as enqueue:
+            response = self.client.post(
+                HAND_FIM_ROUTE, json={**SUBMISSION, "execution_mode": "updatedlegacy"},
+            )
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(enqueue.call_args.kwargs["args"][-1], "updatedlegacy")
+        self.assertNotIn("queue", enqueue.call_args.kwargs)
+
     def test_cloud_policy_requires_s3_for_submission(self):
         with patch.object(main.settings, "require_hydroshare_output", True), patch.object(
             tasks.hand_fim, "apply_async",
@@ -424,6 +433,15 @@ class WorkerTests(unittest.TestCase):
             run.call_args.kwargs["env"]["TMPDIR"],
             str(self.root / "input" / "jobs" / self.job_id / "tmp"),
         )
+
+    def test_updatedlegacy_selects_new_code_and_preserves_result_mode(self):
+        with patch.object(tasks.subprocess, "Popen", side_effect=self.__spawn) as run:
+            result = tasks.hand_fim.run(
+                self.job_id, PAYLOAD, **DESTINATION, execution_mode="updatedlegacy", max_procs=2,
+            )
+        self.assertEqual(run.call_args.args[0][-3:], ["2", self.job_id, "--updated-legacy"])
+        self.assertEqual(result["execution_mode"], "updatedlegacy")
+        self.assertEqual(result["outputs"], [{"ScenarioID": PAYLOAD[0]["ScenarioID"]}])
 
     def test_uploads_all_job_files_preserving_paths_and_excluding_shared_data(self):
         output_dir = self.root / "output" / "scenarios" / self.job_id

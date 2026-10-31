@@ -139,8 +139,11 @@ class LegacyStreamingScenarioParityTests(unittest.TestCase):
         inputs = output / "scenarios.json"
         inputs.write_text(json.dumps(renamed))
 
+        mode = os.environ.get("FIMBOX_PARITY_EXECUTION_MODE", "legacy")
+        self.assertIn(mode, ("legacy", "updatedlegacy"))
         subprocess.run(
-            [sys.executable, str(HANDFIM / "entry.py"), "scenario", str(inputs), "1", run_id],
+            [sys.executable, str(HANDFIM / "entry.py"), "scenario", str(inputs), "1", run_id,
+             *(["--updated-legacy"] if mode == "updatedlegacy" else [])],
             check=True,
         )
         # Load checkout code, not a potentially stale copy baked into the image.
@@ -165,9 +168,11 @@ class LegacyStreamingScenarioParityTests(unittest.TestCase):
                     huc, Path(f"/home/output/flood_{huc}/{huc}"), dataset,
                 )
 
-            def read_json(key):
+            def read_index(key):
                 path = dataset / key
-                return json.loads(path.read_text()) if path.is_file() else None
+                if not path.is_file():
+                    return None
+                return stream.read_index_parquet(key, path.read_bytes())
 
             reports = []
             for original, scenario in zip(scenarios, renamed):
@@ -182,7 +187,7 @@ class LegacyStreamingScenarioParityTests(unittest.TestCase):
                         return str(path)
 
                     manifest = stream.run_scenario(
-                        scenario, read_json, lambda key: str(dataset / key), write_tile,
+                        scenario, read_index, lambda key: str(dataset / key), write_tile,
                     )
                     (folder / "manifest.json").write_bytes(stream.dumps_manifest(manifest))
                     report = compare_scenario_outputs(
@@ -192,6 +197,7 @@ class LegacyStreamingScenarioParityTests(unittest.TestCase):
                     )
                     report.update(
                         scenario_id=original["ScenarioID"],
+                        execution_mode=mode,
                         missing_reaches=manifest["missing_reaches"],
                     )
                     reports.append(report)
@@ -204,6 +210,11 @@ class LegacyStreamingScenarioParityTests(unittest.TestCase):
                         report["different_cells"], 0,
                         f"Legacy/streaming output differs: {json.dumps(report, indent=2)}",
                     )
+                    if mode == "updatedlegacy":
+                        self.assertEqual(
+                            (report["grid_shift_rows"], report["grid_shift_columns"]), (0, 0),
+                            f"Updated legacy should not need grid realignment: {report}",
+                        )
 
 
 if __name__ == "__main__":

@@ -1,0 +1,26 @@
+[
+  {
+    "ScenarioID": "NoFlood",
+    "Reaches": [
+      { "HUC": "17100103", "ReachID": "947100096", "Streamflow": 177 }
+    ]
+  },
+  {
+    "ScenarioID": "Flooding",
+    "Reaches": [
+      { "HUC": "17100103", "ReachID": "947100096", "Streamflow": 191 }
+    ]
+  },
+  {
+    "ScenarioID": "ExtremeFlooding",
+    "Reaches": [
+      { "HUC": "17100103", "ReachID": "947100096", "Streamflow": 250 }
+    ]
+  },
+  {
+    "ScenarioID": "VeryExtremeFlooding",
+    "Reaches": [
+      { "HUC": "17100103", "ReachID": "947100096", "Streamflow": 300 }
+    ]
+  }
+]

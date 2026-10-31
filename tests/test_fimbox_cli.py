@@ -126,6 +126,21 @@ class SdkCliTests(unittest.TestCase):
         self.assertEqual(response.parsed.job_id, self.job_id)
         self.assertEqual(self.requests[0].headers["Authorization"], "Bearer sdk-session")
 
+    def test_updatedlegacy_mode_is_sent_through_sdk(self):
+        result = self.invoke(
+            "submit", "--body", str(self.body), "--execution-mode", "updatedlegacy",
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(json.loads(self.requests[0].content)["execution_mode"], "updatedlegacy")
+
+    def test_updatedstreaming_mode_is_sent_through_sdk(self):
+        result = self.invoke(
+            "submit", "--body", str(self.body), "--execution-mode", "updatedstreaming",
+            "--output-bucket", "bucket", "--output-prefix", "runs",
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(json.loads(self.requests[0].content)["execution_mode"], "updatedstreaming")
+
     def test_invalid_input_is_not_silently_discarded_or_submitted(self):
         for payload in ([], {}, [{**PAYLOAD[0], "extra": "not allowed"}], [{"ScenarioID": "missing"}]):
             self.body.write_text(json.dumps(payload))

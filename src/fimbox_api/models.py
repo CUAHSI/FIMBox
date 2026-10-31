@@ -48,6 +48,11 @@ class OutputDestination(BaseModel):
         return value
 
 
+StreamingMode = Literal["streaming", "updatedstreaming"]
+ExecutionMode = Literal["legacy", "updatedlegacy", "streaming", "updatedstreaming"]
+STREAMING_MODES = ("streaming", "updatedstreaming")
+
+
 class HandFimJobOptions(OutputDestination):
     max_procs: int | None = Field(
         default=None, ge=1,
@@ -57,22 +62,28 @@ class HandFimJobOptions(OutputDestination):
         default=False,
         description="Replace existing S3 objects with matching output keys; by default, conflicting keys fail the job.",
     )
-    execution_mode: Literal["legacy", "streaming"] = Field(
+    execution_mode: ExecutionMode = Field(
         default="legacy",
         description=(
-            "legacy downloads whole HUCs and writes one COG per scenario. streaming range-reads a prepared "
+            "legacy downloads whole HUCs and writes one COG per scenario. updatedlegacy uses the same "
+            "workflow with NOAA v4.8.14.0 instead of the original pinned code. streaming range-reads a prepared "
             "cloud-optimized hydrofabric per reach and writes tiled COGs plus a manifest per scenario; "
-            "it requires output_bucket and a single process."
+            "it requires output_bucket and a single process. updatedstreaming is streaming with NOAA "
+            "v4.8.14.0's own flood kernel, matching updatedlegacy."
         ),
     )
 
+    @property
+    def streamed(self) -> bool:
+        return self.execution_mode in STREAMING_MODES
+
     @model_validator(mode="after")
     def validate_execution_mode(self) -> "HandFimJobOptions":
-        if self.execution_mode == "streaming":
+        if self.streamed:
             if self.output_bucket is None:
-                raise ValueError("streaming execution_mode requires output_bucket")
+                raise ValueError(f"{self.execution_mode} execution_mode requires output_bucket")
             if self.max_procs not in (None, 1):
-                raise ValueError("streaming execution_mode runs one process; omit max_procs or use 1")
+                raise ValueError(f"{self.execution_mode} execution_mode runs one process; omit max_procs or use 1")
         return self
 
 
@@ -119,6 +130,10 @@ class ParityJobRequest(OutputDestination):
     overwrite: bool = Field(
         default=False,
         description="Replace existing S3 objects with matching output keys; by default, conflicting keys fail the job.",
+    )
+    execution_mode: StreamingMode = Field(
+        default="streaming",
+        description="Streaming mode to rerun; use updatedstreaming to compare against an updatedlegacy run.",
     )
 
     @model_validator(mode="after")
@@ -171,7 +186,7 @@ class ScenarioParity(BaseModel):
 class StoredHandFimResult(HandFimResult, OutputDestination):
     """Successful outputs and the destination persisted by the worker."""
 
-    execution_mode: Literal["legacy", "streaming"] = "legacy"
+    execution_mode: ExecutionMode = "legacy"
     files: list[OutputFile] = Field(default_factory=list)
     scenario_manifests: list[ScenarioManifest] = Field(default_factory=list)
     parity: list[ScenarioParity] = Field(

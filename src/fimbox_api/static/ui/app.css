@@ -20,6 +20,7 @@ label.check { flex-direction: row; align-items: center; gap: 6px; }
 .tabs button.active { border-color: var(--border); background: #fff; margin-bottom: -1px; font-weight: 600; }
 section .tabs { padding: 0; margin-bottom: 8px; }
 .row { display: flex; gap: 8px; align-items: flex-end; margin: 8px 0; flex-wrap: wrap; }
+.row .grow { flex: 1 1 320px; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px 16px; align-items: end; }
 .hint { color: var(--muted); }
 .message { margin: 8px 16px; padding: 6px 10px; border-radius: 4px; background: #ddf4ff; white-space: pre-wrap; }

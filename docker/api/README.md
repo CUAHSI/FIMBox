@@ -188,8 +188,11 @@ with red for base-only and orange for candidate-only flooding.
   `STREAM_INPUT_BUCKET`/`STREAM_INPUT_PREFIX`. Without that setting, the tab
   explains that legacy jobs download NOAA HAND data per HUC instead.
 - **Submit job** edits scenarios as a table or JSON. You can load the examples
-  from the `test-data/*.json` files, set the job options, and submit to
-  `POST /jobs/hand-fim`.
+  from the `test-data/*.json` files, upload a local JSON file, or load one
+  from a URL. URLs can be public `https://` links or
+  `s3://<bucket>/<key>` paths read with your HydroShare credentials.
+  `/ui?scenarios_url=<url>` opens the page with the URL ready to load. Then
+  set the job options and submit to `POST /jobs/hand-fim`.
 - **Results** lists your jobs, streams their logs, and lets you cancel queued
   jobs. For retained S3 output it shows several views:
   - the generated `README.md`, whose relative links open files or map layers
@@ -221,6 +224,11 @@ the SDK:
   the needed column chunks with ranged S3 GETs, stops after 64 MiB (413), and
   shortens long cells to 200 characters
 - download links
+- scenario JSON loading (signed in, at most 2 MiB). Because the page's CSP
+  blocks direct browser fetches, the API fetches `https://` URLs itself: no
+  credentials, a 10 second timeout, and at most 5 redirects. Every hop must
+  resolve only to public IP addresses, and the connection is pinned to the
+  address that was checked.
 
 Downloads are short-lived (5 minute) presigned S3 URLs signed with the user's
 HydroShare S3 credentials, so large files bypass the API. The URL exposes the

@@ -188,6 +188,12 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
   REQUIRE_HYDROSHARE_OUTPUT defaults false locally; Terraform sets it true for
   the API, which fails startup without OAuth credentials and rejects missing
   output_bucket at the submission route before enqueueing.
+- **`src/fimbox_api/remote_json.py`** — SSRF-guarded `fetch_json(url)`:
+  - accepts https only, with no URL credentials
+  - every redirect hop must resolve to global IPs only, and the connection is
+    pinned to the checked IP (keeping the Host header and SNI)
+  - no environment proxies; limits of 2 MiB, 10 s, and 5 redirects
+  - raises `RemoteJsonError`; tested in `tests/test_remote_json.py`
 - **`src/fimbox_api/ui.py`** — `/ui` router, excluded from OpenAPI so it is not
   part of the SDK contract:
   - `GET /ui` serves `static/ui/index.html`. `main.py` mounts `/ui/static`
@@ -201,6 +207,10 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
     - `/ui/objects/parquet`: pyarrow schema, counts, and first rows (limit
       1-200) through a seekable ranged-GET reader with a 64 MiB read budget
     - `/ui/objects/download`: a 5-minute presigned GET URL
+    - `/ui/scenarios/load?url=`: a scenario list (authenticated, 2 MiB).
+      `s3://` uses the user's S3 client; `https://` uses `remote_json.py`.
+      The page also uploads files client-side and supports
+      `/ui?scenarios_url=`.
   - Paths reject empty, `.`, and `..` segments. S3 errors map to 404, 403, or
     503.
   - Reads use the user's HydroShare S3 client, or `anonymous_s3_client()`

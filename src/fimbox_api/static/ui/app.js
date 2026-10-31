@@ -488,6 +488,44 @@ function setScenarios(scenarios) {
   renderScenarioEditor();
 }
 
+function applyLoadedScenarios(scenarios, source) {
+  try {
+    setScenarios(scenarios);
+    $("#example-select").value = "";
+    showMessage(`Loaded ${state.scenarios.length} scenario(s) from ${source}.`);
+  } catch (error) {
+    showMessage(`Could not use ${source}: ${error.message}`, true);
+  }
+}
+
+async function uploadScenarios(event) {
+  const file = event.target.files[0];
+  event.target.value = "";
+  if (!file) return;
+  if (file.size > 2 * 1024 * 1024) { showMessage(`${file.name} is larger than 2 MiB.`, true); return; }
+  let scenarios;
+  try {
+    scenarios = JSON.parse(await file.text());
+  } catch (error) {
+    showMessage(`${file.name} is not valid JSON: ${error.message}`, true);
+    return;
+  }
+  applyLoadedScenarios(scenarios, file.name);
+}
+
+async function loadScenariosFromUrl(url) {
+  const button = $("#json-url-form button[type=submit]");
+  button.disabled = true;
+  try {
+    const loaded = await api(`/ui/scenarios/load?${query({ url })}`);
+    applyLoadedScenarios(loaded.scenarios, url);
+  } catch (error) {
+    showMessage(`Could not load ${url}: ${error.message}`, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 async function loadExamples() {
   try {
     state.examples = await api("/ui/examples");
@@ -995,14 +1033,28 @@ async function start() {
     state.scenarios.push({ ScenarioID: `scenario-${state.scenarios.length + 1}`, Reaches: [{ HUC: "", ReachID: "", Streamflow: 0 }] });
     renderScenarioEditor();
   });
+  $("#json-file").addEventListener("change", uploadScenarios);
+  $("#json-url-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    loadScenariosFromUrl($("#json-url").value.trim());
+  });
   $("#job-options").addEventListener("submit", submitJob);
   $("#jobs-refresh").addEventListener("click", loadJobs);
   $("#open-output").addEventListener("submit", openOutput);
   $("#compare-results").addEventListener("submit", submitCompare);
   setupJobOptions();
   renderScenarioEditor();
-  loadExamples();
+  // /ui?scenarios_url=<url> opens the submit tab with that input once signed in.
+  const linked = new URLSearchParams(location.search).get("scenarios_url");
+  const examples = loadExamples();
   await refreshAfterAuth();
+  if (linked) {
+    $("#json-url").value = linked;
+    activateTab("main", "submit");
+    await examples;
+    if (authReady()) await loadScenariosFromUrl(linked);
+    else showMessage("Sign in with HydroShare, then press Load URL to load the linked scenarios.");
+  }
 }
 
 document.addEventListener("DOMContentLoaded", start);

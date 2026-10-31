@@ -43,6 +43,15 @@
         <button type="button" id="example-load">Load example</button>
         <button type="button" id="json-toggle">Edit as JSON</button>
       </div>
+      <div class="row">
+        <label>Upload JSON <input type="file" id="json-file" accept=".json,application/json"></label>
+      </div>
+      <form class="row" id="json-url-form">
+        <label class="grow">Load from URL
+          <input type="text" name="url" id="json-url" placeholder="https://… or s3://resource/&lt;resource id&gt;/data/contents/scenarios.json" required>
+        </label>
+        <button type="submit">Load URL</button>
+      </form>
 
       <div id="scenario-editor"></div>
       <div id="json-editor" hidden>

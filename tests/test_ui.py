@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from botocore.exceptions import ClientError
+import httpx
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
@@ -210,6 +211,36 @@ class UiTests(unittest.TestCase):
         self.s3.head_object.side_effect = client_error("NoSuchKey")
         response = self.client.get("/ui/objects/parquet", params={"bucket": "fim", "key": "in/a.parquet"})
         self.assertEqual(response.status_code, 404)
+
+    def test_load_scenarios_from_s3_with_user_credentials(self):
+        self.s3.get_object.return_value = {"Body": io.BytesIO(b'[{"ScenarioID": "a", "Reaches": []}]')}
+        response = self.client.get("/ui/scenarios/load", params={"url": "s3://resource/abc/data/contents/s.json"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["scenarios"], [{"ScenarioID": "a", "Reaches": []}])
+        self.s3.get_object.assert_called_once_with(
+            Bucket="resource", Key="abc/data/contents/s.json", Range=f"bytes=0-{ui.remote_json.MAX_BYTES}",
+        )
+        for url, status in (("s3://bad bucket/k.json", 400), ("s3://resource/a/../k.json", 400)):
+            self.assertEqual(self.client.get("/ui/scenarios/load", params={"url": url}).status_code, status, url)
+        self.s3.get_object.return_value = {"Body": io.BytesIO(b'{"ScenarioID": "a"}')}
+        response = self.client.get("/ui/scenarios/load", params={"url": "s3://resource/abc/s.json"})
+        self.assertEqual(response.status_code, 422)
+        self.s3.get_object.return_value = {"Body": io.BytesIO(b"x" * (ui.remote_json.MAX_BYTES + 1))}
+        response = self.client.get("/ui/scenarios/load", params={"url": "s3://resource/abc/s.json"})
+        self.assertEqual(response.status_code, 413)
+
+    def test_load_scenarios_from_https_maps_errors(self):
+        with patch.object(ui.remote_json, "fetch_json", return_value=[{"ScenarioID": "a"}]) as fetch:
+            response = self.client.get("/ui/scenarios/load", params={"url": "https://example.org/s.json"})
+        self.assertEqual(response.json(), {"source": "https://example.org/s.json", "scenarios": [{"ScenarioID": "a"}]})
+        fetch.assert_called_once_with("https://example.org/s.json")
+        for error, status in (
+            (ui.remote_json.RemoteJsonError("Only https:// URLs can be loaded"), 400),
+            (httpx.ConnectTimeout("slow"), 502),
+        ):
+            with patch.object(ui.remote_json, "fetch_json", side_effect=error):
+                response = self.client.get("/ui/scenarios/load", params={"url": "https://example.org/s.json"})
+            self.assertEqual(response.status_code, status)
 
     def test_storage_errors_are_mapped(self):
         for code, status in (("NoSuchKey", 404), ("AccessDenied", 403), ("SlowDown", 503)):

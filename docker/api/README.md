@@ -193,6 +193,12 @@ with red for base-only and orange for candidate-only flooding.
   `s3://<bucket>/<key>` paths read with your HydroShare credentials.
   `/ui?scenarios_url=<url>` opens the page with the URL ready to load. Then
   set the job options and submit to `POST /jobs/hand-fim`.
+
+  Each reach row's **Pick on map** button opens a map with NHDPlus v2.1
+  flowlines and HUC8 boundaries. Clicking a stream fills in its HUC8 and
+  ReachID (the NHDPlus COMID, which NWM uses as its reach ID). The lookups
+  call the public USGS NLDI and WBD services directly from the browser. A
+  picked reach must still exist in the HAND hydrofabric.
 - **Results** lists your jobs, streams their logs, and lets you cancel queued
   jobs. For retained S3 output it shows several views:
   - the generated `README.md`, whose relative links open files or map layers
@@ -234,7 +240,10 @@ Downloads are short-lived (5 minute) presigned S3 URLs signed with the user's
 HydroShare S3 credentials, so large files bypass the API. The URL exposes the
 access key ID, but not the secret. When `STREAM_INPUT_UNSIGNED=true`, unsigned
 requests read the input dataset. Leaflet loads from unpkg and basemap tiles
-come from OpenStreetMap; the page's CSP permits only those origins. Examples
+come from OpenStreetMap. The reach picker loads overlay images from
+`hydro.nationalmap.gov` and `watersgeo.epa.gov`, and it queries
+`api.water.usgs.gov` and `hydro.nationalmap.gov`. The page's CSP permits only
+those origins. Examples
 are read from `EXAMPLES_DIR`, which the API image sets to `/app/test-data`.
 
 ## Raster viewing

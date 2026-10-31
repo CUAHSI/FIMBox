@@ -54,6 +54,9 @@ aside fieldset { display: flex; flex-direction: column; gap: 6px; margin: 0; }
 dl.summary { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; }
 dl.summary dt { font-weight: 600; } dl.summary dd { margin: 0; word-break: break-all; }
 .map { height: 520px; border: 1px solid var(--border); border-radius: 4px; }
+.picker { margin: 12px 0; padding: 8px; border: 1px solid var(--border); border-radius: 4px; }
+#picker-map { height: 420px; cursor: crosshair; }
+.picker .error { color: #cf222e; }
 .readme { max-width: 900px; }
 .readme pre { background: var(--bg); padding: 8px; overflow: auto; }
 .readme code { background: var(--bg); padding: 0 3px; border-radius: 3px; font-size: 12px; }

@@ -220,7 +220,12 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
     handles:
     - device-flow popup sign-in
     - the S3 browser
-    - the scenario table/JSON editor
+    - the scenario table/JSON editor, with a per-reach map picker. The picker
+      shows EPA NHDPlus ArcGIS `export` tiles and one WBDLine export image per
+      view (`hudigit <= 8`, with retries). The WBD HUC8 polygon layer is
+      scale-limited, and tile bursts get intermittent 503s. a click calls
+      NLDI `comid/position` and the WBD HUC8 query from the browser.
+      `main.py`'s CSP allowlists these origins.
     - job submission and log polling
     - result views: README (safe markdown subset), parameters, files, and a
       Leaflet map over `/outputs/tiles` that fetches tiles with the bearer

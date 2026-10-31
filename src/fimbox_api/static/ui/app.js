@@ -451,7 +451,10 @@ function renderScenarioEditor() {
         oninput: (event) => { reach.ReachID = event.target.value.trim(); } })),
       el("td", {}, el("input", { type: "number", className: "num", min: 0, step: "any", value: reach.Streamflow, required: true,
         oninput: (event) => { reach.Streamflow = event.target.value === "" ? "" : Number(event.target.value); } })),
-      el("td", {}, el("button", { type: "button", className: "small", text: "Remove", onclick: () => {
+      el("td", {}, el("button", { type: "button", className: "small", text: "Pick on map",
+        onclick: () => openReachPicker(scenario, reach, reachIndex) }),
+      " ",
+      el("button", { type: "button", className: "small", text: "Remove", onclick: () => {
         scenario.Reaches.splice(reachIndex, 1);
         renderScenarioEditor();
       } }))));
@@ -479,6 +482,7 @@ function renderScenarioEditor() {
 
 function setScenarios(scenarios) {
   if (!Array.isArray(scenarios)) throw new Error("Scenario JSON must be an array");
+  closeReachPicker();
   state.scenarios = scenarios.map((scenario) => ({
     ScenarioID: String(scenario.ScenarioID ?? ""),
     Reaches: (scenario.Reaches || []).map((reach) => ({
@@ -486,6 +490,200 @@ function setScenarios(scenarios) {
     })),
   }));
   renderScenarioEditor();
+}
+
+// ---------- Reach picker ----------
+
+const NLDI_COMID_URL = "https://api.water.usgs.gov/nldi/linked-data/comid";
+const WBD_URL = "https://hydro.nationalmap.gov/arcgis/rest/services/wbd/MapServer";
+const NHDPLUS_URL = "https://watersgeo.epa.gov/arcgis/rest/services/NHDPlus/NHDPlus/MapServer";
+const picker = { map: null, target: null, highlight: null, lookup: 0 };
+
+function osmLayer() {
+  return L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19, attribution: "&copy; OpenStreetMap contributors",
+    // OSM blocks tile requests without a Referer; send only the origin, not the page path.
+    referrerPolicy: "strict-origin",
+  });
+}
+
+// Web-mercator tiles rendered by an ArcGIS MapServer's export operation.
+function arcgisExportLayer(url, layers, options) {
+  const Layer = L.TileLayer.extend({
+    getTileUrl(coords) {
+      const extent = 20037508.342789244;
+      const span = (2 * extent) / 2 ** coords.z;
+      const west = -extent + coords.x * span;
+      const north = extent - coords.y * span;
+      return `${url}/export?${query({
+        bbox: `${west},${north - span},${west + span},${north}`, bboxSR: 3857, imageSR: 3857,
+        size: "256,256", layers: `show:${layers}`, format: "png32", transparent: true, f: "image",
+      })}`;
+    },
+  });
+  return new Layer("", options);
+}
+
+// HUC8 boundary lines drawn as one export image of the visible map. The WBD service's HUC8
+// polygon layer is scale-limited to ~zoom 8-9 and its server intermittently answers bursts of
+// tile requests with 503, so a single image per view (with retries) renders far more reliably.
+function hucBoundaryLayer() {
+  const Layer = L.Layer.extend({
+    onAdd(map) {
+      this._map = map;
+      this._request = 0;
+      this._timer = null;
+      map.on("moveend", this._schedule, this);
+      this._schedule();
+    },
+    onRemove(map) {
+      map.off("moveend", this._schedule, this);
+      clearTimeout(this._timer);
+      this._request++;
+      if (this._overlay) { this._overlay.remove(); this._overlay = null; }
+    },
+    getAttribution() { return "USGS WBD"; },
+    _schedule() {
+      clearTimeout(this._timer);
+      this._timer = setTimeout(() => this._load(++this._request, 0), 250);
+    },
+    _load(request, attempt) {
+      const map = this._map;
+      if (!map || request !== this._request) return;
+      const bounds = map.getBounds();
+      const size = map.getSize();
+      const ratio = Math.min(window.devicePixelRatio || 1, 2);
+      const southWest = L.CRS.EPSG3857.project(bounds.getSouthWest());
+      const northEast = L.CRS.EPSG3857.project(bounds.getNorthEast());
+      const url = `${WBD_URL}/export?${query({
+        bbox: [southWest.x, southWest.y, northEast.x, northEast.y].map((value) => value.toFixed(2)).join(","),
+        bboxSR: 3857, imageSR: 3857, size: `${Math.round(size.x * ratio)},${Math.round(size.y * ratio)}`,
+        dpi: Math.round(96 * ratio), layers: "show:0",
+        layerDefs: JSON.stringify({ 0: "hudigit <= 8" }), format: "png32", transparent: true, f: "image",
+        attempt: attempt || undefined,
+      })}`;
+      const image = new Image();
+      image.referrerPolicy = "no-referrer";
+      image.onload = () => {
+        if (request !== this._request || !this._map) return;
+        const overlay = L.imageOverlay(image, bounds, { opacity: 0.9, interactive: false }).addTo(map);
+        if (this._overlay) this._overlay.remove();
+        this._overlay = overlay;
+      };
+      image.onerror = () => {
+        if (request === this._request && attempt < 3) {
+          this._timer = setTimeout(() => this._load(request, attempt + 1), 1000 * 2 ** attempt);
+        }
+      };
+      image.src = url;
+    },
+  });
+  return new Layer();
+}
+
+async function fetchPublicJson(url) {
+  const response = await fetch(url, { credentials: "omit", referrerPolicy: "no-referrer" });
+  if (!response.ok) throw new Error(`${new URL(url).host} returned HTTP ${response.status}`);
+  const body = await response.json();
+  if (body.error) throw new Error(`${new URL(url).host}: ${body.error.message || "request failed"}`);
+  return body;
+}
+
+async function lookupReach(latlng) {
+  const lng = latlng.lng.toFixed(6);
+  const lat = latlng.lat.toFixed(6);
+  const [reaches, hucs] = await Promise.all([
+    fetchPublicJson(`${NLDI_COMID_URL}/position?${query({ coords: `POINT(${lng} ${lat})` })}`),
+    fetchPublicJson(`${WBD_URL}/4/query?${query({
+      geometry: `${lng},${lat}`, geometryType: "esriGeometryPoint", inSR: 4326,
+      spatialRel: "esriSpatialRelIntersects", outFields: "huc8,name", returnGeometry: false, f: "json",
+    })}`),
+  ]);
+  const feature = reaches.features?.[0];
+  const huc = hucs.features?.[0]?.attributes;
+  if (!feature) throw new Error("No NHDPlus reach was found at this location.");
+  if (!huc) throw new Error("No HUC8 was found at this location.");
+  return { reachId: String(feature.properties.comid), huc: huc.huc8, hucName: huc.name, feature };
+}
+
+function highlightReach(feature, fit) {
+  if (picker.highlight) picker.highlight.remove();
+  picker.highlight = L.geoJSON(feature, { style: { color: "#d62728", weight: 5 } }).addTo(picker.map);
+  if (fit) picker.map.fitBounds(picker.highlight.getBounds(), { maxZoom: 14 });
+}
+
+function ensurePickerMap() {
+  if (picker.map) return picker.map;
+  const map = L.map($("#picker-map"), { minZoom: 3 });
+  osmLayer().addTo(map);
+  const hucs = hucBoundaryLayer().addTo(map);
+  const flowlines = arcgisExportLayer(NHDPLUS_URL, 2, { attribution: "EPA NHDPlus v2.1", minZoom: 11 }).addTo(map);
+  L.control.layers(null, { "HUC8 boundaries": hucs, "NHDPlus flowlines": flowlines }, { collapsed: false }).addTo(map);
+  map.setView([39, -98], 4);
+  map.on("click", (event) => pickReachAt(event.latlng));
+  picker.map = map;
+  return map;
+}
+
+function targetExists() {
+  return state.scenarios.some((scenario) => scenario.Reaches.includes(picker.target));
+}
+
+async function pickReachAt(latlng) {
+  const result = $("#picker-result");
+  const lookup = ++picker.lookup;
+  result.replaceChildren(el("span", { className: "hint", text: "Looking up reach and HUC8…" }));
+  try {
+    const found = await lookupReach(latlng);
+    if (lookup !== picker.lookup) return;
+    highlightReach(found.feature, false);
+    result.replaceChildren(
+      el("span", { text: `ReachID ${found.reachId} in HUC8 ${found.huc} (${found.hucName})` }),
+      el("button", { type: "button", className: "primary small", text: "Use this reach", onclick: () => {
+        if (!targetExists()) { showMessage("That reach row no longer exists.", true); return; }
+        picker.target.HUC = found.huc;
+        picker.target.ReachID = found.reachId;
+        renderScenarioEditor();
+        showMessage(`Set reach ${found.reachId} in HUC8 ${found.huc}.`);
+      } }));
+  } catch (error) {
+    if (lookup === picker.lookup) result.replaceChildren(el("span", { className: "error", text: error.message }));
+  }
+}
+
+async function showCurrentReach(reachId) {
+  const lookup = ++picker.lookup;
+  try {
+    const body = await fetchPublicJson(`${NLDI_COMID_URL}/${encodeURIComponent(reachId)}`);
+    const feature = body.features?.[0];
+    if (lookup !== picker.lookup || !feature) return;
+    highlightReach(feature, true);
+    $("#picker-result").replaceChildren(el("span", { className: "hint", text: `Current ReachID ${reachId} is highlighted.` }));
+  } catch (error) {
+    if (lookup === picker.lookup) {
+      $("#picker-result").replaceChildren(el("span", { className: "hint", text: `Current ReachID ${reachId} was not found in NHDPlus.` }));
+    }
+  }
+}
+
+function openReachPicker(scenario, reach, reachIndex) {
+  if (!window.L) { showMessage("The map library could not be loaded.", true); return; }
+  picker.target = reach;
+  $("#picker-title").textContent = `Pick a reach for ${scenario.ScenarioID || "this scenario"}, row ${reachIndex + 1}`;
+  $("#picker-result").replaceChildren();
+  $("#reach-picker").hidden = false;
+  const map = ensurePickerMap();
+  map.invalidateSize();
+  if (picker.highlight) { picker.highlight.remove(); picker.highlight = null; }
+  if (/^\d+$/.test(reach.ReachID)) showCurrentReach(reach.ReachID);
+  else picker.lookup++;
+  $("#reach-picker").scrollIntoView({ block: "nearest" });
+}
+
+function closeReachPicker() {
+  picker.target = null;
+  picker.lookup++;
+  $("#reach-picker").hidden = true;
 }
 
 function applyLoadedScenarios(scenarios, source) {
@@ -722,11 +920,7 @@ function createResultMap(view, bucket, legend = "Flooded cells are shown in blue
     return null;
   }
   const map = L.map(container, { minZoom: 2 });
-  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 19, attribution: "&copy; OpenStreetMap contributors",
-    // OSM blocks tile requests without a Referer; send only the origin, not the page path.
-    referrerPolicy: "strict-origin",
-  }).addTo(map);
+  osmLayer().addTo(map);
   map.setView([39, -98], 4);
   const control = L.control.layers(null, null, { collapsed: false }).addTo(map);
   const added = new Set();
@@ -1024,6 +1218,7 @@ async function start() {
     $("#scenario-editor").hidden = !editor.hidden;
     $("#scenario-buttons").hidden = !editor.hidden;
     $("#json-toggle").textContent = editor.hidden ? "Edit as JSON" : "Edit as table";
+    if (!editor.hidden) closeReachPicker();
   });
   $("#json-apply").addEventListener("click", () => {
     try { setScenarios(JSON.parse($("#json-text").value)); showMessage("JSON applied."); }
@@ -1034,6 +1229,7 @@ async function start() {
     renderScenarioEditor();
   });
   $("#json-file").addEventListener("change", uploadScenarios);
+  $("#picker-close").addEventListener("click", closeReachPicker);
   $("#json-url-form").addEventListener("submit", (event) => {
     event.preventDefault();
     loadScenariosFromUrl($("#json-url").value.trim());

@@ -54,6 +54,17 @@
       </form>
 
       <div id="scenario-editor"></div>
+      <div id="reach-picker" class="picker" hidden>
+        <div class="row">
+          <strong id="picker-title"></strong>
+          <button type="button" class="small" id="picker-close">Close map</button>
+        </div>
+        <p class="hint">Click a stream to look up its NHDPlus v2.1 reach (COMID, which is the NWM ReachID) and
+          HUC8. Flowlines appear at zoom ≥ 11; HUC8 and coarser boundaries are outlined and can take a few seconds to load. The reach must exist in the HAND
+          hydrofabric for the job to map it.</p>
+        <div id="picker-map" class="map"></div>
+        <div class="row" id="picker-result"></div>
+      </div>
       <div id="json-editor" hidden>
         <textarea id="json-text" rows="20" spellcheck="false"></textarea>
         <div class="row"><button type="button" id="json-apply">Apply JSON</button></div>

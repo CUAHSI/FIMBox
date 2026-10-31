@@ -60,6 +60,11 @@ dl.summary dt { font-weight: 600; } dl.summary dd { margin: 0; word-break: break
 .flows { margin-top: 8px; }
 .flows h4 { margin: 8px 0 4px; }
 .flows .row { gap: 6px; flex-wrap: wrap; align-items: center; }
+.flows .timesteps { margin: 0 0 8px 12px; }
+.flows .timesteps summary { cursor: pointer; }
+.player { align-items: center; }
+.player input[type="range"] { flex: 1 1 240px; }
+.player .frame-label { flex: 1 1 100%; font-variant-numeric: tabular-nums; }
 .readme { max-width: 900px; }
 .readme pre { background: var(--bg); padding: 8px; overflow: auto; }
 .readme code { background: var(--bg); padding: 0 3px; border-radius: 3px; font-size: 12px; }

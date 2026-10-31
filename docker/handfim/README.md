@@ -231,6 +231,13 @@ encoding. Manifest bounds therefore frame inundation rather than empty tile
 padding, including when viewed on the notebook map. The row/column in each
 tile filename still identifies its original processing window.
 
+A scenario with evaluated source blocks but no flooded cells is a valid dry
+timestep. Both streaming modes retain one all-nodata COG on the first evaluated
+tile's native grid, with normal manifest bounds. Maps render it transparently,
+and animations can advance through it instead of aborting the job. A scenario
+with no source blocks (for example, all requested reaches are missing) still
+fails explicitly.
+
 ## Legacy/streaming parity test
 
 The opt-in scientific regression test runs the real legacy `scenario` command,

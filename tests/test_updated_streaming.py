@@ -109,6 +109,13 @@ class UpdatedStreamingNoaaTests(unittest.TestCase):
         catchments = np.array([[7, 7, 7]], dtype=np.int32)
         self.assertEqual(flood(rem, catchments).tolist(), [[False, True, False]])
 
+    def test_dry_updated_streaming_matches_noaa(self):
+        reaches = [{"HUC": "12090301", "ReachID": "13", "Streamflow": 0}]
+        expected = self.noaa_inundate(reaches)
+        self.assertFalse(expected.any())
+        actual = self.stream(reaches, self.rule.updated_rule(self.noaa))
+        np.testing.assert_array_equal(actual, expected)
+
     def test_missing_checkout_fails_explicitly(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(RuntimeError, "rebuild the HAND-FIM image"):

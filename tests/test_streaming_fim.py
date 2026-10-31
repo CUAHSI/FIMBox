@@ -354,7 +354,7 @@ class StreamingFimTests(unittest.TestCase):
         )
         np.testing.assert_allclose(small["bounds_wgs84"], large["bounds_wgs84"], atol=1e-5)
 
-    def test_admission_limits_missing_huc_and_no_flood_fail_explicitly(self):
+    def test_admission_limits_missing_huc_and_missing_reaches_fail_explicitly(self):
         reach = [{"HUC": "12090301", "ReachID": "11", "Streamflow": 15}]
         with self.assertRaisesRegex(stream.StreamingInputError, "source blocks"):
             self.run_local(reach, max_blocks=1)
@@ -362,8 +362,30 @@ class StreamingFimTests(unittest.TestCase):
             self.run_local(reach, max_tiles=0)
         with self.assertRaisesRegex(stream.StreamingInputError, "not in the prepared"):
             self.run_local([{"HUC": "01010001", "ReachID": "1", "Streamflow": 1}])
-        with self.assertRaisesRegex(stream.StreamingInputError, "no flooded cells"):
-            self.run_local([{"HUC": "12090301", "ReachID": "13", "Streamflow": 0}])
+        with self.assertRaisesRegex(stream.StreamingInputError, "no source blocks"):
+            self.run_local([{"HUC": "12090301", "ReachID": "99", "Streamflow": 1}])
+
+    def test_dry_scenario_retains_one_blank_tile_and_valid_bounds(self):
+        manifest, tiles = self.run_local(
+            [{"HUC": "12090301", "ReachID": "13", "Streamflow": 0}], tile_size=512,
+        )
+        self.assertEqual(len(manifest["tiles"]), 1)
+        self.assertEqual(manifest["missing_reaches"], [])
+        self.assertEqual(set(tiles), {manifest["tiles"][0]["key"]})
+        self.assertFalse(mosaic(manifest, tiles).any())
+        west, south, east, north = manifest["bounds_wgs84"]
+        self.assertTrue(west < east and south < north)
+        with rasterio.MemoryFile(next(iter(tiles.values()))) as memory, memory.open() as dataset:
+            self.assertTrue(np.isnan(dataset.read(1)).all())
+            self.assertEqual(dataset.block_shapes[0], (512, 512))
+
+    def test_all_dry_custom_rule_is_a_valid_frame(self):
+        manifest, tiles = self.run_local(
+            [{"HUC": "12090301", "ReachID": "11", "Streamflow": 15}],
+            rule=lambda plan: lambda rem, catchments: np.zeros(rem.shape, dtype=bool),
+        )
+        self.assertEqual(len(manifest["tiles"]), 1)
+        self.assertFalse(mosaic(manifest, tiles).any())
 
     def test_remote_reads_use_ranges_and_fetch_only_needed_blocks(self):
         root = self.dataset.resolve()

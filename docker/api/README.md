@@ -210,12 +210,22 @@ with red for base-only and orange for candidate-only flooding.
     API reads the public `noaa-nwm-retrospective-3-0-pds` Zarr store through
     `GET /ui/streamflow/retrospective`; each 28 days is one ~10 MB chunk, so a
     lookup can take 10–30 seconds.
+
+  Each series also has **Make time-step scenarios**: choose a UTC time range
+  and step (1–24 h, at most 240 timesteps). The row is replaced by one
+  scenario per timestep, with ScenarioIDs like `20180915T1800Z`. Repeating
+  this for other reaches over the same times adds them to the same timestep
+  scenarios.
 - **Results** lists your jobs, streams their logs, and lets you cancel queued
   jobs. For retained S3 output it shows several views:
   - the generated `README.md`, whose relative links open files or map layers
   - the `scenarios.json` parameters, with an "Edit and resubmit" button
   - a browser for the output files
-  - a Leaflet map built from the authenticated `/outputs/info|tiles` routes
+  - a Leaflet map built from the authenticated `/outputs/info|tiles` routes.
+    When a result has two or more scenarios, a player cycles through them one
+    at a time (play/pause, step, slider, and frame delay), preloading the next
+    frame. Results with more than 12 scenarios start with only the first
+    scenario shown, and the others load as the player reaches them
   - parity reports, with each scenario's diff raster on the map
 
   The **Compare two results** form submits `POST /jobs/compare`; "Compare as

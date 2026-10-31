@@ -472,6 +472,23 @@ def encode_tile(flooded: np.ndarray, transform: Affine, crs: CRS) -> bytes:
         return encoded.read()
 
 
+def __write_manifest_tile(
+    flooded: np.ndarray, transform: Affine, crs: CRS, huc: str,
+    tile: tuple[int, int], write_tile: WriteTile,
+) -> dict:
+    encoded = encode_tile(flooded, transform, crs)
+    height, width = flooded.shape
+    bounds = array_bounds(height, width, transform)
+    key = write_tile(f"{huc}/{tile[0]}_{tile[1]}.cog", encoded)
+    return {
+        "key": key, "huc": huc, "row": tile[0], "col": tile[1],
+        "width": width, "height": height, "transform": list(transform)[:6],
+        "bounds": list(bounds),
+        "bounds_wgs84": list(transform_bounds(crs, "EPSG:4326", *bounds, densify_pts=21)),
+        "size_bytes": len(encoded),
+    }
+
+
 def run_scenario(
     scenario: dict,
     read_index: ReadIndex,
@@ -499,7 +516,8 @@ def run_scenario(
         log: Progress output function.
         rule: Builds each branch's window flood classifier; defaults to ``pinned_rule``.
     Returns:
-        The scenario tile manifest.
+        The scenario tile manifest. A dry scenario retains one all-nodata COG
+        on the evaluated grid so it can be displayed as a blank timestep.
     """
 
     __require(tile_size > 0 and tile_size % 512 == 0, "Streaming tile size must be a positive multiple of 512")
@@ -513,6 +531,7 @@ def run_scenario(
     tiles = []
     hucs = {}
     missing_reaches = []
+    dry_tile = None
     for huc, discharges in sorted(first_discharges(scenario["Reaches"]).items()):
         metadata, plans, missing = plan_huc(huc, discharges, read_index)
         missing_reaches.extend(f"{huc}:{feature_id}" for feature_id in missing)
@@ -537,6 +556,8 @@ def run_scenario(
                 metadata, plans, rules, tile, schedule.pop(tile), tile_size, raster_path,
             )
             if not flooded.any():
+                if dry_tile is None:
+                    dry_tile = (flooded.shape, transform, crs, huc, tile)
                 continue
             rows = np.flatnonzero(flooded.any(axis=1))
             cols = np.flatnonzero(flooded.any(axis=0))
@@ -544,22 +565,18 @@ def run_scenario(
             col_start, col_stop = int(cols[0]), int(cols[-1]) + 1
             flooded = flooded[row_start:row_stop, col_start:col_stop]
             transform = transform * Affine.translation(col_start, row_start)
-            encoded = encode_tile(flooded, transform, crs)
-            height, width = flooded.shape
+            entry = __write_manifest_tile(flooded, transform, crs, huc, tile, write_tile)
             del flooded
-            bounds = array_bounds(height, width, transform)
-            key = write_tile(f"{huc}/{tile[0]}_{tile[1]}.cog", encoded)
-            tiles.append({
-                "key": key, "huc": huc, "row": tile[0], "col": tile[1],
-                "width": width, "height": height, "transform": list(transform)[:6],
-                "bounds": [bounds[0], bounds[1], bounds[2], bounds[3]],
-                "bounds_wgs84": list(transform_bounds(crs, "EPSG:4326", *bounds, densify_pts=21)),
-                "size_bytes": len(encoded),
-            })
-            del encoded
-            log(f"[{scenario_id}] wrote tile {key}")
+            tiles.append(entry)
+            log(f"[{scenario_id}] wrote tile {entry['key']}")
     if not tiles:
-        raise StreamingInputError(f"Scenario {scenario_id} produced no flooded cells")
+        if dry_tile is None:
+            raise StreamingInputError(f"Scenario {scenario_id} has no source blocks for the requested reaches")
+        shape, transform, crs, huc, tile = dry_tile
+        tiles.append(__write_manifest_tile(
+            np.zeros(shape, dtype=bool), transform, crs, huc, tile, write_tile,
+        ))
+        log(f"[{scenario_id}] no flooded cells; wrote a blank timestep tile {tiles[0]['key']}")
     west = min(t["bounds_wgs84"][0] for t in tiles)
     south = min(t["bounds_wgs84"][1] for t in tiles)
     east = max(t["bounds_wgs84"][2] for t in tiles)

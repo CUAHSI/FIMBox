@@ -671,6 +671,80 @@ function flowButton(label, point, reach) {
   });
 }
 
+const MAX_TIMESTEP_SCENARIOS = 240;
+const TIMESTEP_ID = /^\d{8}T\d{4}Z$/;
+const HOUR_MS = 3600 * 1000;
+
+// datetime-local inputs are read and written as UTC.
+function utcInputValue(time) { return new Date(time).toISOString().slice(0, 16); }
+
+function parseUtcInput(value) { return value ? Date.parse(`${value}:00Z`) : NaN; }
+
+function timestepId(time) { return `${new Date(time).toISOString().slice(0, 16).replace(/[-:]/g, "")}Z`; }
+
+// Replaces the picker's row with one scenario per timestep (ScenarioID like 20180915T1800Z),
+// merging into existing timestep scenarios so several reaches can share the same times.
+function applyTimesteps(points, reach) {
+  if (!targetExists()) { showMessage("That reach row no longer exists.", true); return; }
+  const huc = reach.huc || String(picker.target.HUC || "");
+  if (!/^\d+$/.test(huc)) { showMessage("Set the row's HUC8 before making time-step scenarios.", true); return; }
+  const owner = state.scenarios.find((scenario) => scenario.Reaches.includes(picker.target));
+  owner.Reaches.splice(owner.Reaches.indexOf(picker.target), 1);
+  if (!owner.Reaches.length) state.scenarios.splice(state.scenarios.indexOf(owner), 1);
+  for (const point of points) {
+    const id = timestepId(point.time);
+    let scenario = state.scenarios.find((item) => item.ScenarioID === id);
+    if (!scenario) { scenario = { ScenarioID: id, Reaches: [] }; state.scenarios.push(scenario); }
+    const row = { HUC: huc, ReachID: reach.reachId, Streamflow: roundFlow(point.flow) };
+    const existing = scenario.Reaches.findIndex((item) => String(item.ReachID) === reach.reachId);
+    if (existing >= 0) scenario.Reaches[existing] = row;
+    else scenario.Reaches.push(row);
+  }
+  const others = state.scenarios.filter((scenario) => !TIMESTEP_ID.test(scenario.ScenarioID));
+  const steps = state.scenarios.filter((scenario) => TIMESTEP_ID.test(scenario.ScenarioID))
+    .sort((a, b) => a.ScenarioID.localeCompare(b.ScenarioID));
+  state.scenarios.splice(0, state.scenarios.length, ...others, ...steps);
+  closeReachPicker();
+  renderScenarioEditor();
+  showMessage(`Set reach ${reach.reachId} in ${points.length} time-step scenario(s) (${steps.length} in total).`);
+}
+
+function timestepForm(points, reach) {
+  const times = points.map((point) => Date.parse(point.time));
+  const bounds = { min: utcInputValue(times[0]), max: utcInputValue(times[times.length - 1]) };
+  const start = el("input", { type: "datetime-local", step: 3600, ...bounds, value: bounds.min, "aria-label": "First time (UTC)" });
+  const end = el("input", { type: "datetime-local", step: 3600, ...bounds, value: bounds.max, "aria-label": "Last time (UTC)" });
+  const every = el("select", { "aria-label": "Time step" },
+    [1, 3, 6, 12, 24].map((hours) => el("option", { value: hours, text: `every ${hours} h` })));
+  const count = el("span", { className: "hint" });
+  const create = el("button", { type: "button", className: "small", text: "Create scenarios" });
+  const selected = () => {
+    const first = parseUtcInput(start.value);
+    const last = parseUtcInput(end.value);
+    const stepMs = Number(every.value) * HOUR_MS;
+    if (!(first <= last)) return [];
+    return points.filter((point, index) => times[index] >= first && times[index] <= last && (times[index] - first) % stepMs === 0);
+  };
+  const update = () => {
+    const total = selected().length;
+    create.disabled = !total || total > MAX_TIMESTEP_SCENARIOS;
+    count.textContent = total > MAX_TIMESTEP_SCENARIOS
+      ? `${total} timesteps; choose at most ${MAX_TIMESTEP_SCENARIOS} (narrow the range or use a longer step).`
+      : `${total} timestep(s) → one scenario each.`;
+  };
+  [start, end, every].forEach((input) => input.addEventListener("input", update));
+  create.addEventListener("click", () => {
+    const chosen = selected();
+    if (chosen.length && chosen.length <= MAX_TIMESTEP_SCENARIOS) applyTimesteps(chosen, reach);
+  });
+  update();
+  return el("details", { className: "timesteps" },
+    el("summary", { text: "Make time-step scenarios" }),
+    el("div", { className: "row" },
+      el("label", { text: "From (UTC) " }, start), el("label", { text: "to " }, end), every, create, count),
+    el("p", { className: "hint", text: "Replaces this row with one scenario per selected timestep. Repeat for other reaches over the same times to add them to the same scenarios." }));
+}
+
 function peakPoint(points) { return points.reduce((best, point) => (point.flow > best.flow ? point : best)); }
 
 async function showNwpsFlows(container, reach, lookup) {
@@ -691,7 +765,7 @@ async function showNwpsFlows(container, reach, lookup) {
     buttons.push(flowButton("Use peak", peakPoint(points), reach));
     rows.push(el("div", { className: "row" }, el("span", {
       text: `${series.label} (${formatTime(points[0].time)} – ${formatTime(points[points.length - 1].time)})`,
-    }), buttons));
+    }), buttons), timestepForm(points, reach));
   });
   if (rows.length) {
     if (!forecasts) rows.push(el("span", { className: "hint", text: "NWPS currently has no forecast flows for this reach." }));
@@ -709,9 +783,11 @@ function historicFlowControls(reach) {
   const start = el("input", { type: "date", ...RETROSPECTIVE_RANGE, value: "2023-01-01", required: true });
   const end = el("input", { type: "date", ...RETROSPECTIVE_RANGE, value: "2023-01-31", required: true });
   const output = el("div", { className: "row" });
+  const steps = el("div");
   const button = el("button", { type: "button", className: "small", text: "Look up", onclick: async () => {
     const lookup = picker.lookup;
     button.disabled = true;
+    steps.replaceChildren();
     output.replaceChildren(el("span", { className: "hint", text: "Reading the NWM retrospective; this can take 10–30 seconds…" }));
     try {
       const body = await api(`/ui/streamflow/retrospective?${query({ reach_id: reach.reachId, start: start.value, end: end.value })}`);
@@ -721,6 +797,11 @@ function historicFlowControls(reach) {
         flowButton("Use max", { flow: body.max, time: body.max_time }, reach),
         el("span", { className: "hint", text: `peak at ${formatTime(body.max_time)}` }),
         flowButton("Use mean", { flow: body.mean }, reach));
+      const first = Date.parse(body.start);
+      const points = body.flows
+        .map((flow, index) => ({ time: new Date(first + index * HOUR_MS).toISOString(), flow }))
+        .filter((point) => point.flow !== null);
+      steps.replaceChildren(timestepForm(points, reach));
     } catch (error) {
       if (lookup === picker.lookup) output.replaceChildren(el("span", { className: "error", text: error.message }));
     } finally {
@@ -731,6 +812,7 @@ function historicFlowControls(reach) {
     el("h4", { text: `Historic (NWM v3.0 retrospective, ${RETROSPECTIVE_RANGE.min} to ${RETROSPECTIVE_RANGE.max}, up to 92 days)` }),
     el("div", { className: "row" }, el("label", { text: "From " }, start), el("label", { text: "to " }, end), button),
     output,
+    steps,
   ];
 }
 
@@ -1036,6 +1118,11 @@ function authTileLayer(bucket, key, info) {
   });
 }
 
+// Result maps list at most this many scenario layers up front; larger (time-step) results show
+// one scenario and load the others as the player reaches them.
+const MAX_VISIBLE_SCENARIOS = 12;
+const LAYER_OPACITY = 0.8;
+
 function createResultMap(view, bucket, legend = "Flooded cells are shown in blue; toggle scenarios with the layer control.") {
   const status = $(".map-status", view);
   const container = $(".map", view);
@@ -1049,32 +1136,119 @@ function createResultMap(view, bucket, legend = "Flooded cells are shown in blue
   osmLayer().addTo(map);
   map.setView([39, -98], 4);
   const control = L.control.layers(null, null, { collapsed: false }).addTo(map);
-  const added = new Set();
-  const notes = [];
+  const overlays = new Map();
+  const ready = new Map();
+  const notes = new Set();
+  let player = null;
   status.textContent = legend;
   view.addEventListener("tabchange", (event) => { if (event.detail.name === "map") map.invalidateSize(); });
 
-  async function add(layer, fit) {
-    if (added.has(layer.key)) return;
-    added.add(layer.key);
-    try {
-      const info = await api(`/outputs/info?${query({ bucket, key: layer.key })}`);
-      const overlay = authTileLayer(bucket, layer.key, info);
-      overlay.addTo(map);
-      control.addOverlay(overlay, layer.name);
-      if (fit) {
-        const [west, south, east, north] = info.bounds;
-        map.invalidateSize();
-        map.fitBounds([[south, west], [north, east]]);
-        if (map.getZoom() < info.minzoom) map.setZoom(info.minzoom);
-      }
-      if (info.minzoom > 2) notes.push(`${layer.name} appears at zoom ≥ ${info.minzoom}.`);
-    } catch (error) {
-      notes.push(`${layer.name}: ${error.message}`);
+  // Resolves to { overlay, info } (or null on error), registering the layer once.
+  function overlayFor(layer) {
+    if (!overlays.has(layer.key)) {
+      overlays.set(layer.key, api(`/outputs/info?${query({ bucket, key: layer.key })}`).then((info) => {
+        const entry = { overlay: authTileLayer(bucket, layer.key, info), info };
+        control.addOverlay(entry.overlay, layer.name);
+        if (info.minzoom > 2) notes.add(`Layers appear at zoom ≥ ${info.minzoom}.`);
+        ready.set(layer.key, entry);
+        return entry;
+      }).catch((error) => {
+        notes.add(`${layer.name}: ${error.message}`);
+        return null;
+      }).finally(() => { status.textContent = [legend, ...notes].join(" "); }));
     }
-    status.textContent = [legend, ...notes].join(" ");
+    return overlays.get(layer.key);
   }
-  return { add };
+
+  function fitTo(info) {
+    const [west, south, east, north] = info.bounds;
+    map.invalidateSize();
+    map.fitBounds([[south, west], [north, east]]);
+    if (map.getZoom() < info.minzoom) map.setZoom(info.minzoom);
+  }
+
+  async function add(layer, fit) {
+    const entry = await overlayFor(layer);
+    if (!entry) return;
+    entry.overlay.setOpacity(LAYER_OPACITY);
+    if (!map.hasLayer(entry.overlay)) entry.overlay.addTo(map);
+    if (fit) fitTo(entry.info);
+  }
+
+  function hide(overlay) {
+    map.removeLayer(overlay);
+    overlay.setOpacity(LAYER_OPACITY);
+  }
+
+  function whenLoaded(overlay) {
+    if (!map.hasLayer(overlay) || !overlay.isLoading()) return Promise.resolve();
+    return new Promise((resolve) => { overlay.once("load", resolve); setTimeout(resolve, 10000); });
+  }
+
+  // Cycles through scenario layers one at a time, preloading the next frame invisibly.
+  function animate(frames, describe = () => "") {
+    if (player || frames.length < 2) return;
+    let current = -1, playing = false, run = 0;
+    const slider = el("input", { type: "range", min: 0, max: frames.length - 1, step: 1, value: 0, "aria-label": "Scenario frame" });
+    const label = el("span", { className: "frame-label" });
+    const delay = el("select", { "aria-label": "Frame delay" },
+      [["2000", "2 s / frame"], ["1000", "1 s / frame"], ["500", "0.5 s / frame"], ["250", "0.25 s / frame"]]
+        .map(([value, text]) => el("option", { value, text, selected: value === "1000" })));
+    const play = el("button", { type: "button", className: "small", text: "Play" });
+    const step = (offset) => el("button", { type: "button", className: "small", text: offset < 0 ? "◀" : "▶",
+      title: offset < 0 ? "Previous scenario" : "Next scenario",
+      onclick: () => { stop(); show((Math.max(current, 0) + offset + frames.length) % frames.length); } });
+    player = el("div", { className: "row player" }, play, step(-1), slider, step(1), delay, label);
+    status.after(player);
+
+    function stop() { playing = false; run++; play.textContent = "Play"; }
+
+    async function show(index) {
+      current = index;
+      slider.value = index;
+      label.textContent = `${index + 1}/${frames.length} ${frames[index].name}${describe(frames[index].name)}`;
+      const next = frames[(index + 1) % frames.length];
+      const entry = await overlayFor(frames[index]);
+      if (current !== index) return;
+      for (const frame of frames) {
+        const other = ready.get(frame.key);
+        if (other && frame !== frames[index] && frame !== next && map.hasLayer(other.overlay)) hide(other.overlay);
+      }
+      if (entry) {
+        if (!map.hasLayer(entry.overlay)) entry.overlay.addTo(map);
+        entry.overlay.setOpacity(LAYER_OPACITY);
+        entry.overlay.bringToFront();
+      }
+      const preload = await overlayFor(next);
+      if (current !== index || !preload || preload === entry) return;
+      if (!map.hasLayer(preload.overlay)) preload.overlay.setOpacity(0).addTo(map);
+    }
+
+    async function loop(token) {
+      while (playing && token === run && container.isConnected) {
+        await sleep(Number(delay.value));
+        if (!playing || token !== run) return;
+        const index = (current + 1) % frames.length;
+        const entry = await overlayFor(frames[index]);
+        if (entry) await whenLoaded(entry.overlay);
+        if (!playing || token !== run) return;
+        await show(index);
+      }
+    }
+
+    play.addEventListener("click", () => {
+      if (playing) { stop(); return; }
+      playing = true;
+      play.textContent = "Pause";
+      loop(++run);
+    });
+    slider.addEventListener("input", () => { stop(); show(Number(slider.value)); });
+    // Leave the initially added layers alone until the player is used.
+    current = 0;
+    label.textContent = `1/${frames.length} ${frames[0].name}${describe(frames[0].name)}`;
+  }
+
+  return { add, animate };
 }
 
 async function loadOutputDetails(view, bucket, prefix, result) {
@@ -1101,13 +1275,28 @@ async function loadOutputDetails(view, bucket, prefix, result) {
   };
   let map;
   let layers = [];
+  let scenarios = [];
+  const describe = (id) => {
+    const reaches = scenarios.find((scenario) => scenario.ScenarioID === id)?.Reaches || [];
+    if (!reaches.length) return "";
+    if (reaches.length > 3) return ` — ${reaches.length} reaches`;
+    return ` — ${reaches.map((reach) => `${reach.ReachID}: ${reach.Streamflow} m³/s`).join(", ")}`;
+  };
+  const addLayers = () => {
+    const frames = layers.filter((layer) => !layer.diff);
+    const eager = frames.length <= MAX_VISIBLE_SCENARIOS;
+    layers.forEach((layer, index) => {
+      if (eager || layer.diff || layer === frames[0]) map.add(layer, index === 0);
+    });
+    map.animate(frames, describe);
+  };
   const ensureMap = () => {
     if (map === undefined) {
       const labels = parityLabels(compared);
       map = createResultMap(view, bucket, parity.length
         ? `Flooded cells are shown in blue. ${DIFF_LEGEND.replace("{base}", labels.base).replace("{candidate}", labels.candidate)}`
         : undefined);
-      if (map) layers.forEach((layer, index) => map.add(layer, index === 0));
+      if (map) addLayers();
       if (map && !layers.length) $(".map-status", view).textContent = "No scenario rasters found; use Map on a file in the Files tab.";
     }
     return map;
@@ -1133,7 +1322,6 @@ async function loadOutputDetails(view, bucket, prefix, result) {
       .catch((error) => readme.replaceChildren(el("p", { className: "hint", text: `README.md unavailable: ${error.message}` })));
   }
 
-  let scenarios = [];
   try {
     const preview = await api(`/ui/objects/preview?${query({ bucket: scenariosBucket, key: scenariosKey })}`);
     scenarios = JSON.parse(preview.text);
@@ -1161,11 +1349,11 @@ async function loadOutputDetails(view, bucket, prefix, result) {
       }
     } catch { /* the Files tab reports listing errors */ }
   }
-  const diffLayers = parity.map((item) => ({ name: `${item.ScenarioID} differences`, key: item.diff_key }));
+  const diffLayers = parity.map((item) => ({ name: `${item.ScenarioID} differences`, key: item.diff_key, diff: true }));
   // Comparison jobs write no scenario rasters of their own; their map shows only differences.
   layers = compared ? diffLayers : [...layers, ...diffLayers];
   // Layers discovered after the map opened are added now.
-  if (map) layers.forEach((layer, index) => map.add(layer, index === 0));
+  if (map) addLayers();
 }
 
 function startLogPolling(view, jobId, status) {

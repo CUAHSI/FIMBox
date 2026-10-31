@@ -239,11 +239,18 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
       gets a streamflow panel: NOAA NWPS analysis/forecast series fetched from
       the browser (ft³/s → m³/s, one `series` per request; forecasts may be
       empty) and a retrospective date-range lookup; "Use" buttons set the
-      row's Streamflow (plus HUC/ReachID).
+      row's Streamflow (plus HUC/ReachID). Each series has a "Make
+      time-step scenarios" form (UTC range, 1–24 h step, ≤ 240): it replaces
+      the row with per-timestep scenarios (`YYYYMMDDTHHMMZ` IDs), merging by
+      ScenarioID so several reaches share timesteps.
     - job submission and log polling
     - result views: README (safe markdown subset), parameters, files, and a
       Leaflet map over `/outputs/tiles` that fetches tiles with the bearer
-      token
+      token. `createResultMap` caches one overlay per key and its
+      `animate(frames)` player shows one scenario layer at a time
+      (play/step/slider/delay), preloading the next frame at opacity 0 and
+      waiting for its tiles. Over 12 scenarios, only the first is added
+      up front.
     - a "Compare two results" form (`POST /jobs/compare`, prefilled by
       "Compare as base/candidate" on any opened result); comparison jobs show
       base/candidate links, a parity table with "Map diff", and diff layers
@@ -602,8 +609,10 @@ uploaded tile by tile.
   representation; `plan_huc` (first discharge per feature, stage
   interpolation), `schedule_tiles` (fixed tile_size windows on each HUC's native
   grid), `compute_tile` (reads only scheduled blocks, `stage > rem`, max across
-  branches), `encode_tile` (binary uint8 COG), `run_scenario` (returns the
-  manifest; no-flood is an error like legacy). I/O is injected as callables.
+  branches), `encode_tile` (float32 1/NaN COG), `run_scenario` (returns the
+  manifest). I/O is injected as callables. Dry scenarios retain one all-nodata
+  tile on the first evaluated window's grid, allowing blank animation frames
+  in both streaming modes. No source blocks still fails explicitly.
   Output tiles are cropped to flooded-cell extents before encoding; transforms,
   dimensions and manifest bounds reflect the crop, so map fitting excludes
   dry padding. Filename row/column still refers to the processing window.

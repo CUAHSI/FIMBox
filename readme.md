@@ -31,6 +31,12 @@ pixi run fimbox status --job-id JOB_ID
 The image build and initial watershed downloads need network access. Stop the
 stack without deleting local data with `docker compose down`.
 
+A browser page at [http://localhost:8000/ui](http://localhost:8000/ui) can also
+submit jobs. It lets you edit the parameters, starting from the `test-data`
+examples, and you can follow logs there. With HydroShare authentication enabled,
+the page also browses and downloads the input dataset and retained results, and
+maps the results. See the [API guide](docker/api/README.md#web-page).
+
 ### Use a different API domain
 
 The CLI defaults to `http://localhost:8000`. To connect to an existing API

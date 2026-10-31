@@ -7,6 +7,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.openapi.utils import get_openapi
+from fastapi.staticfiles import StaticFiles
 from kombu.exceptions import KombuError
 from redis.exceptions import RedisError
 
@@ -51,6 +52,7 @@ from .rasters import (
 )
 from .job_logs import read_job_logs
 from .tasks import hand_fim, hand_fim_parity
+from .ui import STATIC_DIR as UI_STATIC_DIR, router as ui_router
 
 logger = logging.getLogger(__name__)
 app = FastAPI(
@@ -64,7 +66,14 @@ app = FastAPI(
     swagger_ui_oauth2_redirect_url="/docs/oauth2-redirect",
 )
 app.include_router(auth_router)
+app.include_router(ui_router)
+app.mount("/ui/static", StaticFiles(directory=UI_STATIC_DIR), name="ui-static")
 AuthenticatedSession = Annotated[UserSession, Depends(get_authenticated_session)]
+UI_CONTENT_SECURITY_POLICY = (
+    "default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' https://unpkg.com; "
+    "img-src 'self' data: blob: https://tile.openstreetmap.org; connect-src 'self'; "
+    "base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+)
 
 
 @app.middleware("http")
@@ -75,6 +84,13 @@ async def protect_login_responses(
     if request.url.path.startswith("/auth/device/") or request.url.path == "/auth/callback":
         response.headers["Cache-Control"] = "no-store"
         response.headers["Referrer-Policy"] = "no-referrer"
+    elif request.url.path == "/ui" or request.url.path.startswith("/ui/"):
+        # The page keeps a session token in sessionStorage; restrict script sources.
+        response.headers["Content-Security-Policy"] = UI_CONTENT_SECURITY_POLICY
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        if not request.url.path.startswith("/ui/static/"):
+            response.headers["Cache-Control"] = "no-store"
     return response
 
 

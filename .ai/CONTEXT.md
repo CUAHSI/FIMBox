@@ -188,6 +188,32 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
   REQUIRE_HYDROSHARE_OUTPUT defaults false locally; Terraform sets it true for
   the API, which fails startup without OAuth credentials and rejects missing
   output_bucket at the submission route before enqueueing.
+- **`src/fimbox_api/ui.py`** — `/ui` router, excluded from OpenAPI so it is not
+  part of the SDK contract:
+  - `GET /ui` serves `static/ui/index.html`. `main.py` mounts `/ui/static`
+    and adds CSP, nosniff, and no-referrer headers to `/ui*` responses.
+  - JSON helpers for the page:
+    - `/ui/config`: auth and streaming modes, plus the input dataset location
+    - `/ui/examples`: `settings.examples_dir/*.json`; the API image copies
+      `test-data` and sets `EXAMPLES_DIR`
+    - `/ui/objects`: one-level S3 listing
+    - `/ui/objects/preview`: the first 512 KiB of a text file
+    - `/ui/objects/download`: a 5-minute presigned GET URL
+  - Paths reject empty, `.`, and `..` segments. S3 errors map to 404, 403, or
+    503.
+  - Reads use the user's HydroShare S3 client, or `anonymous_s3_client()`
+    (`storage.py`) inside an unsigned input dataset. In local mode without
+    auth they return 409.
+  - `static/ui/app.js` is plain JS that builds the DOM with `textContent`. It
+    handles:
+    - device-flow popup sign-in
+    - the S3 browser
+    - the scenario table/JSON editor
+    - job submission and log polling
+    - result views: README (safe markdown subset), parameters, files, and a
+      Leaflet map over `/outputs/tiles` that fetches tiles with the bearer
+      token
+  - Tests are in `tests/test_ui.py`.
 - **`src/fimbox_api/celery_app.py`** — JSON-only Celery configuration and
   task discovery, started-state tracking, late acknowledgement, and a
   single-process worker.

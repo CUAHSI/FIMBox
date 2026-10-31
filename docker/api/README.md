@@ -160,6 +160,46 @@ drawn after alignment on the legacy grid (padded by 2 pixels) and uses
 flooding. Both are also listed in `files`. Existing parity outputs fail the
 job before computation unless `overwrite` is enabled.
 
+## Web page
+
+`GET /ui` serves a browser page with three tabs:
+
+- **Input dataset** browses and downloads the prepared streaming hydrofabric at
+  `STREAM_INPUT_BUCKET`/`STREAM_INPUT_PREFIX`. Without that setting, the tab
+  explains that legacy jobs download NOAA HAND data per HUC instead.
+- **Submit job** edits scenarios as a table or JSON. You can load the examples
+  from the `test-data/*.json` files, set the job options, and submit to
+  `POST /jobs/hand-fim`.
+- **Results** lists your jobs, streams their logs, and lets you cancel queued
+  jobs. For retained S3 output it shows several views:
+  - the generated `README.md`, whose relative links open files or map layers
+  - the `scenarios.json` parameters, with an "Edit and resubmit" button
+  - a browser for the output files
+  - a Leaflet map built from the authenticated `/outputs/info|tiles` routes
+  - parity reports
+
+  Any retained output prefix can also be opened directly, even after the
+  job's 24-hour metadata has expired.
+
+Sign-in uses the same HydroShare device flow as the CLI, through a popup. The
+FIMBox session token is kept in `sessionStorage`. In anonymous local mode, the
+page can only submit and track jobs, because S3 browsing and maps need a
+HydroShare session.
+
+The page uses helper routes under `/ui/*` that are excluded from OpenAPI and
+the SDK:
+
+- folder listing
+- previews of the first 512 KiB of text files
+- download links
+
+Downloads are short-lived (5 minute) presigned S3 URLs signed with the user's
+HydroShare S3 credentials, so large files bypass the API. The URL exposes the
+access key ID, but not the secret. When `STREAM_INPUT_UNSIGNED=true`, unsigned
+requests read the input dataset. Leaflet loads from unpkg and basemap tiles
+come from OpenStreetMap; the page's CSP permits only those origins. Examples
+are read from `EXAMPLES_DIR`, which the API image sets to `/app/test-data`.
+
 ## Raster viewing
 
 The cloud notebook displays retained outputs by storage path:

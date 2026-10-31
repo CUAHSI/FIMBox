@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FIMBox HAND-FIM</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+  <link rel="stylesheet" href="/ui/static/app.css">
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="" defer></script>
+  <script src="/ui/static/app.js" defer></script>
+</head>
+<body>
+  <header>
+    <h1>FIMBox HAND-FIM</h1>
+    <div id="auth">
+      <span id="auth-status">Loading…</span>
+      <button id="sign-in" type="button" hidden>Sign in with HydroShare</button>
+      <button id="sign-out" type="button" hidden>Sign out</button>
+    </div>
+  </header>
+
+  <nav class="tabs" data-tabs="main">
+    <button type="button" data-tab="input" class="active">Input dataset</button>
+    <button type="button" data-tab="submit">Submit job</button>
+    <button type="button" data-tab="results">Results</button>
+  </nav>
+
+  <p id="message" class="message" role="status" hidden></p>
+
+  <main>
+    <section data-panel="main" data-name="input">
+      <p class="hint" id="input-description"></p>
+      <div id="input-browser"></div>
+    </section>
+
+    <section data-panel="main" data-name="submit" hidden>
+      <div class="row">
+        <label>Example parameters
+          <select id="example-select"><option value="">— choose an example —</option></select>
+        </label>
+        <button type="button" id="example-load">Load example</button>
+        <button type="button" id="json-toggle">Edit as JSON</button>
+      </div>
+
+      <div id="scenario-editor"></div>
+      <div id="json-editor" hidden>
+        <textarea id="json-text" rows="20" spellcheck="false"></textarea>
+        <div class="row"><button type="button" id="json-apply">Apply JSON</button></div>
+      </div>
+      <div class="row" id="scenario-buttons"><button type="button" id="scenario-add">Add scenario</button></div>
+
+      <form id="job-options">
+        <h3>Job options</h3>
+        <div class="grid">
+          <label>Execution mode <select name="execution_mode"></select></label>
+          <label>Output bucket <input name="output_bucket" placeholder="blank keeps output local"></label>
+          <label>Output prefix <input name="output_prefix" placeholder="&lt;resource id&gt;/data/contents/run-1"></label>
+          <label>Max processes <input name="max_procs" type="number" min="1" placeholder="worker default"></label>
+          <label class="check"><input name="overwrite" type="checkbox"> Overwrite existing outputs</label>
+        </div>
+        <p class="hint" id="options-hint"></p>
+        <button type="submit" class="primary">Submit job</button>
+      </form>
+    </section>
+
+    <section data-panel="main" data-name="results" hidden>
+      <div class="split">
+        <aside>
+          <h3>Your jobs <button type="button" id="jobs-refresh" class="small">Refresh</button></h3>
+          <ul id="job-list" class="list"></ul>
+          <form id="open-output">
+            <h3>Open retained output</h3>
+            <label>Bucket <input name="bucket" value="resource" required></label>
+            <label>Prefix <input name="prefix" placeholder="&lt;resource id&gt;/data/contents/run-1"></label>
+            <button type="submit">Open</button>
+          </form>
+        </aside>
+        <div id="result-view">
+          <p class="hint">Select a job or open a retained output location.</p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <template id="result-template">
+    <h2 class="result-title"></h2>
+    <dl class="summary"></dl>
+    <nav class="tabs" data-tabs="result">
+      <button type="button" data-tab="overview" class="active">Overview</button>
+      <button type="button" data-tab="parameters">Input parameters</button>
+      <button type="button" data-tab="map">Map</button>
+      <button type="button" data-tab="files">Files</button>
+      <button type="button" data-tab="logs">Logs</button>
+    </nav>
+    <section data-panel="result" data-name="overview"><div class="readme"></div><div class="parity"></div></section>
+    <section data-panel="result" data-name="parameters" hidden><div class="parameters"></div></section>
+    <section data-panel="result" data-name="map" hidden><p class="map-status hint"></p><div class="map"></div></section>
+    <section data-panel="result" data-name="files" hidden><div class="files"></div></section>
+    <section data-panel="result" data-name="logs" hidden><pre class="logs"></pre></section>
+  </template>
+</body>
+</html>

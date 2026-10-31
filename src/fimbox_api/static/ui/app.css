@@ -1,0 +1,52 @@
+:root { --accent: #1d5fa8; --border: #d0d7de; --muted: #57606a; --bg: #f6f8fa; }
+* { box-sizing: border-box; }
+body { margin: 0; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; color: #1f2328; }
+header { display: flex; justify-content: space-between; align-items: center; padding: 8px 16px; background: var(--accent); color: #fff; }
+header h1 { font-size: 18px; margin: 0; }
+header button { margin-left: 8px; }
+main { padding: 12px 16px; }
+button { font: inherit; padding: 4px 10px; border: 1px solid var(--border); border-radius: 4px; background: #fff; cursor: pointer; }
+button:hover { background: var(--bg); }
+button:disabled { opacity: .6; cursor: default; }
+button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+button.small { font-size: 12px; padding: 1px 6px; }
+button.link { border: none; background: none; color: var(--accent); padding: 0 4px; }
+input, select, textarea { font: inherit; padding: 3px 6px; border: 1px solid var(--border); border-radius: 4px; }
+textarea { width: 100%; font-family: ui-monospace, monospace; font-size: 13px; }
+label { display: inline-flex; flex-direction: column; gap: 2px; font-weight: 500; }
+label.check { flex-direction: row; align-items: center; gap: 6px; }
+.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); padding: 0 16px; margin-top: 8px; }
+.tabs button { border: 1px solid transparent; border-bottom: none; border-radius: 4px 4px 0 0; background: none; }
+.tabs button.active { border-color: var(--border); background: #fff; margin-bottom: -1px; font-weight: 600; }
+section .tabs { padding: 0; margin-bottom: 8px; }
+.row { display: flex; gap: 8px; align-items: flex-end; margin: 8px 0; flex-wrap: wrap; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px 16px; align-items: end; }
+.hint { color: var(--muted); }
+.message { margin: 8px 16px; padding: 6px 10px; border-radius: 4px; background: #ddf4ff; white-space: pre-wrap; }
+.message.error { background: #ffebe9; color: #82071e; }
+table { border-collapse: collapse; width: 100%; }
+th, td { border-bottom: 1px solid var(--border); padding: 4px 8px; text-align: left; vertical-align: top; }
+th { background: var(--bg); font-weight: 600; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.breadcrumb { margin: 6px 0; }
+.breadcrumb button { border: none; background: none; color: var(--accent); padding: 0 2px; }
+.preview { margin-top: 12px; border: 1px solid var(--border); border-radius: 4px; }
+.preview h4 { margin: 0; padding: 6px 10px; background: var(--bg); border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; }
+.preview pre, pre.logs { margin: 0; padding: 10px; max-height: 480px; overflow: auto; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+pre.logs { background: #0d1117; color: #e6edf3; border-radius: 4px; min-height: 80px; }
+fieldset { border: 1px solid var(--border); border-radius: 4px; margin: 8px 0; }
+fieldset legend { display: flex; gap: 6px; align-items: center; }
+fieldset input.num { width: 120px; }
+.split { display: grid; grid-template-columns: 280px 1fr; gap: 16px; }
+aside form { display: flex; flex-direction: column; gap: 6px; margin-top: 16px; }
+.list { list-style: none; padding: 0; margin: 0; max-height: 360px; overflow: auto; }
+.list li { padding: 4px 6px; border-radius: 4px; cursor: pointer; display: flex; justify-content: space-between; gap: 6px; font-family: ui-monospace, monospace; font-size: 12px; }
+.list li:hover, .list li.active { background: #ddf4ff; }
+.status { font-family: system-ui, sans-serif; font-weight: 600; }
+.status.success { color: #1a7f37; } .status.failure, .status.revoked { color: #cf222e; } .status.started, .status.queued { color: #9a6700; }
+dl.summary { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; }
+dl.summary dt { font-weight: 600; } dl.summary dd { margin: 0; word-break: break-all; }
+.map { height: 520px; border: 1px solid var(--border); border-radius: 4px; }
+.readme { max-width: 900px; }
+.readme pre { background: var(--bg); padding: 8px; overflow: auto; }
+.readme code { background: var(--bg); padding: 0 3px; border-radius: 3px; font-size: 12px; }

@@ -36,6 +36,31 @@ class RasterReadError(RuntimeError):
     """A sanitized raster read failure."""
 
 
+def raster_preview(source: RasterSource) -> bytes:
+    """Render a bounded first-band preview, stretching sampled valid values."""
+    try:
+        with rasterio.Env(
+            session=source.session,
+            GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR", GDAL_HTTP_TIMEOUT=20,
+            GDAL_HTTP_MAX_RETRY=0, VSI_CACHE=False, **source.options,
+        ), Reader(source.path) as reader:
+            image = reader.preview(max_size=1024, indexes=(1,))
+            image.array = np.ma.masked_invalid(image.array)
+            values = image.array.compressed()
+            if not values.size:
+                return image.render(img_format="PNG", colormap={0: (0, 0, 0, 0)})
+            low, high = np.percentile(values, (2, 98))
+            if high <= low:
+                low, high = float(values.min()), float(values.max())
+            if high <= low:
+                high = low + 1
+            image.rescale(in_range=((float(low), float(high)),))
+            return image.render(img_format="PNG")
+    except (RasterioError, RioTilerError):
+        logger.error("Could not read raster preview")
+        raise RasterReadError("Could not read raster preview from storage.") from None
+
+
 def raster_info(source: RasterSource) -> RasterInfo:
     try:
         with rasterio.Env(

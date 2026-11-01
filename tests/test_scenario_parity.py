@@ -139,11 +139,11 @@ class LegacyStreamingScenarioParityTests(unittest.TestCase):
         inputs = output / "scenarios.json"
         inputs.write_text(json.dumps(renamed))
 
-        mode = os.environ.get("FIMBOX_PARITY_EXECUTION_MODE", "legacy")
-        self.assertIn(mode, ("legacy", "updatedlegacy"))
+        mode = os.environ.get("FIMBOX_PARITY_EXECUTION_MODE", "fimserv-2024")
+        self.assertIn(mode, ("fimserv-2024", "fimserv-2026"))
         subprocess.run(
             [sys.executable, str(HANDFIM / "entry.py"), "scenario", str(inputs), "1", run_id,
-             *(["--updated-legacy"] if mode == "updatedlegacy" else [])],
+             *(["--updated-legacy"] if mode == "fimserv-2026" else [])],
             check=True,
         )
         # Load checkout code, not a potentially stale copy baked into the image.
@@ -210,7 +210,7 @@ class LegacyStreamingScenarioParityTests(unittest.TestCase):
                         report["different_cells"], 0,
                         f"Legacy/streaming output differs: {json.dumps(report, indent=2)}",
                     )
-                    if mode == "updatedlegacy":
+                    if mode == "fimserv-2026":
                         self.assertEqual(
                             (report["grid_shift_rows"], report["grid_shift_columns"]), (0, 0),
                             f"Updated legacy should not need grid realignment: {report}",

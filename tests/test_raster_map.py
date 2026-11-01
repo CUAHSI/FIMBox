@@ -44,6 +44,9 @@ def manifest():
 
 class RasterApiTests(unittest.TestCase):
     def setUp(self):
+        times = patch.object(main, "read_job_times", return_value={})
+        times.start()
+        self.addCleanup(times.stop)
         self.job_id = uuid4()
         self.base = f"/jobs/{self.job_id}/rasters"
         self.session = auth.UserSession(
@@ -133,6 +136,37 @@ class RasterReadTests(unittest.TestCase):
             dataset.write(data, 1)
         copy_raster(source, self.path, driver="COG", compress="DEFLATE", blocksize=256)
 
+    def test_raster_preview_is_bounded_and_not_binary_flood_coloring(self):
+        path = Path(self.directory.name) / "continuous.tif"
+        data = np.linspace(-10, 100, 2048 * 1024, dtype="float32").reshape(1024, 2048)
+        data[:128] = -9999
+        with rasterio.open(
+            path, "w", driver="GTiff", width=2048, height=1024, count=1,
+            dtype="float32", nodata=-9999, crs="EPSG:3857",
+            transform=from_bounds(0, 0, 2048, 1024, 2048, 1024),
+        ) as dataset:
+            dataset.write(data, 1)
+        png = rasters.raster_preview(storage.RasterSource(str(path)))
+        self.assertTrue(png.startswith(b"\x89PNG\r\n\x1a\n"))
+        with rasterio.io.MemoryFile(png) as memory, memory.open() as image:
+            self.assertEqual((image.width, image.height), (1024, 512))
+            self.assertGreater(len(np.unique(image.read(1))), 100)
+            self.assertEqual(image.read(image.count)[0, 0], 0)
+
+    def test_raster_preview_handles_constant_and_all_nodata_bands(self):
+        path = Path(self.directory.name) / "constant.tif"
+        for value in (5, -9999):
+            with rasterio.open(
+                path, "w", driver="GTiff", width=16, height=16, count=1,
+                dtype="float32", nodata=-9999, crs="EPSG:3857",
+                transform=from_bounds(0, 0, 16, 16, 16, 16),
+            ) as dataset:
+                dataset.write(np.full((16, 16), value, dtype="float32"), 1)
+            png = rasters.raster_preview(storage.RasterSource(str(path)))
+            with rasterio.io.MemoryFile(png) as memory, memory.open() as image:
+                alpha = image.read(image.count)
+                self.assertTrue(np.all(alpha == (0 if value == -9999 else 255)))
+
     def test_real_cog_metadata_and_tiles_use_http_ranges(self):
         body = self.path.read_bytes()
         ranges = []
@@ -189,6 +223,13 @@ class RasterReadTests(unittest.TestCase):
             self.assertTrue(ranges)
             self.assertTrue(all(value.startswith("AWS4-HMAC-SHA256 ") for value in authorization_headers))
             self.assertLess(sum(end - start + 1 for start, end in ranges), len(body) // 2)
+            ranges.clear()
+            png = rasters.raster_preview(storage.RasterSource(
+                f"http://127.0.0.1:{server.server_port}/input.tif?signature=test",
+            ))
+            self.assertTrue(png.startswith(b"\x89PNG\r\n\x1a\n"))
+            self.assertTrue(ranges)
+            self.assertLess(sum(end - start + 1 for start, end in ranges), len(body) // 2)
         finally:
             server.shutdown()
             server.server_close()
@@ -206,6 +247,8 @@ class RasterReadTests(unittest.TestCase):
     def test_invalid_raster_error_does_not_expose_url(self):
         with self.assertRaisesRegex(rasters.RasterReadError, "metadata"):
             rasters.raster_info(storage.RasterSource(str(Path(self.directory.name) / "missing-secret.cog")))
+        with self.assertRaisesRegex(rasters.RasterReadError, "^Could not read raster preview from storage.$"):
+            rasters.raster_preview(storage.RasterSource(str(Path(self.directory.name) / "missing-secret.tif")))
 
 
 class OutputPathApiTests(unittest.TestCase):

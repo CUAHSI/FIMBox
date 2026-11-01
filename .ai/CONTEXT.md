@@ -12,7 +12,7 @@ that container (`docker/handfim/`), a second Typer CLI (`entry.py`) drives the
 actual FIM computation using NOAA/OWP's `inundation-mapping` tooling and the
 `fimserve` package (vendored/patched under `docker/handfim/patches/`).
 
-`execution_mode="updatedlegacy"` (SDK enum `UPDATEDLEGACY`) follows the legacy
+`execution_mode="fimserv-2026"` (SDK enum `FIMSERV_2026`) follows the legacy
 worker/output path, passing `scenario --updated-legacy` to the container.
 It selects the independent `/home/code/inundation-mapping-updated` checkout,
 pinned in the Dockerfile to NOAA v4.8.14.0 / b4459b5d4dd71e67f84a5656d7109237e21903ed.
@@ -20,19 +20,19 @@ Original legacy stays on 9d39cb85. Both use the same downloaded hydrofabric;
 the newer code replaces the faulty mosaic and also adds a ~3 cm depth cutoff,
 so streaming parity may expose genuine scientific differences. Updated runs
 retain ordinary COGs/scenarios.json and can be references for `/jobs/parity`.
-`FIMBOX_PARITY_EXECUTION_MODE=updatedlegacy` selects it in the container parity
+`FIMBOX_PARITY_EXECUTION_MODE=fimserv-2026` selects it in the container parity
 test and additionally requires zero grid shift. `tests/test_updated_legacy.py`
 covers checkout routing, missing-code failure, CLI flag, and a real synthetic
 FIMserv/new NOAA run inside the image. New upstream imports need geocube/fsspec.
 
-`execution_mode="updatedstreaming"` (SDK `UPDATEDSTREAMING`) follows the
+`execution_mode="streaming-2026"` (SDK `STREAMING_2026`) follows the
 streaming path (`HandFimJobOptions.streamed`, stream queue, S3 required,
 max_procs 1) and passes `stream-scenario --updated`. `streamFIM.run_scenario`
 accepts a `rule` (FloodRule: BranchPlan -> per-window classifier; default
 `pinned_rule`); `BranchPlan.ratings` keeps ordered (feature_id, discharge,
 discharge_cms, stage) rows. `docker/handfim/noaa_stream_rule.py` builds a rule
 from the updated checkout's `__subset_hydroTable_to_forecast` and numba
-`__go_fast_mapping` (0.03048 m minimum depth), so it matches `updatedlegacy`
+`__go_fast_mapping` (0.03048 m minimum depth), so it matches `fimserv-2026`
 exactly on HUC 03020201. Parity accepts `execution_mode` (streaming modes
 only; appended to Celery args only when non-default). Container test:
 `tests/test_updated_streaming.py` (compares with NOAA `inundate()`).
@@ -211,6 +211,10 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
       `test-data` and sets `EXAMPLES_DIR`
     - `/ui/objects`: one-level S3 listing
     - `/ui/objects/preview`: the first 512 KiB of a text file
+    - `/ui/objects/raster`: TIFF/COG first-band PNG preview, max 1024 pixels per
+      side, sampled percentile grayscale stretch and transparent nodata. Uses a
+      permission-scoped short-lived GET URL only inside the API; browser fetches
+      PNG with auth. Shared file browser adds View alongside Download/Map.
     - `/ui/objects/parquet`: pyarrow schema, counts, and first rows (limit
       1-200) through a seekable ranged-GET reader with a 64 MiB read budget
     - `/ui/objects/download`: a 5-minute presigned GET URL
@@ -244,6 +248,14 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
       the row with per-timestep scenarios (`YYYYMMDDTHHMMZ` IDs), merging by
       ScenarioID so several reaches share timesteps.
     - job submission and log polling
+    - an "S3 locations" tab storing named `{id,name,bucket,prefix}` entries in
+      `localStorage` under `fimbox-locations:<origin>:<user id or "local">`.
+      `.location-picker` placeholders in forms (`data-bucket`/`data-prefix`, or
+      `data-uri` for the history field) become a saved-location select plus a
+      relative subprefix. The subprefix makes the target fields read-only and
+      writes the joined bucket/prefix. `data-required` makes the subprefix
+      mandatory for outputs. Code that fills target fields first calls
+      `useCustomLocation`.
     - result views: README (safe markdown subset), parameters, files, and a
       Leaflet map over `/outputs/tiles` that fetches tiles with the bearer
       token. `createResultMap` caches one overlay per key and its
@@ -381,6 +393,35 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
   failure prevents enqueue.
 - **`src/fimbox_api/job_logs.py`** — Redis-backed append, clear, and byte-offset
   reads for expiring worker logs exposed by `GET /jobs/{job_id}/logs`.
+- **`src/fimbox_api/job_timing.py`** — Redis hash `jobs:timing:<id>` with
+  `started_at`/`finished_at`, using the result TTL. `HistoryTask` records it for every
+  task, copies it into S3 history records, and `get_job_status` returns it
+  (except for queued jobs). The UI derives execution/elapsed time from it.
+- **`src/fimbox_api/history.py`** — Opt-in persistent S3 job metadata selected by
+  `X-FIMBox-History-Location: s3://bucket/prefix`. Queued records are written
+  before enqueue; `HistoryTask` wraps all three worker tasks to retain started
+  and terminal snapshots plus terminal logs. Non-secret `history_archive` task
+  kwargs preserve existing positional arguments. Records contain original
+  request, user/job/type, UTC timestamps, result/error; no tokens/credentials.
+  Per-user SHA256 namespaces and per-job JSON/log objects avoid shared index
+  races. Main job list/status/log/raster endpoints read archives after Redis
+  expiry; `/jobs/{id}/archive` exposes inputs. Reads verify user/job identity,
+  paginate S3 listing, limit records to 32 MiB, and retain byte-offset UTF-8
+  log reads. `/jobs/history/export` (UI export button / CLI `history export`)
+  explicitly copies completed Redis jobs/logs, skipping active jobs and existing
+  archives with conditional S3 writes. Export provenance marks unavailable inputs,
+  job type, and submitted time; Redis is unchanged. Failures are explicit.
+  `/jobs/history/clear` (UI **Clear history** / CLI `history clear --yes`)
+  deletes finished jobs' S3 records/logs (when a location is selected) before
+  forgetting their Redis result/logs/timing/ownership; active jobs and outputs
+  are kept.
+  No automatic backfill or S3 TTL; lifecycle rules still
+  apply. Abrupt worker loss may leave the last running snapshot.
+  UI remembers location per account/browser; CLI `history use/show/disable/job`
+  remembers location per API in the user config directory, with
+  `--history-location`/`FIMBOX_HISTORY_LOCATION` overrides. Server authorization
+  scopes either client's selected location to the authenticated user.
+  Tests: `tests/test_job_history.py`, related CLI cases.
 - **`src/fimbox_api/auth.py`** — HydroShare authorization-code exchange,
   verified user-info identity, Redis-backed opaque sessions with expiry,
   single-use browser-bound OAuth state, and per-user job ownership/tracking.
@@ -559,7 +600,7 @@ single worker per shared watershed cache. `pixi run api` runs FastAPI only.
     `reachfim_interval` command was removed; still available as a standalone
     CLI command.
 
-## Streaming HAND-FIM (opt-in `execution_mode="streaming"`)
+## Streaming HAND-FIM (opt-in `execution_mode="streaming-2024"`)
 
 Targets a 4 GiB Cloud Run worker with no scratch storage: inputs are
 range-read from a prepared cloud-optimized hydrofabric on S3 and outputs are
@@ -623,11 +664,15 @@ uploaded tile by tile.
   Invalid index Parquet reports the full S3 object location and upload remediation
   without including object contents; bounded reads enforce the index size limit.
   `run_streaming(rule=...)` forwards an optional flood rule to `run_scenario`.
-- **`docker/handfim/noaa_stream_rule.py`** — `updatedstreaming` flood rule:
+- **`docker/handfim/noaa_stream_rule.py`** — `streaming-2026` flood rule:
   `load_inundation` imports only the updated NOAA `tools/inundation.py`
   (RuntimeError "rebuild the HAND-FIM image" if absent); `updated_rule` turns
   BranchPlan ratings into NOAA hydro-table/forecast frames and classifies
   windows with NOAA's kernel (copies inputs; kernel mutates in place).
+- Modes are now `fimserv-2024`, `fimserv-2026`, `streaming-2024`, and
+  `streaming-2026`; old names are deliberately rejected, including stored result
+  validation. No compatibility aliases/history migration. Default HAND-FIM mode
+  is `fimserv-2024`; parity defaults to `streaming-2024`.
 - API: `models.HandFimJobOptions.execution_mode` (streaming requires S3 output
   and one process); `config` STREAM_* settings; `storage.job_s3_environment`
   (credentials for the subprocess environment, rejects near-expiry);
@@ -654,7 +699,7 @@ uploaded tile by tile.
   The CLI has
   `--execution-mode`.
 - Terraform: `stream_input_*` variables and an optional `stream_worker` pool
-  (4Gi) consuming the `streaming` queue.
+  (4Gi) consuming the `streaming-2024` queue.
 - Tests: `tests/test_streaming_fim.py` (NOAA-reference equality, tile-size
   invariance, range-only HTTP reads) and `tests/test_streaming_api.py`.
 - **`tests/test_scenario_parity.py`** — Fast raster-diff regressions plus an

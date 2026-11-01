@@ -1,9 +1,9 @@
 """Streaming flood rule backed by NOAA inundation-mapping's own newer code.
 
-``updatedstreaming`` mode plugs this rule into ``fimserve.streamFIM``. Each
+``streaming-2026`` mode plugs this rule into ``fimserve.streamFIM``. Each
 branch's stages come from NOAA's ``__subset_hydroTable_to_forecast`` and each
 streamed window is classified by NOAA's numba kernel ``__go_fast_mapping``,
-both loaded from the updated checkout used by ``updatedlegacy``. That keeps
+both loaded from the updated checkout used by ``fimserv-2026``. That keeps
 NOAA's minimum depth (0.03048 m, or 30 mm for int16 catchments), int16
 HydroID/stage quantization, and lake filter identical without copying them.
 

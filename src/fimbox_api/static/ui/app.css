@@ -68,3 +68,10 @@ dl.summary dt { font-weight: 600; } dl.summary dd { margin: 0; word-break: break
 .readme { max-width: 900px; }
 .readme pre { background: var(--bg); padding: 8px; overflow: auto; }
 .readme code { background: var(--bg); padding: 0 3px; border-radius: 3px; font-size: 12px; }
+.location-picker { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: end; }
+.grid .location-picker { grid-column: 1 / -1; }
+.location-picker .hint { word-break: break-all; }
+input[readonly] { background: #f6f8fa; color: #57606a; }
+table.locations td { padding: 4px 8px; border-bottom: 1px solid var(--border); }
+table.locations th { text-align: left; padding: 4px 8px; }
+.location-picker [hidden] { display: none; }

@@ -78,7 +78,7 @@ class ParityWorkerTests(unittest.TestCase):
         self.client.put_object.side_effect = lambda Bucket, Key, Body, **kwargs: self.put.__setitem__(Key, Body)
         patcher = patch.object(tasks, "hand_fim", return_value={
             "outputs": [{"ScenarioID": "s1"}], "output_bucket": "fim-output", "output_prefix": "runs/streaming",
-            "execution_mode": "streaming", "scenario_manifests": [ScenarioManifest(
+            "execution_mode": "streaming-2024", "scenario_manifests": [ScenarioManifest(
                 ScenarioID="s1", key="runs/streaming/s1/manifest.json", tile_count=1,
                 bounds=(-78, 35, -77, 36), resolution=10.0, tile_size=2048,
             ).model_dump(mode="json")],
@@ -111,17 +111,17 @@ class ParityWorkerTests(unittest.TestCase):
         return tasks.hand_fim_parity.run(self.job_id, **REQUEST, overwrite=overwrite)
 
     def test_updatedstreaming_parity_reruns_with_noaa_rule_and_rejects_legacy_modes(self):
-        tasks.hand_fim_parity.run(self.job_id, **REQUEST, execution_mode="updatedstreaming")
+        tasks.hand_fim_parity.run(self.job_id, **REQUEST, execution_mode="streaming-2026")
         self.hand_fim.assert_called_once_with(
-            self.job_id, PAYLOAD, "fim-output", "runs/streaming", None, False, "updatedstreaming",
+            self.job_id, PAYLOAD, "fim-output", "runs/streaming", None, False, "streaming-2026",
         )
         with self.assertRaisesRegex(ValueError, "streaming execution_mode"):
-            tasks.hand_fim_parity.run(self.job_id, **REQUEST, execution_mode="updatedlegacy")
+            tasks.hand_fim_parity.run(self.job_id, **REQUEST, execution_mode="fimserv-2026")
 
     def test_matching_outputs_rerun_legacy_scenarios_with_streaming_and_publish_report(self):
         result = self.run_parity()
         self.hand_fim.assert_called_once_with(
-            self.job_id, PAYLOAD, "fim-output", "runs/streaming", None, False, "streaming",
+            self.job_id, PAYLOAD, "fim-output", "runs/streaming", None, False, "streaming-2024",
         )
         parity = result["parity"][0]
         self.assertTrue(parity["matches"])
@@ -215,11 +215,11 @@ class ParityApiTests(unittest.TestCase):
         self.assertEqual(enqueue.call_args.kwargs["queue"], "streaming")
 
     def test_updatedstreaming_parity_mode_is_appended_and_legacy_modes_rejected(self):
-        response, enqueue = self.submit(execution_mode="updatedstreaming")
+        response, enqueue = self.submit(execution_mode="streaming-2026")
         self.assertEqual(response.status_code, 202, response.text)
-        self.assertEqual(enqueue.call_args.kwargs["args"][-1], "updatedstreaming")
+        self.assertEqual(enqueue.call_args.kwargs["args"][-1], "streaming-2026")
         self.assertEqual(len(enqueue.call_args.kwargs["args"]), 7)
-        response, enqueue = self.submit(execution_mode="updatedlegacy")
+        response, enqueue = self.submit(execution_mode="fimserv-2026")
         self.assertEqual(response.status_code, 422)
         enqueue.assert_not_called()
 

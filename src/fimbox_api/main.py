@@ -51,7 +51,10 @@ from .rasters import (
     RasterReadError, TooManyTilesError, load_scenario_tiles, raster_info, raster_tile,
     scenario_info, scenario_tile, stored_scenario_manifest,
 )
-from .job_logs import read_job_logs
+from .job_logs import clear_job_logs, read_job_logs
+from .job_timing import clear_job_times, read_job_times
+from . import history as job_history
+from .history import HistorySelection
 from .tasks import hand_fim, hand_fim_compare, hand_fim_parity
 from .ui import STATIC_DIR as UI_STATIC_DIR, router as ui_router
 
@@ -141,6 +144,7 @@ def __submit_hand_fim(
     parameters: HandFimParameters,
     destination: HandFimJobOptions,
     session: UserSession,
+    history: job_history.HistoryLocation | None = None,
 ) -> JobSubmitted:
     if settings.require_hydroshare_output and destination.output_bucket is None:
         raise HTTPException(status_code=422, detail=[{
@@ -151,13 +155,19 @@ def __submit_hand_fim(
     if destination.streamed and not settings.streaming_enabled:
         raise HTTPException(status_code=409, detail="Streaming execution is not configured on this server")
     job_id = str(uuid4())
-    if destination.output_bucket is not None:
+    if destination.output_bucket is not None or history is not None:
         if not settings.authentication_enabled:
             raise HTTPException(status_code=409, detail="HydroShare S3 output requires configured authentication")
         create_job_credentials(UUID(job_id), session)
+    archive = {}
     try:
+        archive = job_history.prepare(
+            job_id, session, history, "hand-fim",
+            {**destination.model_dump(mode="json"), "scenarios": parameters.model_dump(mode="json")},
+        )
         track_user_job(session.user_id, job_id)
         hand_fim.apply_async(
+            **({"kwargs": archive} if archive else {}),
             args=[
                 job_id,
                 parameters.model_dump(mode="json"),
@@ -166,7 +176,7 @@ def __submit_hand_fim(
                 destination.max_procs,
                 destination.overwrite,
                 # Legacy jobs keep the original arguments so older workers still accept them.
-                *([destination.execution_mode] if destination.execution_mode != "legacy" else []),
+                *([destination.execution_mode] if destination.execution_mode != "fimserv-2024" else []),
             ],
             task_id=job_id,
             retry=False,
@@ -175,10 +185,13 @@ def __submit_hand_fim(
                 if destination.streamed and settings.stream_queue else {}
             ),
         )
-    except (KombuError, RedisError, OSError):
-        if destination.output_bucket is not None:
-            delete_job_credentials(UUID(job_id))
-        untrack_user_job(session.user_id, job_id)
+    except (KombuError, RedisError, OSError, BotoCoreError, ClientError, StorageCredentialsError):
+        try:
+            job_history.enqueue_failed(archive)
+        finally:
+            if destination.output_bucket is not None or history is not None:
+                delete_job_credentials(UUID(job_id))
+            untrack_user_job(session.user_id, job_id)
         raise
     logger.info("Enqueued HAND-FIM job %s", job_id)
     return JobSubmitted(
@@ -190,13 +203,16 @@ def __submit_hand_fim(
 def submit_hand_fim(
     body: HandFimJobRequest,
     session: AuthenticatedSession,
+    history: HistorySelection = None,
 ) -> JobSubmitted:
     """Submit a HAND-FIM job with scenarios and options in the JSON body."""
-    return __submit_hand_fim(body.scenarios, body, session)
+    return __submit_hand_fim(body.scenarios, body, session, history)
 
 
 @app.post("/jobs/parity", status_code=202, response_model=JobSubmitted)
-def submit_parity(body: ParityJobRequest, session: AuthenticatedSession) -> JobSubmitted:
+def submit_parity(
+    body: ParityJobRequest, session: AuthenticatedSession, history: HistorySelection = None,
+) -> JobSubmitted:
     """Rerun a retained legacy run's scenarios.json with streaming and diff every scenario.
 
     The job result lists streaming manifests plus per-scenario parity counts; diff GeoTIFFs
@@ -208,29 +224,37 @@ def submit_parity(body: ParityJobRequest, session: AuthenticatedSession) -> JobS
         raise HTTPException(status_code=409, detail="HydroShare S3 output requires configured authentication")
     job_id = str(uuid4())
     create_job_credentials(UUID(job_id), session)
+    archive = {}
     try:
+        archive = job_history.prepare(job_id, session, history, "parity", body.model_dump(mode="json"))
         track_user_job(session.user_id, job_id)
         hand_fim_parity.apply_async(
+            **({"kwargs": archive} if archive else {}),
             args=[
                 job_id, body.legacy_bucket, body.legacy_prefix,
                 body.output_bucket, body.output_prefix, body.overwrite,
                 # Default parity jobs keep the original arguments so older workers still accept them.
-                *([body.execution_mode] if body.execution_mode != "streaming" else []),
+                *([body.execution_mode] if body.execution_mode != "streaming-2024" else []),
             ],
             task_id=job_id,
             retry=False,
             **({"queue": settings.stream_queue} if settings.stream_queue else {}),
         )
-    except (KombuError, RedisError, OSError):
-        delete_job_credentials(UUID(job_id))
-        untrack_user_job(session.user_id, job_id)
+    except (KombuError, RedisError, OSError, BotoCoreError, ClientError, StorageCredentialsError):
+        try:
+            job_history.enqueue_failed(archive)
+        finally:
+            delete_job_credentials(UUID(job_id))
+            untrack_user_job(session.user_id, job_id)
         raise
     logger.info("Enqueued HAND-FIM parity job %s", job_id)
     return JobSubmitted(job_id=job_id, status="queued", status_url=f"/jobs/{job_id}")
 
 
 @app.post("/jobs/compare", status_code=202, response_model=JobSubmitted)
-def submit_compare(body: CompareJobRequest, session: AuthenticatedSession) -> JobSubmitted:
+def submit_compare(
+    body: CompareJobRequest, session: AuthenticatedSession, history: HistorySelection = None,
+) -> JobSubmitted:
     """Diff the scenarios shared by two retained results without rerunning HAND-FIM.
 
     Each result may be legacy (<ScenarioID>.cog) or streaming (<ScenarioID>/manifest.json).
@@ -242,9 +266,12 @@ def submit_compare(body: CompareJobRequest, session: AuthenticatedSession) -> Jo
         raise HTTPException(status_code=409, detail="HydroShare S3 output requires configured authentication")
     job_id = str(uuid4())
     create_job_credentials(UUID(job_id), session)
+    archive = {}
     try:
+        archive = job_history.prepare(job_id, session, history, "compare", body.model_dump(mode="json"))
         track_user_job(session.user_id, job_id)
         hand_fim_compare.apply_async(
+            **({"kwargs": archive} if archive else {}),
             args=[
                 job_id, body.base_bucket, body.base_prefix, body.candidate_bucket,
                 body.candidate_prefix, body.output_bucket, body.output_prefix, body.overwrite,
@@ -252,20 +279,86 @@ def submit_compare(body: CompareJobRequest, session: AuthenticatedSession) -> Jo
             task_id=job_id,
             retry=False,
         )
-    except (KombuError, RedisError, OSError):
-        delete_job_credentials(UUID(job_id))
-        untrack_user_job(session.user_id, job_id)
+    except (KombuError, RedisError, OSError, BotoCoreError, ClientError, StorageCredentialsError):
+        try:
+            job_history.enqueue_failed(archive)
+        finally:
+            delete_job_credentials(UUID(job_id))
+            untrack_user_job(session.user_id, job_id)
         raise
     logger.info("Enqueued HAND-FIM result comparison job %s", job_id)
     return JobSubmitted(job_id=job_id, status="queued", status_url=f"/jobs/{job_id}")
 
 
 @app.get("/jobs", response_model=JobList)
-def list_jobs(session: AuthenticatedSession) -> JobList:
+def list_jobs(session: AuthenticatedSession, history: HistorySelection = None) -> JobList:
+    live = list_user_jobs(session.user_id)
+    records = job_history.list_records(session, history) if history is not None else []
+    archived = {record.job_id: record for record in records}
+    live_status = {job_id: __job_status(celery_app.AsyncResult(job_id).state) for job_id in live}
     return JobList(jobs=[
-        JobSummary(job_id=job_id, status=__job_status(celery_app.AsyncResult(job_id).state))
-        for job_id in list_user_jobs(session.user_id)
+        JobSummary(job_id=job_id, status=live_status[job_id]) for job_id in live if job_id not in archived
+    ] + [
+        JobSummary(job_id=record.job_id, status=record.status if record.status in {"success", "failure", "revoked"}
+                   else live_status.get(record.job_id, record.status))
+        for record in reversed(records)
     ])
+
+
+@app.post("/jobs/history/export", response_model=job_history.HistoryExport)
+def export_job_history(
+    session: AuthenticatedSession, history: HistorySelection = None,
+) -> job_history.HistoryExport:
+    """Copy this user's completed Redis jobs and logs to S3; never replace existing archives.
+
+    Original submission parameters and timestamps are unavailable for Redis-only jobs.
+    On storage failure, completed writes remain; retrying skips those existing records.
+    """
+    if history is None:
+        raise HTTPException(status_code=400, detail="Select an S3 job history location")
+    exported = job_history.HistoryExport()
+    for job_id in list_user_jobs(session.user_id):
+        job = get_job_status(UUID(job_id), session)
+        if job.status not in {"success", "failure", "revoked"}:
+            exported.skipped_active += 1
+        elif job_history.read(session, history, job_id) is not None:
+            exported.skipped_existing += 1
+        else:
+            if job_history.export_snapshot(session, history, job):
+                exported.exported += 1
+            else:
+                exported.skipped_existing += 1
+    return exported
+
+
+@app.post("/jobs/history/clear", response_model=job_history.HistoryClear)
+def clear_job_history(
+    session: AuthenticatedSession, history: HistorySelection = None,
+) -> job_history.HistoryClear:
+    """Remove this user's finished jobs from Redis and, if selected, the S3 history location.
+
+    Queued and running jobs remain. Output files are never deleted. S3 records are
+    removed before Redis entries, so a storage failure can be retried.
+    """
+    live = list_user_jobs(session.user_id)
+    finished = {
+        job_id for job_id in live
+        if __job_status(celery_app.AsyncResult(job_id).state) in {"success", "failure", "revoked"}
+    }
+    active = set(live) - finished
+    cleared = set(finished)
+    if history is not None:
+        for record in job_history.list_records(session, history):
+            if record.job_id not in active:
+                job_history.delete(session, history, record.job_id)
+                cleared.add(record.job_id)
+    for job_id in finished:
+        celery_app.AsyncResult(job_id).forget()
+        clear_job_logs(job_id)
+        clear_job_times(job_id)
+        untrack_user_job(session.user_id, job_id)
+    logger.info("Cleared %d finished jobs from user history", len(cleared))
+    return job_history.HistoryClear(cleared=len(cleared), skipped_active=len(active))
 
 
 def __require_job_owner(job_id: UUID, session: UserSession) -> None:
@@ -287,16 +380,38 @@ def __job_status(state: str) -> str:
 
 
 @app.get("/jobs/{job_id}", response_model=JobStatus)
-def get_job_status(job_id: UUID, session: AuthenticatedSession) -> JobStatus:
+def get_job_status(
+    job_id: UUID, session: AuthenticatedSession, history: HistorySelection = None,
+) -> JobStatus:
+    if history is not None:
+        record = job_history.read(session, history, str(job_id))
+        if record is not None and (
+            record.status in {"success", "failure", "revoked"} or not user_has_job(session.user_id, str(job_id))
+        ):
+            return JobStatus.model_validate(record.model_dump())
     __require_job_owner(job_id, session)
     result = celery_app.AsyncResult(str(job_id))
     state = result.state
     status = __job_status(state)
+    times = read_job_times(str(job_id)) if status != "queued" else {}
     if state == "FAILURE":
-        return JobStatus(job_id=str(job_id), status=status, error=str(result.result))
+        return JobStatus(job_id=str(job_id), status=status, error=str(result.result), **times)
     if state == "SUCCESS":
-        return JobStatus(job_id=str(job_id), status=status, result=result.result)
-    return JobStatus(job_id=str(job_id), status=status)
+        return JobStatus(job_id=str(job_id), status=status, result=result.result, **times)
+    return JobStatus(job_id=str(job_id), status=status, **times)
+
+
+@app.get("/jobs/{job_id}/archive", response_model=job_history.ArchivedJob)
+def get_job_archive(
+    job_id: UUID, session: AuthenticatedSession, history: HistorySelection = None,
+) -> job_history.ArchivedJob:
+    """Read persistent job inputs, timestamps, and outcome in the selected S3 location."""
+    if history is None:
+        raise HTTPException(status_code=400, detail="Select an S3 job history location")
+    record = job_history.read(session, history, str(job_id))
+    if record is None:
+        raise HTTPException(status_code=404, detail="Job not found in this user's S3 history")
+    return record
 
 
 @app.get("/jobs/{job_id}/logs", response_model=JobLogs)
@@ -305,8 +420,14 @@ def get_job_logs(
     session: AuthenticatedSession,
     offset: Annotated[int, Query(ge=0)] = 0,
     max_bytes: Annotated[int, Query(ge=4, le=1_048_576)] = 65_536,
+    history: HistorySelection = None,
 ) -> JobLogs:
     """Poll a job's worker output, continuing from the returned next_offset."""
+    if history is not None:
+        record = job_history.read(session, history, str(job_id))
+        if record is not None and record.status in {"success", "failure", "revoked"}:
+            logs, next_offset = job_history.read_logs(session, history, str(job_id), offset, max_bytes)
+            return JobLogs(job_id=str(job_id), status=record.status, logs=logs, next_offset=next_offset)
     __require_job_owner(job_id, session)
     result = celery_app.AsyncResult(str(job_id))
     logs, next_offset = read_job_logs(str(job_id), offset, max_bytes)
@@ -318,10 +439,12 @@ def get_job_logs(
     )
 
 
-def __raster_source(job_id: UUID, file_index: int, session: UserSession) -> RasterSource:
-    __require_job_owner(job_id, session)
-    job = celery_app.AsyncResult(str(job_id))
-    if job.state != "SUCCESS":
+def __raster_source(
+    job_id: UUID, file_index: int, session: UserSession,
+    history: job_history.HistoryLocation | None = None,
+) -> RasterSource:
+    job = get_job_status(job_id, session, history)
+    if job.status != "success":
         raise HTTPException(status_code=409, detail="Raster viewing requires a successful job")
     result = StoredHandFimResult.model_validate(job.result)
     if file_index >= len(result.files):
@@ -346,9 +469,10 @@ def raster_error_handler(_request: Request, error: RasterReadError) -> JSONRespo
 def get_raster_info(
     job_id: UUID, file_index: Annotated[int, Path(ge=0)],
     session: AuthenticatedSession, response: Response,
+    history: HistorySelection = None,
 ) -> RasterInfo:
     """Read geographic bounds without downloading the full raster."""
-    source = __raster_source(job_id, file_index, session)
+    source = __raster_source(job_id, file_index, session, history)
     response.headers["Cache-Control"] = "no-store"
     return raster_info(source)
 
@@ -364,21 +488,24 @@ def get_raster_tile(
     x: Annotated[int, Path(ge=0)],
     y: Annotated[int, Path(ge=0)],
     session: AuthenticatedSession,
+    history: HistorySelection = None,
 ) -> Response:
     """Render a 256-pixel inundation tile using range reads against S3."""
     if x >= 2 ** z or y >= 2 ** z:
         raise HTTPException(status_code=400, detail="Tile coordinates are outside this zoom level")
-    source = __raster_source(job_id, file_index, session)
+    source = __raster_source(job_id, file_index, session, history)
     return Response(
         content=raster_tile(source, z, x, y), media_type="image/png",
         headers={"Cache-Control": "no-store"},
     )
 
 
-def __scenario_manifest(job_id: UUID, scenario_index: int, session: UserSession) -> tuple[str, ScenarioManifest]:
-    __require_job_owner(job_id, session)
-    job = celery_app.AsyncResult(str(job_id))
-    if job.state != "SUCCESS":
+def __scenario_manifest(
+    job_id: UUID, scenario_index: int, session: UserSession,
+    history: job_history.HistoryLocation | None = None,
+) -> tuple[str, ScenarioManifest]:
+    job = get_job_status(job_id, session, history)
+    if job.status != "success":
         raise HTTPException(status_code=409, detail="Raster viewing requires a successful job")
     result = StoredHandFimResult.model_validate(job.result)
     if scenario_index >= len(result.scenario_manifests):
@@ -392,9 +519,10 @@ def __scenario_manifest(job_id: UUID, scenario_index: int, session: UserSession)
 def get_scenario_info(
     job_id: UUID, scenario_index: Annotated[int, Path(ge=0)],
     session: AuthenticatedSession, response: Response,
+    history: HistorySelection = None,
 ) -> RasterInfo:
     """Bounds and usable zoom range of a streaming scenario's tiled output."""
-    _bucket, manifest = __scenario_manifest(job_id, scenario_index, session)
+    _bucket, manifest = __scenario_manifest(job_id, scenario_index, session, history)
     response.headers["Cache-Control"] = "no-store"
     return scenario_info(manifest, settings.stream_display_max_tiles)
 
@@ -410,11 +538,12 @@ def get_scenario_tile(
     x: Annotated[int, Path(ge=0)],
     y: Annotated[int, Path(ge=0)],
     session: AuthenticatedSession,
+    history: HistorySelection = None,
 ) -> Response:
     """Render a 256-pixel tile combining the streaming scenario's output COG tiles."""
     if x >= 2 ** z or y >= 2 ** z:
         raise HTTPException(status_code=400, detail="Tile coordinates are outside this zoom level")
-    bucket, manifest = __scenario_manifest(job_id, scenario_index, session)
+    bucket, manifest = __scenario_manifest(job_id, scenario_index, session, history)
     tiles = load_scenario_tiles(session_s3_client(job_id, session), bucket, manifest)
     try:
         content = scenario_tile(
@@ -486,7 +615,9 @@ def get_output_tile(
 
 
 @app.delete("/jobs/{job_id}", status_code=204, response_class=Response)
-def cancel_job(job_id: UUID, session: AuthenticatedSession) -> Response:
+def cancel_job(
+    job_id: UUID, session: AuthenticatedSession, history: HistorySelection = None,
+) -> Response:
     """Revoke queued jobs; the solo worker cannot interrupt a running subprocess."""
     __require_job_owner(job_id, session)
     result = celery_app.AsyncResult(str(job_id))
@@ -495,5 +626,7 @@ def cancel_job(job_id: UUID, session: AuthenticatedSession) -> Response:
             status_code=409, detail="Only queued jobs can be cancelled"
         )
     celery_app.control.revoke(str(job_id), terminate=False)
+    if history is not None:
+        job_history.mark_cancelled(session, history, str(job_id))
     logger.info("Requested cancellation of queued job %s", job_id)
     return Response(status_code=204)

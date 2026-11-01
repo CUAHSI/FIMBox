@@ -62,6 +62,14 @@ class UiTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertNotEqual(response.headers.get("cache-control"), "no-store")
 
+    def test_page_has_saved_location_tab_and_pickers(self):
+        page = self.client.get("/ui").text
+        self.assertIn('data-tab="locations"', page)
+        self.assertIn('id="location-form"', page)
+        self.assertEqual(page.count('class="location-picker"'), 6)
+        script = self.client.get("/ui/static/app.js").text
+        self.assertIn("fimbox-locations:", script)
+
     def test_ui_routes_are_not_in_openapi(self):
         self.assertFalse([path for path in main.app.openapi()["paths"] if path.startswith("/ui")])
 
@@ -69,7 +77,7 @@ class UiTests(unittest.TestCase):
         config = self.client.get("/ui/config").json()
         self.assertTrue(config["authentication_enabled"])
         self.assertFalse(config["streaming_enabled"])
-        self.assertEqual(config["execution_modes"], ["legacy", "updatedlegacy"])
+        self.assertEqual(config["execution_modes"], ["fimserv-2024", "fimserv-2026"])
         self.assertIsNone(config["input_dataset"])
 
     def test_config_with_streaming_dataset(self):
@@ -77,7 +85,7 @@ class UiTests(unittest.TestCase):
                             stream_input_unsigned=True)
         config = self.client.get("/ui/config").json()
         self.assertTrue(config["streaming_enabled"])
-        self.assertIn("updatedstreaming", config["execution_modes"])
+        self.assertIn("streaming-2026", config["execution_modes"])
         self.assertEqual(config["input_dataset"], {
             "bucket": "resource", "prefix": "abc/data/contents", "unsigned": True,
         })
@@ -150,6 +158,58 @@ class UiTests(unittest.TestCase):
         response = self.client.get("/ui/objects/preview", params={"bucket": "fim", "key": "out/a.cog"})
         self.assertEqual(response.status_code, 400)
         self.s3.get_object.assert_not_called()
+
+    def test_raster_preview_returns_png_without_exposing_signed_url(self):
+        self.s3.generate_presigned_url.return_value = "https://storage.test/input.tif?signature=secret"
+        with patch.object(ui, "raster_preview", return_value=b"\x89PNG\r\n\x1a\n") as render:
+            for suffix in (".tif", ".TIFF", ".cog"):
+                response = self.client.get("/ui/objects/raster", params={"bucket": "fim", "key": "input/a" + suffix})
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.headers["content-type"], "image/png")
+                self.assertEqual(response.headers["cache-control"], "no-store")
+                self.assertNotIn(b"secret", response.content)
+                self.assertEqual(render.call_args.args[0].path, self.s3.generate_presigned_url.return_value)
+        self.s3.generate_presigned_url.assert_called_with(
+            "get_object", Params={"Bucket": "fim", "Key": "input/a.cog"}, ExpiresIn=ui.DOWNLOAD_URL_SECONDS,
+        )
+
+    def test_raster_preview_validates_paths_auth_and_storage_errors(self):
+        with patch.object(ui, "raster_preview") as render:
+            for key in ("input/a.json", "input/../a.tif"):
+                response = self.client.get("/ui/objects/raster", params={"bucket": "fim", "key": key})
+                self.assertEqual(response.status_code, 400)
+            self.s3.head_object.assert_not_called()
+            for code, status in (("AccessDenied", 403), ("NoSuchKey", 404)):
+                self.s3.head_object.side_effect = client_error(code)
+                response = self.client.get("/ui/objects/raster", params={"bucket": "fim", "key": "input/a.tif"})
+                self.assertEqual(response.status_code, status)
+            render.assert_not_called()
+            main.app.dependency_overrides.clear()
+            response = self.client.get("/ui/objects/raster", params={"bucket": "fim", "key": "input/a.tif"})
+            self.assertEqual(response.status_code, 401)
+
+    def test_unsigned_raster_preview_is_scoped_to_input_dataset(self):
+        self.patch_settings(hydroshare_client_id="", hydroshare_client_secret=None,
+                            stream_input_bucket="resource", stream_input_prefix="abc/data",
+                            stream_input_unsigned=True)
+        self.anonymous.generate_presigned_url.return_value = "https://storage.test/public.tif"
+        with patch.object(ui, "raster_preview", return_value=b"PNG") as render:
+            response = self.client.get("/ui/objects/raster", params={"bucket": "resource", "key": "abc/data/a.tif"})
+            self.assertEqual(response.status_code, 200)
+            self.output_client.assert_not_called()
+            for bucket, key in (("resource", "abc/database/a.tif"), ("other", "abc/data/a.tif")):
+                response = self.client.get("/ui/objects/raster", params={"bucket": bucket, "key": key})
+                self.assertEqual(response.status_code, 409)
+            self.assertEqual(render.call_count, 1)
+
+    def test_raster_preview_read_failure_is_sanitized(self):
+        from fimbox_api.rasters import RasterReadError
+
+        self.s3.generate_presigned_url.return_value = "https://storage.test/a.tif?secret"
+        with patch.object(ui, "raster_preview", side_effect=RasterReadError("Could not read raster preview from storage.")):
+            response = self.client.get("/ui/objects/raster", params={"bucket": "fim", "key": "input/a.tif"})
+        self.assertEqual(response.status_code, 502)
+        self.assertNotIn("secret", response.text)
 
     def serve_parquet(self, content):
         def get_object(Bucket, Key, Range):

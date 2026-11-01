@@ -20,14 +20,15 @@ import pyarrow.parquet as pq
 import zstandard
 from botocore.exceptions import ClientError
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 from . import remote_json, retrospective
 from .auth import UserSession, get_authenticated_session
 from .config import settings
 from .models import ExecutionMode
-from .storage import anonymous_s3_client, output_s3_client
+from .rasters import raster_preview
+from .storage import RasterSource, anonymous_s3_client, output_s3_client
 
 logger = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).parent / "static" / "ui"
@@ -140,7 +141,7 @@ def ui_config() -> UiConfig:
         authentication_enabled=settings.authentication_enabled,
         require_hydroshare_output=settings.require_hydroshare_output,
         streaming_enabled=streaming,
-        execution_modes=["legacy", "updatedlegacy", *(["streaming", "updatedstreaming"] if streaming else [])],
+        execution_modes=["fimserv-2024", "fimserv-2026", *(["streaming-2024", "streaming-2026"] if streaming else [])],
         input_dataset=InputDataset(
             bucket=settings.stream_input_bucket,
             prefix=settings.stream_input_prefix.strip("/"),
@@ -406,3 +407,20 @@ def download_object(bucket: Bucket, key: Key, session: AuthenticatedSession) -> 
         ExpiresIn=DOWNLOAD_URL_SECONDS,
     )
     return DownloadLink(url=url, expires_in=DOWNLOAD_URL_SECONDS)
+
+
+@router.get("/objects/raster", response_class=Response)
+def preview_raster_object(bucket: Bucket, key: Key, session: AuthenticatedSession) -> Response:
+    """Downsample a TIFF/COG through permission-scoped S3 range reads."""
+    key = __clean_path(key, folder=False)
+    if not key.lower().endswith((".tif", ".tiff", ".cog")):
+        raise HTTPException(status_code=400, detail="Raster preview requires a TIFF or COG file")
+    client = __s3_client(bucket, key, session)
+    try:
+        client.head_object(Bucket=bucket, Key=key)
+    except ClientError as error:
+        raise __s3_error(error) from None
+    url = client.generate_presigned_url(
+        "get_object", Params={"Bucket": bucket, "Key": key}, ExpiresIn=DOWNLOAD_URL_SECONDS,
+    )
+    return Response(raster_preview(RasterSource(path=url)), media_type="image/png")

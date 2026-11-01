@@ -1,5 +1,6 @@
 import math
 import re
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -48,9 +49,9 @@ class OutputDestination(BaseModel):
         return value
 
 
-StreamingMode = Literal["streaming", "updatedstreaming"]
-ExecutionMode = Literal["legacy", "updatedlegacy", "streaming", "updatedstreaming"]
-STREAMING_MODES = ("streaming", "updatedstreaming")
+StreamingMode = Literal["streaming-2024", "streaming-2026"]
+ExecutionMode = Literal["fimserv-2024", "fimserv-2026", "streaming-2024", "streaming-2026"]
+STREAMING_MODES = ("streaming-2024", "streaming-2026")
 
 
 class HandFimJobOptions(OutputDestination):
@@ -63,13 +64,13 @@ class HandFimJobOptions(OutputDestination):
         description="Replace existing S3 objects with matching output keys; by default, conflicting keys fail the job.",
     )
     execution_mode: ExecutionMode = Field(
-        default="legacy",
+        default="fimserv-2024",
         description=(
-            "legacy downloads whole HUCs and writes one COG per scenario. updatedlegacy uses the same "
-            "workflow with NOAA v4.8.14.0 instead of the original pinned code. streaming range-reads a prepared "
+            "fimserv-2024 downloads whole HUCs and writes one COG per scenario. fimserv-2026 uses the same "
+            "workflow with NOAA v4.8.14.0 instead of the original pinned code. streaming-2024 range-reads a prepared "
             "cloud-optimized hydrofabric per reach and writes tiled COGs plus a manifest per scenario; "
-            "it requires output_bucket and a single process. updatedstreaming is streaming with NOAA "
-            "v4.8.14.0's own flood kernel, matching updatedlegacy."
+            "it requires output_bucket and a single process. streaming-2026 is streaming with NOAA "
+            "v4.8.14.0's own flood kernel, matching fimserv-2026."
         ),
     )
 
@@ -132,8 +133,8 @@ class ParityJobRequest(OutputDestination):
         description="Replace existing S3 objects with matching output keys; by default, conflicting keys fail the job.",
     )
     execution_mode: StreamingMode = Field(
-        default="streaming",
-        description="Streaming mode to rerun; use updatedstreaming to compare against an updatedlegacy run.",
+        default="streaming-2024",
+        description="Streaming mode to rerun; use streaming-2026 to compare against a fimserv-2026 run.",
     )
 
     @model_validator(mode="after")
@@ -235,7 +236,7 @@ class ScenarioParity(BaseModel):
 class StoredHandFimResult(HandFimResult, OutputDestination):
     """Successful outputs and the destination persisted by the worker."""
 
-    execution_mode: ExecutionMode = "legacy"
+    execution_mode: ExecutionMode = "fimserv-2024"
     files: list[OutputFile] = Field(default_factory=list)
     scenario_manifests: list[ScenarioManifest] = Field(default_factory=list)
     parity: list[ScenarioParity] = Field(
@@ -261,6 +262,12 @@ class JobList(BaseModel):
 class JobStatus(JobSummary):
     result: StoredHandFimResult | None = None
     error: str | None = None
+    started_at: datetime | None = Field(
+        default=None, description="UTC time the worker began executing the job.",
+    )
+    finished_at: datetime | None = Field(
+        default=None, description="UTC time the worker finished executing the job (success or failure).",
+    )
 
 
 class JobLogs(BaseModel):

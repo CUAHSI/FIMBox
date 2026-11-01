@@ -86,15 +86,22 @@ requests temporary credentials and stores them in Redis; neither provider
 tokens nor S3 credentials are passed in Celery arguments or returned to the
 client. There is no static AWS-credential fallback.
 
-`execution_mode` defaults to `legacy`. `updatedlegacy` runs the same FIMserv
+Execution modes are `fimserv-2024`, `fimserv-2026`, `streaming-2024`, and
+`streaming-2026`. The old names (`legacy`, `updatedlegacy`, `streaming`,
+`updatedstreaming`) are rejected; no aliases or automatic history migration are
+provided. Update scripts and resubmit old queued jobs before switching workers.
+Saved results/history containing old mode values no longer validate; retained
+output prefixes can still be opened directly.
+
+`execution_mode` defaults to `fimserv-2024`. `fimserv-2026` runs the same FIMserv
 workflow with separately pinned NOAA v4.8.14.0, using the same inputs and
 producing the same COG layout. It is intended for comparison against the
 original legacy implementation and streaming; rebuild the base/worker image
 before selecting it. See [updated legacy mode](../handfim/README.md#updated-legacy-mode).
-`updatedstreaming` is streaming with NOAA v4.8.14.0's own per-pixel rule
+`streaming-2026` is streaming with NOAA v4.8.14.0's own per-pixel rule
 (including its ~3 cm minimum depth); it has the same requirements as
-`streaming`. See [updated streaming mode](../handfim/README.md#updated-streaming-mode).
-`streaming` runs the
+`streaming-2024`. See [updated streaming mode](../handfim/README.md#updated-streaming-mode).
+`streaming-2024` runs the
 [streaming HAND-FIM mode](../handfim/README.md#streaming-mode): it requires
 `output_bucket`, permits only `max_procs` 1, and returns 409 unless the
 deployment sets `STREAM_INPUT_BUCKET`. The worker passes the job's temporary
@@ -119,6 +126,12 @@ with run-specific tile paths remain readable and are cleaned up when replaced.
 
 `GET /jobs` lists tracked jobs. Use `GET /jobs/{job_id}` to poll and
 `GET /jobs/{job_id}/logs?offset=0` to read worker logs by byte offset.
+Once a worker begins a job, its status includes `started_at`, and finished jobs
+also include `finished_at` (UTC). Both are omitted while queued; the web page
+shows these times and the execution time, with a live elapsed time while running.
+These timestamps expire with other Redis job metadata, while S3 job history
+retains them for new jobs. Redis exports include them only if they are still available.
+Cancelled running jobs may lack `finished_at`.
 `DELETE /jobs/{job_id}` cancels a queued job on a best-effort basis; running
 jobs cannot be interrupted. Job metadata and ownership expire according to
 `RESULT_TTL_SECONDS` (default 86400 seconds).
@@ -136,12 +149,12 @@ cell by cell on the legacy grid. Like streaming jobs, parity requires
 `STREAM_INPUT_BUCKET` and authentication, and uses `STREAM_QUEUE` if it is
 set. The output prefix must differ from the legacy prefix.
 
-The retained reference may also be an `updatedlegacy` run: pass its bucket
+The retained reference may also be an `fimserv-2026` run: pass its bucket
 and prefix as `legacy_bucket` and `legacy_prefix`. The parity endpoint does
 not rerun the reference; it compares its saved COGs against a fresh streaming run.
-Set the optional `execution_mode` to `updatedstreaming` (default `streaming`)
+Set the optional `execution_mode` to `streaming-2026` (default `streaming-2024`)
 to rerun with NOAA's newer rule; this is the like-for-like check against an
-`updatedlegacy` reference.
+`fimserv-2026` reference.
 
 Poll `GET /jobs/{job_id}` as usual. The result's `parity` list gives, per
 scenario, `matches`, flooded/legacy-only/streaming-only/different cell
@@ -182,11 +195,20 @@ with red for base-only and orange for candidate-only flooding.
 
 ## Web page
 
-`GET /ui` serves a browser page with three tabs:
+`GET /ui` serves a browser page with four tabs:
 
 - **Input dataset** browses and downloads the prepared streaming hydrofabric at
   `STREAM_INPUT_BUCKET`/`STREAM_INPUT_PREFIX`. Without that setting, the tab
   explains that legacy jobs download NOAA HAND data per HUC instead.
+- **S3 locations** saves named bucket/prefix locations for your account in this
+  browser's `localStorage`. They are not stored on the server and do not follow
+  you to other browsers. Job options, comparison base/candidate/output, open
+  output, and persistent history then have a **Saved location** selector. A
+  relative subprefix is appended to the location's prefix (for example,
+  `run-1` becomes `s3://resource/<id>/data/contents/run-1`). Submission and
+  comparison outputs require a subprefix. Prefixes and subprefixes reject `.`
+  and `..` segments, and subprefixes cannot start with `/`. Choose **Custom**
+  to type a bucket and prefix directly.
 - **Submit job** edits scenarios as a table or JSON. You can load the examples
   from the `test-data/*.json` files, upload a local JSON file, or load one
   from a URL. URLs can be public `https://` links or
@@ -199,6 +221,15 @@ with red for base-only and orange for candidate-only flooding.
   ReachID (the NHDPlus COMID, which NWM uses as its reach ID). The lookups
   call the public USGS NLDI and WBD services directly from the browser. A
   picked reach must still exist in the HAND hydrofabric.
+
+  TIFF (`.tif`/`.tiff`) and COG files in the input browser have a **View**
+  button showing a first-band image preview (at most 1024 pixels per side).
+  Grayscale is stretched using sampled 2nd/98th percentiles, with transparent
+  nodata; this displays continuous REM values and catchment IDs rather than the
+  flood-only colors used for job results. The preview is not a georeferenced map.
+  Reads use the same HydroShare permissions or configured unsigned input access
+  as browsing, and download remains available. COG overviews make these previews
+  faster; TIFFs without overviews may require more storage reads.
 
   Below the map, the picked (or current) reach's streamflows can set the row's
   Streamflow in m³/s:
@@ -235,6 +266,63 @@ with red for base-only and orange for candidate-only flooding.
 
   Any retained output prefix can also be opened directly, even after the
   job's 24-hour metadata has expired.
+
+### Persistent S3 job history
+
+In the Results tab, set **Persistent job history** to an existing writable
+`s3://bucket/prefix`, for example
+`s3://resource/<resource id>/data/contents/fimbox-history`. The browser remembers
+this non-secret location per signed-in user. On a different browser/device,
+select the same location to reopen its history. CLI preferences are separate;
+see [`fimbox history`](../../sdk/README.md#persistent-job-history).
+
+Future HAND-FIM, parity, and comparison submissions write a queued record before
+enqueueing, then running and terminal snapshots. Records include the submission
+parameters, job type/ID, UTC timestamps, output result or error, and terminal
+worker logs. They contain no OAuth tokens or S3 credentials. The API namespaces
+objects under `<prefix>/users/<SHA256(user_id)>/jobs/<job_id>.json` and `.log`.
+Jobs use separate objects rather than a shared history index, avoiding concurrent
+submission overwrites. History reads use the current authenticated user's S3
+permissions and verify the record's user and job identifiers.
+
+SDK/API callers select the location with the optional
+`X-FIMBox-History-Location: s3://bucket/prefix` header on submission and job
+read requests. `GET /jobs` merges live and archived records; status, logs, and
+job raster routes support archived successful jobs after Redis expiry.
+`GET /jobs/{job_id}/archive` returns the stored inputs, timestamps, and outcome.
+Without the header, existing Redis-only behavior is unchanged. Redis remains
+necessary for the live Celery queue, authentication, and temporary credentials;
+it is not the durable history store.
+
+Enabling history does not automatically backfill previous jobs. Use **Export
+Redis history** in Results, `fimbox history export`, or
+`POST /jobs/history/export` with the history header to copy the signed-in user's
+completed Redis jobs and available logs. Queued/running jobs and existing archives
+are skipped; Redis is unchanged. The response counts `exported`,
+`skipped_existing`, and `skipped_active`. Original submission parameters,
+job types, and submission timestamps are not retained in Redis: exported records
+have `source: "redis-export"`, an empty request, unknown job type, null
+`submitted_at`, and the export time in `updated_at`. Retained output may still
+contain `scenarios.json`. Expired jobs cannot be recovered. Storage failures are
+reported; partial exports remain and retries skip completed records.
+
+To clear history, use **Clear history** in Results, `fimbox history clear`, or
+`POST /jobs/history/clear`. It removes the signed-in user's finished
+(`success`, `failure`, `revoked`) jobs from the live Redis list, including their
+results, logs, and timing. If a history location header is sent, it also deletes
+those jobs' archived records and logs from that S3 location, along with stale
+archives no longer tracked in Redis. Queued and running jobs remain, and output
+files are never deleted. The response counts `cleared` and `skipped_active`. S3
+deletions happen before Redis cleanup, so a storage failure leaves Redis intact
+for a retry. A job still running after its Redis entry expired rewrites its
+archive record when it finishes.
+
+Outputs still use their own output bucket/prefix, and local output files remain
+temporary. FIMBox applies no TTL to the S3 archive, but the bucket's lifecycle
+policy and user deletions still apply. S3 read/write failures are reported, not
+silently ignored: archive creation failure prevents enqueueing, and terminal
+archive failures fail the task. A worker lost abruptly can leave the last queued
+or running snapshot; the archive is not a replacement for the live queue.
 
 Sign-in uses the same HydroShare device flow as the CLI, through a popup. The
 FIMBox session token is kept in `sessionStorage`. In anonymous local mode, the

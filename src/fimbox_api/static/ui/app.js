@@ -5,6 +5,11 @@ const TOKEN_KEY = "fimbox_session_token";
 const PREVIEW_SUFFIXES = [".json", ".md", ".txt", ".csv", ".log", ".xml", ".yaml", ".yml", ".geojson"];
 const RASTER_SUFFIXES = [".cog", ".tif", ".tiff"];
 const state = { config: null, token: sessionStorage.getItem(TOKEN_KEY), scenarios: [], examples: [], jobPoll: null };
+state.historyLocation = null;
+state.userId = null;
+state.locations = [];
+const locationPickers = [];
+const BUCKET_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/;
 
 function $(selector, root = document) { return root.querySelector(selector); }
 
@@ -62,6 +67,7 @@ class ApiError extends Error {
 
 async function api(path, options = {}) {
   const headers = new Headers(options.headers || {});
+  if (state.historyLocation && path.startsWith("/jobs")) headers.set("X-FIMBox-History-Location", state.historyLocation);
   if (state.token) headers.set("Authorization", `Bearer ${state.token}`);
   if (options.json !== undefined) {
     headers.set("Content-Type", "application/json");
@@ -115,6 +121,8 @@ function bindTabs(group, root = document) {
 
 function setToken(token) {
   state.token = token;
+  state.historyLocation = null;
+  state.userId = null;
   if (token) sessionStorage.setItem(TOKEN_KEY, token);
   else sessionStorage.removeItem(TOKEN_KEY);
 }
@@ -128,16 +136,25 @@ async function renderAuth() {
   if (!state.config.authentication_enabled) {
     status.textContent = "Local mode (no sign-in required)";
     signIn.hidden = signOut.hidden = true;
+    renderHistoryLocation();
+    loadLocations();
     return;
   }
   if (!state.token) {
     status.textContent = "Not signed in";
     signIn.hidden = false;
     signOut.hidden = true;
+    renderHistoryLocation();
+    loadLocations();
     return;
   }
   try {
     const session = await api("/auth/session");
+    state.userId = session.user_id;
+    try { state.historyLocation = localStorage.getItem(historyPreferenceKey()); }
+    catch (error) { showMessage(`Could not restore history preference: ${error.message}`, true); }
+    renderHistoryLocation();
+    loadLocations();
     status.textContent = `Signed in as HydroShare user ${session.user_id}`;
     signIn.hidden = true;
     signOut.hidden = false;
@@ -145,7 +162,252 @@ async function renderAuth() {
     status.textContent = "Not signed in";
     signIn.hidden = false;
     signOut.hidden = true;
+    loadLocations();
   }
+}
+
+function historyPreferenceKey() { return `fimbox-history:${location.origin}:${state.userId}`; }
+
+function renderHistoryLocation() {
+  const input = $("#history-location");
+  useCustomLocation(input);
+  input.value = state.historyLocation || "";
+  $("#history-location-form").hidden = !state.userId;
+  $("#history-export").disabled = !state.historyLocation;
+  $("#history-status").textContent = state.historyLocation
+    ? `History: ${state.historyLocation} (scoped to your user).`
+    : "Not enabled; live Redis job history still expires.";
+}
+
+async function useHistoryLocation(event) {
+  event.preventDefault();
+  const previous = state.historyLocation;
+  const value = $("#history-location").value.trim();
+  if (!/^s3:\/\/[^/]+\/.+/.test(value)) { showMessage("Enter s3://bucket/prefix for job history.", true); return; }
+  state.historyLocation = value;
+  try {
+    await api("/jobs");
+    localStorage.setItem(historyPreferenceKey(), value);
+    renderHistoryLocation();
+    loadJobs();
+    showMessage("Persistent history enabled for future jobs. Existing archived jobs are available here.");
+  } catch (error) {
+    state.historyLocation = previous;
+    renderHistoryLocation();
+    showMessage(`Could not enable S3 history: ${error.message}`, true);
+  }
+}
+
+function disableHistoryLocation() {
+  try { localStorage.removeItem(historyPreferenceKey()); }
+  catch (error) { showMessage(`Could not clear history preference: ${error.message}`, true); return; }
+  state.historyLocation = null;
+  renderHistoryLocation();
+  loadJobs();
+  showMessage("Persistent history disabled for future submissions. Existing S3 archives are unchanged.");
+}
+
+async function exportRedisHistory() {
+  const button = $("#history-export");
+  button.disabled = true;
+  try {
+    const result = await api("/jobs/history/export", { method: "POST" });
+    showMessage(`Exported ${result.exported} jobs; skipped ${result.skipped_existing} existing archives and ${result.skipped_active} active jobs.`);
+    await loadJobs();
+  } catch (error) {
+    showMessage(`History export failed: ${error.message}. Any completed exports remain in S3; retry to export the remaining jobs.`, true);
+  } finally {
+    button.disabled = !state.historyLocation;
+  }
+}
+
+async function clearJobHistory() {
+  if (!authReady()) { showMessage("Sign in to clear job history.", true); return; }
+  const scope = state.historyLocation ? `the live job list and ${state.historyLocation}` : "the live job list";
+  if (!confirm(`Remove all finished jobs and their logs from ${scope}? Queued and running jobs are kept, and output files are not deleted.`)) return;
+  const button = $("#jobs-clear");
+  button.disabled = true;
+  try {
+    const result = await api("/jobs/history/clear", { method: "POST" });
+    showMessage(`Cleared ${result.cleared} finished jobs; kept ${result.skipped_active} active jobs.`);
+  } catch (error) {
+    showMessage(`Clearing history failed: ${error.message}. Retry to remove the remaining jobs.`, true);
+  } finally {
+    button.disabled = false;
+    await loadJobs();
+    if (state.currentJob && !$(`#job-list li[data-job="${state.currentJob}"]`)) {
+      state.currentJob = null;
+      newResultView("").replaceChildren(el("p", { className: "hint", text: "Select a job or open a retained output location." }));
+    }
+  }
+}
+
+// ---------- Saved S3 locations (per account, this browser) ----------
+
+function locationsKey() {
+  if (state.config.authentication_enabled && !state.userId) return null;
+  return `fimbox-locations:${location.origin}:${state.userId || "local"}`;
+}
+
+function relativeKeyError(value, label) {
+  if (value.startsWith("/")) return `${label} must be relative (no leading /).`;
+  if (value.split("/").some((part) => part === "." || part === "..")) return `${label} must not contain '.' or '..' segments.`;
+  return null;
+}
+
+function savedLocationError(item) {
+  if (!item || typeof item.name !== "string" || !item.name.trim()) return "Name is required.";
+  if (typeof item.bucket !== "string" || !BUCKET_PATTERN.test(item.bucket)) return "Enter a valid bucket name.";
+  if (typeof item.prefix !== "string") return "Prefix must be text.";
+  return relativeKeyError(item.prefix.replace(/^\/+/, ""), "Prefix");
+}
+
+function loadLocations() {
+  const key = locationsKey();
+  state.locations = [];
+  if (key) {
+    try {
+      const saved = JSON.parse(localStorage.getItem(key) || "[]");
+      if (Array.isArray(saved)) state.locations = saved.filter((item) => !savedLocationError(item) && item.id);
+    } catch (error) {
+      showMessage(`Could not restore saved S3 locations: ${error.message}`, true);
+    }
+  }
+  resetLocationForm();
+  renderLocations();
+}
+
+function storeLocations(locations) {
+  localStorage.setItem(locationsKey(), JSON.stringify(locations));
+  state.locations = locations;
+  renderLocations();
+}
+
+function renderLocations() {
+  const signedOut = !locationsKey();
+  $("#locations-signin").hidden = !signedOut;
+  $("#location-form").hidden = signedOut;
+  const list = $("#location-list");
+  list.replaceChildren();
+  if (!state.locations.length) {
+    list.append(el("tr", {}, el("td", { colSpan: 3, className: "hint", text: signedOut ? "" : "No saved locations yet." })));
+  }
+  for (const item of state.locations) {
+    list.append(el("tr", {},
+      el("td", { text: item.name }),
+      el("td", {}, el("code", { text: `s3://${item.bucket}/${item.prefix}` })),
+      el("td", {},
+        el("button", { type: "button", className: "small", text: "Browse", onclick: () => {
+          activateTab("main", "results");
+          openLocation(item.bucket, item.prefix);
+        } }),
+        el("button", { type: "button", className: "small", text: "Edit", onclick: () => editLocation(item) }),
+        el("button", { type: "button", className: "small", text: "Delete", onclick: () => deleteLocation(item) }))));
+  }
+  for (const picker of locationPickers) renderPickerOptions(picker);
+}
+
+function resetLocationForm() {
+  const form = $("#location-form");
+  form.reset();
+  form.elements.id.value = "";
+  $("#location-form-title").textContent = "Add location";
+  $("#location-cancel").hidden = true;
+}
+
+function editLocation(item) {
+  const form = $("#location-form");
+  for (const name of ["id", "name", "bucket", "prefix"]) form.elements[name].value = item[name];
+  $("#location-form-title").textContent = `Edit ${item.name}`;
+  $("#location-cancel").hidden = false;
+  form.elements.name.focus();
+}
+
+function deleteLocation(item) {
+  if (!confirm(`Delete saved location "${item.name}"? Stored S3 objects are not affected.`)) return;
+  try { storeLocations(state.locations.filter((other) => other.id !== item.id)); }
+  catch (error) { showMessage(`Could not delete location: ${error.message}`, true); return; }
+  if ($("#location-form").elements.id.value === item.id) resetLocationForm();
+  showMessage(`Deleted saved location ${item.name}.`);
+}
+
+function saveLocation(event) {
+  event.preventDefault();
+  const form = event.target;
+  const id = form.elements.id.value;
+  const item = {
+    id: id || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
+    name: form.elements.name.value.trim(),
+    bucket: form.elements.bucket.value.trim(),
+    prefix: form.elements.prefix.value.trim(),
+  };
+  const error = savedLocationError(item);
+  if (error) { showMessage(error, true); return; }
+  item.prefix = joinKey(item.prefix);
+  if (state.locations.some((other) => other.id !== item.id && other.name.toLowerCase() === item.name.toLowerCase())) {
+    showMessage(`A location named ${item.name} already exists.`, true);
+    return;
+  }
+  const locations = id ? state.locations.map((other) => (other.id === id ? item : other)) : [...state.locations, item];
+  try { storeLocations(locations); }
+  catch (failure) { showMessage(`Could not save location: ${failure.message}`, true); return; }
+  resetLocationForm();
+  showMessage(`Saved location ${item.name}.`);
+}
+
+// A picker fills its form's bucket/prefix fields (or a single s3:// field) from a saved location plus a relative path.
+function attachLocationPicker(container) {
+  const form = container.closest("form");
+  const uriField = container.dataset.uri ? $(`#${container.dataset.uri}`) : null;
+  const fields = uriField ? [uriField] : [form.elements[container.dataset.bucket], form.elements[container.dataset.prefix]];
+  const select = el("select", { "aria-label": "Saved location" });
+  const relative = el("input", { placeholder: container.dataset.placeholder || "" });
+  const relativeLabel = el("label", { hidden: true }, `${container.dataset.label} `, relative);
+  const preview = el("span", { className: "hint" });
+  const picker = {
+    container, fields, select, relative, relativeLabel, preview,
+    required: container.dataset.required === "true",
+    write: (bucket, prefix) => {
+      if (uriField) uriField.value = `s3://${bucket}/${prefix}`;
+      else { fields[0].value = bucket; fields[1].value = prefix; }
+    },
+  };
+  container.append(el("label", {}, "Saved location ", select), relativeLabel, preview);
+  select.addEventListener("change", () => updatePicker(picker));
+  relative.addEventListener("input", () => updatePicker(picker));
+  locationPickers.push(picker);
+  renderPickerOptions(picker);
+}
+
+function renderPickerOptions(picker) {
+  const selected = picker.select.value;
+  picker.select.replaceChildren(el("option", { value: "", text: "Custom (enter below)" }),
+    ...state.locations.map((item) => el("option", { value: item.id, text: item.name })));
+  picker.select.value = state.locations.some((item) => item.id === selected) ? selected : "";
+  picker.container.hidden = !state.locations.length;
+  updatePicker(picker);
+}
+
+function updatePicker(picker) {
+  const saved = state.locations.find((item) => item.id === picker.select.value);
+  picker.relativeLabel.hidden = !saved;
+  picker.relative.required = Boolean(saved) && picker.required;
+  for (const field of picker.fields) field.readOnly = Boolean(saved);
+  picker.relative.setCustomValidity("");
+  picker.preview.textContent = "";
+  if (!saved) return;
+  const relative = picker.relative.value.trim();
+  const error = relativeKeyError(relative, picker.relativeLabel.firstChild.textContent.trim());
+  picker.relative.setCustomValidity(error || "");
+  const prefix = joinKey(saved.prefix, relative);
+  picker.write(saved.bucket, prefix);
+  picker.preview.textContent = error || `→ s3://${saved.bucket}/${prefix}`;
+}
+
+// Switch the picker owning `field` back to custom entry before code sets the field directly.
+function useCustomLocation(field) {
+  const picker = locationPickers.find((item) => item.fields.includes(field));
+  if (picker && picker.select.value) { picker.select.value = ""; updatePicker(picker); }
 }
 
 async function signIn() {
@@ -331,6 +593,32 @@ async function previewParquet(container, bucket, key) {
   }
 }
 
+async function previewRaster(container, bucket, key) {
+  const loading = el("p", { className: "hint", text: `Loading ${key}…` });
+  container.replaceChildren(loading);
+  try {
+    const response = await api(`/ui/objects/raster?${query({ bucket, key })}`, { raw: true });
+    const blob = await response.blob();
+    if (!container.contains(loading)) return;
+    const url = URL.createObjectURL(blob);
+    const image = el("img", { src: url, alt: `First-band preview of ${key}`,
+      onload: () => URL.revokeObjectURL(url),
+      onerror: () => {
+        URL.revokeObjectURL(url);
+        image.replaceWith(el("p", { className: "message error", text: "Could not display raster preview." }));
+      } });
+    image.style.maxWidth = "100%";
+    container.replaceChildren(
+      el("h4", {}, el("span", { text: key.split("/").pop() }),
+        el("button", { type: "button", className: "small", text: "Download", onclick: () => downloadObject(bucket, key) })),
+      el("p", { className: "hint", text: "Band 1 · downsampled to at most 1024 pixels per side · grayscale stretched to sampled values (2–98 percentiles). Nodata is transparent. This is an image preview, not a georeferenced map." }),
+      image,
+    );
+  } catch (error) {
+    if (container.contains(loading)) container.replaceChildren(el("p", { className: "message error", text: `Preview failed: ${error.message}` }));
+  }
+}
+
 function createBrowser(container, { bucket, root, onRaster, linkHandler }) {
   const crumbs = el("div", { className: "breadcrumb" });
   const table = el("table");
@@ -362,6 +650,11 @@ function createBrowser(container, { bucket, root, onRaster, linkHandler }) {
       actions.append(el("button", { type: "button", className: "small", text: "View", onclick: () => {
         preview.hidden = false;
         previewParquet(preview, bucket, file.key);
+      } }), " ");
+    } else if (hasSuffix(file.name, RASTER_SUFFIXES)) {
+      actions.append(el("button", { type: "button", className: "small", text: "View", onclick: () => {
+        preview.hidden = false;
+        previewRaster(preview, bucket, file.key);
       } }), " ");
     }
     if (onRaster && (hasSuffix(file.name, RASTER_SUFFIXES) || file.name === "manifest.json")) {
@@ -954,7 +1247,7 @@ function setupJobOptions() {
   for (const mode of state.config.execution_modes) modes.append(el("option", { value: mode, text: mode }));
   if (state.config.require_hydroshare_output || state.config.authentication_enabled) form.elements.output_bucket.value = "resource";
   const updateHint = () => {
-    const streamed = modes.value.endsWith("streaming");
+    const streamed = modes.value.startsWith("streaming-");
     const notes = [];
     if (streamed) notes.push("Streaming modes require an output bucket and run one process.");
     if (state.config.require_hydroshare_output) notes.push("This deployment requires a HydroShare output bucket.");
@@ -1014,7 +1307,7 @@ async function loadJobs() {
       item.classList.toggle("active", job.job_id === state.currentJob);
       return item;
     }));
-    if (!jobs.length) list.append(el("li", { className: "hint", text: "No jobs in the last 24 hours." }));
+    if (!jobs.length) list.append(el("li", { className: "hint", text: state.historyLocation ? "No jobs in this history location." : "No jobs in the last 24 hours." }));
   } catch (error) {
     list.replaceChildren(el("li", { className: "hint", text: `Could not list jobs: ${error.message}` }));
   }
@@ -1032,6 +1325,32 @@ function newResultView(title) {
   $(".result-title", view).textContent = title;
   bindTabs("result", view);
   return view;
+}
+
+function formatDuration(ms) {
+  const total = Math.max(0, Math.round(ms / 1000));
+  const hours = Math.floor(total / 3600), minutes = Math.floor((total % 3600) / 60), seconds = total % 60;
+  if (hours) return `${hours}h ${minutes}m ${seconds}s`;
+  return minutes ? `${minutes}m ${seconds}s` : `${seconds}s`;
+}
+
+function formatTime(value) {
+  return value ? new Date(value).toLocaleString(undefined, { timeZoneName: "short" }) : null;
+}
+
+// Execution time from worker start to finish; a running job's elapsed time updates every second.
+function durationEntry(job) {
+  if (!job.started_at) return null;
+  const started = new Date(job.started_at).getTime();
+  if (job.finished_at) return formatDuration(new Date(job.finished_at).getTime() - started);
+  if (job.status !== "started") return null;
+  const node = el("span", { text: `${formatDuration(Date.now() - started)} (running)` });
+  const viewId = state.viewId;
+  const timer = setInterval(() => {
+    if (viewId !== state.viewId || !node.isConnected) { clearInterval(timer); return; }
+    node.textContent = `${formatDuration(Date.now() - started)} (running)`;
+  }, 1000);
+  return node;
 }
 
 function addSummary(view, entries) {
@@ -1371,6 +1690,7 @@ function startLogPolling(view, jobId, status) {
       offset = logs.next_offset;
       if (logs.status !== status) { loadJobs(); openJob(jobId); return; }
       if (["queued", "started"].includes(logs.status)) state.jobPoll = setTimeout(poll, 5000);
+      else if (logs.logs) state.jobPoll = setTimeout(poll, 0);
       else if (!pre.textContent) pre.textContent = "No worker output retained.";
     } catch (error) {
       pre.append(`\n[log polling stopped: ${error.message}]`);
@@ -1399,6 +1719,9 @@ async function openJob(jobId) {
   addSummary(view, [
     ["Status", el("span", { className: `status ${job.status}`, text: job.status })],
     ["Error", job.error],
+    ["Started", formatTime(job.started_at)],
+    ["Finished", formatTime(job.finished_at)],
+    [job.finished_at ? "Execution time" : "Elapsed", durationEntry(job)],
     ["Job type", compared ? "Result comparison" : null],
     ["Base", compared ? locationLink(compared.base_bucket, compared.base_prefix) : null],
     ["Candidate", compared ? locationLink(compared.candidate_bucket, compared.candidate_prefix) : null],
@@ -1427,6 +1750,29 @@ async function openJob(jobId) {
     $(".map-status", view).textContent = note;
   }
   if (["queued", "started", "failure"].includes(job.status)) activateTab("result", "logs", view);
+  if (state.historyLocation) {
+    try {
+      const archive = await api(`/jobs/${jobId}/archive`);
+      if (viewId !== state.viewId) return;
+      addSummary(view, [["Submitted (UTC)", archive.submitted_at], ["Updated (UTC)", archive.updated_at],
+        ["History location", state.historyLocation]]);
+      if (archive.source === "redis-export") view.append(el("p", { className: "hint",
+        text: "Exported from Redis. Original submission parameters and timestamps were not retained. Retained output may still include scenarios.json." }));
+      $("dl.summary", view).after(el("details", {},
+        el("summary", { text: "Archived submission parameters" }),
+        el("pre", { text: JSON.stringify(archive.request, null, 2) })));
+      if (archive.request.scenarios && !(result && result.output_bucket)) {
+        const parameters = $(".parameters", view);
+        parameters.replaceChildren(el("pre", { text: JSON.stringify(archive.request, null, 2) }),
+          el("button", { type: "button", text: "Edit archived scenarios", onclick: () => {
+            setScenarios(archive.request.scenarios); activateTab("main", "submit");
+          } }));
+      }
+    } catch (error) {
+      if (viewId === state.viewId) view.append(el("p", { className: "hint",
+        text: error.status === 404 ? "This job was not archived in the selected history location." : `Could not read archived input: ${error.message}` }));
+    }
+  }
 }
 
 function requireRetainedAccess(action) {
@@ -1462,11 +1808,12 @@ function locationLink(bucket, prefix) {
 function compareButtons(bucket, prefix) {
   const use = (side) => () => {
     const form = $("#compare-results");
+    useCustomLocation(form.elements[`${side}_bucket`]);
     form.elements[`${side}_bucket`].value = bucket;
     form.elements[`${side}_prefix`].value = joinKey(prefix);
     const base = joinKey(form.elements.base_prefix.value.trim());
     const candidate = joinKey(form.elements.candidate_prefix.value.trim());
-    if (base && candidate && !form.elements.output_prefix.value.trim()) {
+    if (base && candidate && !form.elements.output_prefix.readOnly && !form.elements.output_prefix.value.trim()) {
       const parent = base.split("/").slice(0, -1);
       const name = (key) => key.split("/").pop();
       form.elements.output_bucket.value = form.elements.base_bucket.value;
@@ -1550,9 +1897,16 @@ async function start() {
   });
   $("#job-options").addEventListener("submit", submitJob);
   $("#jobs-refresh").addEventListener("click", loadJobs);
+  $("#jobs-clear").addEventListener("click", clearJobHistory);
+  $("#history-location-form").addEventListener("submit", useHistoryLocation);
+  $("#history-disable").addEventListener("click", disableHistoryLocation);
+  $("#history-export").addEventListener("click", exportRedisHistory);
   $("#open-output").addEventListener("submit", openOutput);
   $("#compare-results").addEventListener("submit", submitCompare);
+  $("#location-form").addEventListener("submit", saveLocation);
+  $("#location-cancel").addEventListener("click", resetLocationForm);
   setupJobOptions();
+  for (const container of document.querySelectorAll(".location-picker")) attachLocationPicker(container);
   renderScenarioEditor();
   // /ui?scenarios_url=<url> opens the submit tab with that input once signed in.
   const linked = new URLSearchParams(location.search).get("scenarios_url");

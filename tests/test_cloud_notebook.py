@@ -35,8 +35,10 @@ class CloudNotebookTests(unittest.TestCase):
         from fimbox_sdk.models.hand_fim_job_request_execution_mode import HandFimJobRequestExecutionMode
 
         for mode, suffix in (
-            (HandFimJobRequestExecutionMode.LEGACY, ".cog"),
-            (HandFimJobRequestExecutionMode.STREAMING, "/manifest.json"),
+            (HandFimJobRequestExecutionMode.FIMSERV_2024, ".cog"),
+            (HandFimJobRequestExecutionMode.FIMSERV_2026, ".cog"),
+            (HandFimJobRequestExecutionMode.STREAMING_2024, "/manifest.json"),
+            (HandFimJobRequestExecutionMode.STREAMING_2026, "/manifest.json"),
         ):
             for prefix in ("demo/", ""):
                 with self.subTest(mode=mode, prefix=prefix):

@@ -27,6 +27,7 @@ from .models import (
     StoredHandFimResult,
 )
 from .job_logs import append_job_log, clear_job_logs
+from .history import HistoryTask
 from .parity import compare_scenario_outputs
 from .storage import StorageCredentialsError, job_s3_environment, output_file_key, s3_client
 
@@ -315,7 +316,7 @@ def __hand_fim_streaming(
         __run_scenario(
             [
                 sys.executable, str(settings.hand_fim_entry), "stream-scenario", str(scenario_file), str(output_dir),
-                *(["--updated"] if destination.execution_mode == "updatedstreaming" else []),
+                *(["--updated"] if destination.execution_mode == "streaming-2026" else []),
             ],
             job_id,
             {
@@ -398,7 +399,7 @@ def __hand_fim_streaming(
     ).model_dump(mode="json")
 
 
-@celery_app.task(name="fimbox_api.tasks.hand_fim")
+@celery_app.task(name="fimbox_api.tasks.hand_fim", base=HistoryTask)
 def hand_fim(
     job_id: str,
     payload: list[dict[str, Any]],
@@ -406,7 +407,8 @@ def hand_fim(
     output_prefix: str = "",
     max_procs: int | None = None,
     overwrite: bool = False,
-    execution_mode: str = "legacy",
+    execution_mode: str = "fimserv-2024",
+    *, history_archive: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run the container scenario command and upload its job-specific output tree."""
     job_id = str(UUID(job_id))
@@ -441,7 +443,7 @@ def hand_fim(
                 str(scenario_file),
                 str(destination.max_procs if destination.max_procs is not None else settings.hand_fim_max_procs),
                 job_id,
-                *(["--updated-legacy"] if destination.execution_mode == "updatedlegacy" else []),
+                *(["--updated-legacy"] if destination.execution_mode == "fimserv-2026" else []),
             ],
             job_id,
         )
@@ -581,7 +583,7 @@ def __compare_scenario(
     )
 
 
-@celery_app.task(name="fimbox_api.tasks.hand_fim_parity")
+@celery_app.task(name="fimbox_api.tasks.hand_fim_parity", base=HistoryTask)
 def hand_fim_parity(
     job_id: str,
     legacy_bucket: str,
@@ -589,7 +591,8 @@ def hand_fim_parity(
     output_bucket: str,
     output_prefix: str = "",
     overwrite: bool = False,
-    execution_mode: str = "streaming",
+    execution_mode: str = "streaming-2024",
+    *, history_archive: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Rerun a retained legacy run's scenarios with streaming, then diff each scenario's flood mask."""
     job_id = str(UUID(job_id))
@@ -676,7 +679,7 @@ def __result_scenario_rasters(
     return key, paths, missing
 
 
-@celery_app.task(name="fimbox_api.tasks.hand_fim_compare")
+@celery_app.task(name="fimbox_api.tasks.hand_fim_compare", base=HistoryTask)
 def hand_fim_compare(
     job_id: str,
     base_bucket: str,
@@ -686,6 +689,7 @@ def hand_fim_compare(
     output_bucket: str,
     output_prefix: str = "",
     overwrite: bool = False,
+    *, history_archive: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Diff the flood masks of the scenarios shared by two retained results."""
     job_id = str(UUID(job_id))

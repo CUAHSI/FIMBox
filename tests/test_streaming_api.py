@@ -55,28 +55,41 @@ def manifest_document(scenario_id: str, keys: list[str]) -> dict:
 
 
 class StreamingOptionTests(unittest.TestCase):
+    def test_only_new_execution_mode_names_are_accepted(self):
+        from fimbox_api.models import ParityJobRequest, StoredHandFimResult
+
+        for mode in ("fimserv-2024", "fimserv-2026", "streaming-2024", "streaming-2026"):
+            self.assertEqual(HandFimJobOptions(**DESTINATION, execution_mode=mode).execution_mode, mode)
+        for mode in ("legacy", "updatedlegacy", "streaming", "updatedstreaming"):
+            with self.subTest(mode=mode), self.assertRaises(ValidationError):
+                HandFimJobOptions(**DESTINATION, execution_mode=mode)
+            with self.subTest(result_mode=mode), self.assertRaises(ValidationError):
+                StoredHandFimResult(**DESTINATION, outputs=[], execution_mode=mode)
+            with self.subTest(parity_mode=mode), self.assertRaises(ValidationError):
+                ParityJobRequest(**DESTINATION, legacy_bucket="source", legacy_prefix="run", execution_mode=mode)
+
     def test_streaming_requires_s3_and_one_process(self):
-        HandFimJobOptions(**DESTINATION, execution_mode="streaming", max_procs=1)
+        HandFimJobOptions(**DESTINATION, execution_mode="streaming-2024", max_procs=1)
         with self.assertRaisesRegex(ValidationError, "requires output_bucket"):
-            HandFimJobOptions(output_bucket=None, output_prefix="", execution_mode="streaming")
+            HandFimJobOptions(output_bucket=None, output_prefix="", execution_mode="streaming-2024")
         with self.assertRaisesRegex(ValidationError, "one process"):
-            HandFimJobOptions(**DESTINATION, execution_mode="streaming", max_procs=2)
-        self.assertEqual(HandFimJobOptions(**DESTINATION).execution_mode, "legacy")
+            HandFimJobOptions(**DESTINATION, execution_mode="streaming-2024", max_procs=2)
+        self.assertEqual(HandFimJobOptions(**DESTINATION).execution_mode, "fimserv-2024")
 
     def test_updatedlegacy_accepts_local_output_and_multiple_processes(self):
         options = HandFimJobOptions(
-            output_bucket=None, output_prefix="", execution_mode="updatedlegacy", max_procs=2,
+            output_bucket=None, output_prefix="", execution_mode="fimserv-2026", max_procs=2,
         )
-        self.assertEqual(options.execution_mode, "updatedlegacy")
+        self.assertEqual(options.execution_mode, "fimserv-2026")
         self.assertFalse(options.streamed)
 
     def test_updatedstreaming_has_streaming_constraints(self):
-        options = HandFimJobOptions(**DESTINATION, execution_mode="updatedstreaming")
+        options = HandFimJobOptions(**DESTINATION, execution_mode="streaming-2026")
         self.assertTrue(options.streamed)
-        with self.assertRaisesRegex(ValidationError, "updatedstreaming execution_mode requires output_bucket"):
-            HandFimJobOptions(output_bucket=None, output_prefix="", execution_mode="updatedstreaming")
+        with self.assertRaisesRegex(ValidationError, "streaming-2026 execution_mode requires output_bucket"):
+            HandFimJobOptions(output_bucket=None, output_prefix="", execution_mode="streaming-2026")
         with self.assertRaisesRegex(ValidationError, "one process"):
-            HandFimJobOptions(**DESTINATION, execution_mode="updatedstreaming", max_procs=2)
+            HandFimJobOptions(**DESTINATION, execution_mode="streaming-2026", max_procs=2)
 
 
 class _Lazy(dict):
@@ -138,7 +151,7 @@ class StreamingWorkerTests(unittest.TestCase):
 
         self.client.upload_file.side_effect = upload
         with patch.object(tasks.subprocess, "Popen", side_effect=self.spawn()):
-            result = tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION, execution_mode="streaming")
+            result = tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION, execution_mode="streaming-2024")
         self.assertEqual(self.command[2], "stream-scenario")
         self.assertNotIn("test-secret", " ".join(self.command))
         self.assertEqual(self.env["AWS_SECRET_ACCESS_KEY"], "test-secret")
@@ -149,7 +162,7 @@ class StreamingWorkerTests(unittest.TestCase):
         self.assertNotIn("FIMBOX_STREAM_ATTEMPT", self.env)
         self.client.put_object.assert_called_once()
         self.assertEqual(self.client.put_object.call_args.kwargs["Key"], "data/output/s1/manifest.json")
-        self.assertEqual(result["execution_mode"], "streaming")
+        self.assertEqual(result["execution_mode"], "streaming-2024")
         self.assertEqual(self.client.upload_file.call_count, 2)
         self.assertEqual(json.loads(uploaded["body"]), PAYLOAD)
         self.assertIn({
@@ -163,12 +176,12 @@ class StreamingWorkerTests(unittest.TestCase):
 
     def test_updatedstreaming_selects_noaa_rule_and_preserves_result_mode(self):
         with patch.object(tasks.subprocess, "Popen", side_effect=self.spawn()):
-            result = tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION, execution_mode="updatedstreaming")
+            result = tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION, execution_mode="streaming-2026")
         self.assertEqual(self.command[2], "stream-scenario")
         self.assertIn("--updated", self.command)
-        self.assertEqual(result["execution_mode"], "updatedstreaming")
+        self.assertEqual(result["execution_mode"], "streaming-2026")
         with patch.object(tasks.subprocess, "Popen", side_effect=self.spawn()):
-            tasks.hand_fim.run(str(uuid4()), PAYLOAD, **DESTINATION, execution_mode="streaming")
+            tasks.hand_fim.run(str(uuid4()), PAYLOAD, **DESTINATION, execution_mode="streaming-2024")
         self.assertNotIn("--updated", self.command)
 
     def test_existing_scenarios_json_is_rejected_before_computing(self):
@@ -180,13 +193,13 @@ class StreamingWorkerTests(unittest.TestCase):
         self.client.head_object.side_effect = head
         with patch.object(tasks.subprocess, "Popen") as run:
             with self.assertRaisesRegex(RuntimeError, "scenarios.json.*already exists"):
-                tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION, execution_mode="streaming")
+                tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION, execution_mode="streaming-2024")
         run.assert_not_called()
         self.client.upload_file.assert_not_called()
 
     def test_both_modes_save_all_input_scenarios_at_bucket_root_without_a_prefix(self):
         payload = [PAYLOAD[0], {**PAYLOAD[0], "ScenarioID": "s2"}]
-        for mode in ("legacy", "streaming"):
+        for mode in ("fimserv-2024", "streaming-2024"):
             with self.subTest(mode=mode):
                 uploaded = {}
 
@@ -194,7 +207,7 @@ class StreamingWorkerTests(unittest.TestCase):
                     output = self.root / "output" / "scenarios" / self.job_id
                     for scenario in payload:
                         sid = scenario["ScenarioID"]
-                        if mode == "streaming":
+                        if mode == "streaming-2024":
                             document = manifest_document(sid, [f"{sid}/03020201/0_0.cog"])
                             (output / f"{sid}.manifest.json").write_text(json.dumps(document))
                         else:
@@ -233,9 +246,9 @@ class StreamingWorkerTests(unittest.TestCase):
                 ):
                     self.assertIn(text, readme)
                 for sid in ("s1", "s2"):
-                    suffix = f"{sid}/manifest.json" if mode == "streaming" else f"{sid}.cog"
+                    suffix = f"{sid}/manifest.json" if mode == "streaming-2024" else f"{sid}.cog"
                     self.assertIn(f"s3://fim-output/{suffix}", readme)
-                if mode == "streaming":
+                if mode == "streaming-2024":
                     self.assertIn("s3://hydrofabric/hand/v1", readme)
                     self.assertIn("Processing tile size:", readme)
                 for secret in SECRETS.values():
@@ -250,7 +263,7 @@ class StreamingWorkerTests(unittest.TestCase):
         self.client.head_object.side_effect = head
         with patch.object(tasks.subprocess, "Popen") as run:
             with self.assertRaisesRegex(RuntimeError, "README.md.*already exists"):
-                tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION, execution_mode="streaming")
+                tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION, execution_mode="streaming-2024")
         run.assert_not_called()
         self.client.upload_file.assert_not_called()
 
@@ -265,7 +278,7 @@ class StreamingWorkerTests(unittest.TestCase):
         }
         with patch.object(tasks.subprocess, "Popen", side_effect=self.spawn()):
             with self.assertRaises(ClientError):
-                tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION, execution_mode="streaming")
+                tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION, execution_mode="streaming-2024")
         self.client.delete_object.assert_called_once_with(Bucket="fim-output", Key="data/output/s1/manifest.json")
         self.assertFalse((self.root / "output" / "scenarios" / self.job_id).exists())
 
@@ -278,14 +291,14 @@ class StreamingWorkerTests(unittest.TestCase):
         self.client.get_object.side_effect = current_manifest
         with patch.object(tasks.subprocess, "Popen", side_effect=self.spawn()):
             with self.assertRaises(ClientError):
-                tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION, execution_mode="streaming")
+                tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION, execution_mode="streaming-2024")
         self.client.delete_object.assert_called_once_with(Bucket="fim-output", Key="data/output/s1/manifest.json")
         self.assertFalse((self.root / "output" / "scenarios" / self.job_id).exists())
 
     def test_tile_outside_scenario_prefix_fails_without_deleting_shared_tiles(self):
         with patch.object(tasks.subprocess, "Popen", side_effect=self.spawn("data/output/other/x.cog")):
             with self.assertRaisesRegex(RuntimeError, "invalid tile key"):
-                tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION, execution_mode="streaming")
+                tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION, execution_mode="streaming-2024")
         self.client.put_object.assert_not_called()
         self.client.get_paginator.assert_not_called()
         self.client.delete_objects.assert_not_called()
@@ -294,7 +307,7 @@ class StreamingWorkerTests(unittest.TestCase):
         self.client.head_object.side_effect = None
         with patch.object(tasks.subprocess, "Popen") as run:
             with self.assertRaisesRegex(RuntimeError, "already exists"):
-                tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION, execution_mode="streaming")
+                tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION, execution_mode="streaming-2024")
         run.assert_not_called()
 
     def test_overwrite_removes_replaced_tiles_after_publishing(self):
@@ -307,7 +320,7 @@ class StreamingWorkerTests(unittest.TestCase):
                 self.client.get_object.return_value = {"Body": io.BytesIO(json.dumps(old).encode())}
                 with patch.object(tasks.subprocess, "Popen", side_effect=self.spawn()):
                     tasks.hand_fim.run(
-                        self.job_id, PAYLOAD, **DESTINATION, overwrite=True, execution_mode="streaming",
+                        self.job_id, PAYLOAD, **DESTINATION, overwrite=True, execution_mode="streaming-2024",
                     )
                 deleted = self.client.delete_objects.call_args.kwargs["Delete"]["Objects"]
                 self.assertEqual(deleted, [{"Key": key}])
@@ -335,7 +348,7 @@ class StreamingWorkerTests(unittest.TestCase):
 
         with patch.object(tasks.subprocess, "Popen", side_effect=run):
             with self.assertRaises(ClientError):
-                tasks.hand_fim.run(self.job_id, payload, **DESTINATION, overwrite=True, execution_mode="streaming")
+                tasks.hand_fim.run(self.job_id, payload, **DESTINATION, overwrite=True, execution_mode="streaming-2024")
         return old
 
     def test_failed_publish_restores_replaced_manifest(self):
@@ -358,7 +371,7 @@ class StreamingWorkerTests(unittest.TestCase):
     def test_unconfigured_worker_fails_explicitly(self):
         with patch.object(tasks.settings, "stream_input_bucket", ""), patch.object(tasks.subprocess, "Popen") as run:
             with self.assertRaisesRegex(RuntimeError, "not configured"):
-                tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION, execution_mode="streaming")
+                tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION, execution_mode="streaming-2024")
         run.assert_not_called()
 
 
@@ -366,6 +379,9 @@ class StreamingApiTests(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(main.app)
         self.session = auth.UserSession(user_id="alice", access_token="token", scope="read", expires_at=time.time() + 60)
+        times = patch.object(main, "read_job_times", return_value={})
+        times.start()
+        self.addCleanup(times.stop)
         main.app.dependency_overrides[auth.get_authenticated_session] = lambda: self.session
         self.addCleanup(main.app.dependency_overrides.clear)
         for name, value in (
@@ -385,7 +401,7 @@ class StreamingApiTests(unittest.TestCase):
             bounds=(-78, 35, -77, 36), resolution=10.0, tile_size=2048,
         )
         self.result = {
-            "outputs": [{"ScenarioID": "s1"}], **DESTINATION, "execution_mode": "streaming",
+            "outputs": [{"ScenarioID": "s1"}], **DESTINATION, "execution_mode": "streaming-2024",
             "scenario_manifests": [self.manifest.model_dump(mode="json")],
         }
 
@@ -395,33 +411,33 @@ class StreamingApiTests(unittest.TestCase):
         return response, enqueue
 
     def test_streaming_submission_is_queued_with_mode_and_optional_queue(self):
-        response, enqueue = self.submit(execution_mode="streaming")
+        response, enqueue = self.submit(execution_mode="streaming-2024")
         self.assertEqual(response.status_code, 202)
-        self.assertEqual(enqueue.call_args.kwargs["args"][-1], "streaming")
+        self.assertEqual(enqueue.call_args.kwargs["args"][-1], "streaming-2024")
         self.assertNotIn("queue", enqueue.call_args.kwargs)
         with patch.object(main.settings, "stream_queue", "streaming"):
-            _response, enqueue = self.submit(execution_mode="streaming")
+            _response, enqueue = self.submit(execution_mode="streaming-2024")
         self.assertEqual(enqueue.call_args.kwargs["queue"], "streaming")
         _response, enqueue = self.submit()
         self.assertEqual(len(enqueue.call_args.kwargs["args"]), 6)
 
     def test_updatedstreaming_submission_uses_stream_queue_and_configuration(self):
         with patch.object(main.settings, "stream_queue", "streaming"):
-            response, enqueue = self.submit(execution_mode="updatedstreaming")
+            response, enqueue = self.submit(execution_mode="streaming-2026")
         self.assertEqual(response.status_code, 202, response.text)
-        self.assertEqual(enqueue.call_args.kwargs["args"][-1], "updatedstreaming")
+        self.assertEqual(enqueue.call_args.kwargs["args"][-1], "streaming-2026")
         self.assertEqual(enqueue.call_args.kwargs["queue"], "streaming")
         with patch.object(main.settings, "stream_input_bucket", ""):
-            response, enqueue = self.submit(execution_mode="updatedstreaming")
+            response, enqueue = self.submit(execution_mode="streaming-2026")
         self.assertEqual(response.status_code, 409)
         enqueue.assert_not_called()
 
     def test_streaming_submission_requires_configuration_and_valid_options(self):
         with patch.object(main.settings, "stream_input_bucket", ""):
-            response, enqueue = self.submit(execution_mode="streaming")
+            response, enqueue = self.submit(execution_mode="streaming-2024")
         self.assertEqual(response.status_code, 409)
         enqueue.assert_not_called()
-        response, _ = self.submit(execution_mode="streaming", max_procs=4)
+        response, _ = self.submit(execution_mode="streaming-2024", max_procs=4)
         self.assertEqual(response.status_code, 422)
 
     def test_scenario_info_and_tile_use_owned_manifest(self):

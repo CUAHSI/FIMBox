@@ -18,7 +18,7 @@ from kombu.exceptions import OperationalError
 from pydantic import SecretStr, ValidationError
 from redis.exceptions import ConnectionError as RedisConnectionError
 
-from fimbox_api import auth, job_logs, main, storage, tasks
+from fimbox_api import auth, job_logs, job_timing, main, storage, tasks
 from fimbox_api.models import HandFimParameters, OutputDestination
 
 
@@ -40,8 +40,18 @@ def credentials_fixture():
 
 
 class ApiTests(unittest.TestCase):
+    def test_old_execution_mode_names_are_rejected_before_enqueue(self):
+        with patch.object(tasks.hand_fim, "apply_async") as enqueue:
+            for mode in ("legacy", "updatedlegacy", "streaming", "updatedstreaming"):
+                response = self.client.post(HAND_FIM_ROUTE, json={**SUBMISSION, "execution_mode": mode})
+                self.assertEqual(response.status_code, 422, mode)
+            enqueue.assert_not_called()
+
     def setUp(self):
         self.client = TestClient(main.app)
+        times = patch.object(main, "read_job_times", return_value={})
+        times.start()
+        self.addCleanup(times.stop)
         for name, value in (
             ("hydroshare_client_id", "test-client"),
             ("hydroshare_client_secret", SecretStr("test-secret")),
@@ -67,7 +77,7 @@ class ApiTests(unittest.TestCase):
 
     def test_submit_scenarios_and_options_in_payload(self):
         operation = main.app.openapi()["paths"]["/jobs/hand-fim"]["post"]
-        self.assertNotIn("parameters", operation)
+        self.assertTrue(all(parameter["in"] == "header" for parameter in operation.get("parameters", [])))
         with patch.object(tasks.hand_fim, "apply_async") as enqueue:
             response = self.client.post(HAND_FIM_ROUTE, json=SUBMISSION)
             self.assertEqual(response.status_code, 202)
@@ -94,10 +104,10 @@ class ApiTests(unittest.TestCase):
     def test_submit_forwards_updatedlegacy_without_stream_queue(self):
         with patch.object(tasks.hand_fim, "apply_async") as enqueue:
             response = self.client.post(
-                HAND_FIM_ROUTE, json={**SUBMISSION, "execution_mode": "updatedlegacy"},
+                HAND_FIM_ROUTE, json={**SUBMISSION, "execution_mode": "fimserv-2026"},
             )
         self.assertEqual(response.status_code, 202, response.text)
-        self.assertEqual(enqueue.call_args.kwargs["args"][-1], "updatedlegacy")
+        self.assertEqual(enqueue.call_args.kwargs["args"][-1], "fimserv-2026")
         self.assertNotIn("queue", enqueue.call_args.kwargs)
 
     def test_cloud_policy_requires_s3_for_submission(self):
@@ -289,7 +299,7 @@ class ApiTests(unittest.TestCase):
             response = self.client.get(f"/jobs/{job_id}")
             self.assertEqual(
                 response.json()["result"],
-                {**result, "execution_mode": "legacy", "scenario_manifests": [], "parity": [], "compared": None},
+                {**result, "execution_mode": "fimserv-2024", "scenario_manifests": [], "parity": [], "compared": None},
             )
 
     def test_output_download_and_envelope_routes_are_removed(self):
@@ -344,6 +354,32 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(self.client.delete(f"/jobs/{job_id}").status_code, 204)
             revoke.assert_called_once_with(job_id, terminate=False)
         self.assertEqual(self.client.get("/jobs/not-a-uuid").status_code, 422)
+
+    def test_status_reports_execution_times(self):
+        job_id = str(uuid4())
+        started = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        finished = started + timedelta(minutes=3, seconds=5)
+        with patch.object(main.celery_app, "AsyncResult", return_value=Mock(state="FAILURE", result=RuntimeError("x"))), \
+                patch.object(main, "read_job_times", return_value={"started_at": started, "finished_at": finished}):
+            body = self.client.get(f"/jobs/{job_id}").json()
+        self.assertEqual(datetime.fromisoformat(body["started_at"]), started)
+        self.assertEqual(datetime.fromisoformat(body["finished_at"]), finished)
+        with patch.object(main.celery_app, "AsyncResult", return_value=Mock(state="PENDING")), \
+                patch.object(main, "read_job_times") as times:
+            body = self.client.get(f"/jobs/{job_id}").json()
+        times.assert_not_called()
+        self.assertIsNone(body["started_at"])
+
+    def test_job_times_round_trip_through_redis(self):
+        store = {}
+        redis = Mock()
+        redis.hset.side_effect = lambda key, field, value: store.setdefault(key, {}).__setitem__(field, value)
+        redis.hgetall.side_effect = lambda key: dict(store.get(key, {}))
+        job_id = str(uuid4())
+        with patch.object(job_timing, "get_redis_client", return_value=redis):
+            started = job_timing.mark_job_time(job_id, "started_at")
+            self.assertEqual(job_timing.read_job_times(job_id), {"started_at": started})
+        redis.expire.assert_called_with(job_timing.JOB_TIMING_PREFIX + job_id, main.settings.result_ttl_seconds)
 
     def test_openapi_uses_scenario_array(self):
         schema = self.client.get("/openapi.json").json()
@@ -437,10 +473,10 @@ class WorkerTests(unittest.TestCase):
     def test_updatedlegacy_selects_new_code_and_preserves_result_mode(self):
         with patch.object(tasks.subprocess, "Popen", side_effect=self.__spawn) as run:
             result = tasks.hand_fim.run(
-                self.job_id, PAYLOAD, **DESTINATION, execution_mode="updatedlegacy", max_procs=2,
+                self.job_id, PAYLOAD, **DESTINATION, execution_mode="fimserv-2026", max_procs=2,
             )
         self.assertEqual(run.call_args.args[0][-3:], ["2", self.job_id, "--updated-legacy"])
-        self.assertEqual(result["execution_mode"], "updatedlegacy")
+        self.assertEqual(result["execution_mode"], "fimserv-2026")
         self.assertEqual(result["outputs"], [{"ScenarioID": PAYLOAD[0]["ScenarioID"]}])
 
     def test_uploads_all_job_files_preserving_paths_and_excluding_shared_data(self):

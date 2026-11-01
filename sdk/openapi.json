@@ -293,15 +293,39 @@
         "summary": "Submit Hand Fim",
         "description": "Submit a HAND-FIM job with scenarios and options in the JSON body.\nAuthentication is required only when the server has OAuth credentials configured. See GET /auth/config.",
         "operationId": "submit_hand_fim_jobs_hand_fim_post",
+        "security": [
+          {
+            "OAuth2AuthorizationCodeBearer": []
+          },
+          {}
+        ],
+        "parameters": [
+          {
+            "name": "X-FIMBox-History-Location",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fimbox-History-Location"
+            }
+          }
+        ],
         "requestBody": {
+          "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/HandFimJobRequest"
               }
             }
-          },
-          "required": true
+          }
         },
         "responses": {
           "202": {
@@ -324,19 +348,37 @@
               }
             }
           }
-        },
-        "security": [
-          {
-            "OAuth2AuthorizationCodeBearer": []
-          },
-          {}
-        ]
+        }
       }
     },
     "/jobs": {
       "get": {
         "summary": "List Jobs",
         "operationId": "list_jobs_jobs_get",
+        "security": [
+          {
+            "OAuth2AuthorizationCodeBearer": []
+          },
+          {}
+        ],
+        "parameters": [
+          {
+            "name": "X-FIMBox-History-Location",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fimbox-History-Location"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -347,14 +389,18 @@
                 }
               }
             }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
           }
         },
-        "security": [
-          {
-            "OAuth2AuthorizationCodeBearer": []
-          },
-          {}
-        ],
         "description": "Authentication is required only when the server has OAuth credentials configured. See GET /auth/config."
       }
     },
@@ -377,6 +423,22 @@
               "type": "string",
               "format": "uuid",
               "title": "Job Id"
+            }
+          },
+          {
+            "name": "X-FIMBox-History-Location",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fimbox-History-Location"
             }
           }
         ],
@@ -423,6 +485,22 @@
               "type": "string",
               "format": "uuid",
               "title": "Job Id"
+            }
+          },
+          {
+            "name": "X-FIMBox-History-Location",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fimbox-History-Location"
             }
           }
         ],
@@ -570,6 +648,22 @@
               "default": 65536,
               "title": "Max Bytes"
             }
+          },
+          {
+            "name": "X-FIMBox-History-Location",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fimbox-History-Location"
+            }
           }
         ],
         "responses": {
@@ -626,6 +720,22 @@
               "type": "integer",
               "minimum": 0,
               "title": "File Index"
+            }
+          },
+          {
+            "name": "X-FIMBox-History-Location",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fimbox-History-Location"
             }
           }
         ],
@@ -715,6 +825,22 @@
               "minimum": 0,
               "title": "Y"
             }
+          },
+          {
+            "name": "X-FIMBox-History-Location",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fimbox-History-Location"
+            }
           }
         ],
         "responses": {
@@ -772,6 +898,22 @@
               "type": "integer",
               "minimum": 0,
               "title": "Scenario Index"
+            }
+          },
+          {
+            "name": "X-FIMBox-History-Location",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fimbox-History-Location"
             }
           }
         ],
@@ -860,6 +1002,22 @@
               "type": "integer",
               "minimum": 0,
               "title": "Y"
+            }
+          },
+          {
+            "name": "X-FIMBox-History-Location",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fimbox-History-Location"
             }
           }
         ],
@@ -1043,15 +1201,39 @@
         "summary": "Submit Parity",
         "description": "Rerun a retained legacy run's scenarios.json with streaming and diff every scenario.\n\nThe job result lists streaming manifests plus per-scenario parity counts; diff GeoTIFFs\n(1=legacy-only, 2=streaming-only flooding) and parity/report.json go under output_prefix.\nAuthentication is required only when the server has OAuth credentials configured. See GET /auth/config.",
         "operationId": "submit_parity_jobs_parity_post",
+        "security": [
+          {
+            "OAuth2AuthorizationCodeBearer": []
+          },
+          {}
+        ],
+        "parameters": [
+          {
+            "name": "X-FIMBox-History-Location",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fimbox-History-Location"
+            }
+          }
+        ],
         "requestBody": {
+          "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/ParityJobRequest"
               }
             }
-          },
-          "required": true
+          }
         },
         "responses": {
           "202": {
@@ -1074,13 +1256,7 @@
               }
             }
           }
-        },
-        "security": [
-          {
-            "OAuth2AuthorizationCodeBearer": []
-          },
-          {}
-        ]
+        }
       }
     },
     "/jobs/compare": {
@@ -1088,15 +1264,39 @@
         "summary": "Submit Compare",
         "description": "Diff the scenarios shared by two retained results without rerunning HAND-FIM.\n\nEach result may be legacy (<ScenarioID>.cog) or streaming (<ScenarioID>/manifest.json).\nThe job result lists per-scenario parity counts (legacy_* fields describe the base,\nstreaming_* the candidate); diff GeoTIFFs (1=base-only, 2=candidate-only flooding)\nand parity/report.json go under output_prefix.\nAuthentication is required only when the server has OAuth credentials configured. See GET /auth/config.",
         "operationId": "submit_compare_jobs_compare_post",
+        "security": [
+          {
+            "OAuth2AuthorizationCodeBearer": []
+          },
+          {}
+        ],
+        "parameters": [
+          {
+            "name": "X-FIMBox-History-Location",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fimbox-History-Location"
+            }
+          }
+        ],
         "requestBody": {
+          "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/CompareJobRequest"
               }
             }
-          },
-          "required": true
+          }
         },
         "responses": {
           "202": {
@@ -1119,18 +1319,300 @@
               }
             }
           }
-        },
+        }
+      }
+    },
+    "/jobs/{job_id}/archive": {
+      "get": {
+        "summary": "Get Job Archive",
+        "description": "Read persistent job inputs, timestamps, and outcome in the selected S3 location.\nAuthentication is required only when the server has OAuth credentials configured. See GET /auth/config.",
+        "operationId": "get_job_archive_jobs__job_id__archive_get",
         "security": [
           {
             "OAuth2AuthorizationCodeBearer": []
           },
           {}
-        ]
+        ],
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Job Id"
+            }
+          },
+          {
+            "name": "X-FIMBox-History-Location",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fimbox-History-Location"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArchivedJob"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/jobs/history/export": {
+      "post": {
+        "summary": "Export Job History",
+        "description": "Copy this user's completed Redis jobs and logs to S3; never replace existing archives.\n\nOriginal submission parameters and timestamps are unavailable for Redis-only jobs.\nOn storage failure, completed writes remain; retrying skips those existing records.\nAuthentication is required only when the server has OAuth credentials configured. See GET /auth/config.",
+        "operationId": "export_job_history_jobs_history_export_post",
+        "security": [
+          {
+            "OAuth2AuthorizationCodeBearer": []
+          },
+          {}
+        ],
+        "parameters": [
+          {
+            "name": "X-FIMBox-History-Location",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fimbox-History-Location"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HistoryExport"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/jobs/history/clear": {
+      "post": {
+        "summary": "Clear Job History",
+        "description": "Remove this user's finished jobs from Redis and, if selected, the S3 history location.\n\nQueued and running jobs remain. Output files are never deleted. S3 records are\nremoved before Redis entries, so a storage failure can be retried.\nAuthentication is required only when the server has OAuth credentials configured. See GET /auth/config.",
+        "operationId": "clear_job_history_jobs_history_clear_post",
+        "security": [
+          {
+            "OAuth2AuthorizationCodeBearer": []
+          },
+          {}
+        ],
+        "parameters": [
+          {
+            "name": "X-FIMBox-History-Location",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fimbox-History-Location"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HistoryClear"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
       }
     }
   },
   "components": {
     "schemas": {
+      "ArchivedJob": {
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "title": "Job Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StoredHandFimResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At",
+            "description": "UTC time the worker began executing the job."
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At",
+            "description": "UTC time the worker finished executing the job (success or failure)."
+          },
+          "format": {
+            "type": "string",
+            "title": "Format",
+            "default": "fimbox-job-history"
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version",
+            "default": 1
+          },
+          "user_id": {
+            "type": "string",
+            "title": "User Id"
+          },
+          "job_type": {
+            "type": "string",
+            "title": "Job Type"
+          },
+          "submitted_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Submitted At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "request": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Request"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "submission",
+              "redis-export"
+            ],
+            "title": "Source",
+            "default": "submission"
+          }
+        },
+        "type": "object",
+        "required": [
+          "job_id",
+          "status",
+          "user_id",
+          "job_type",
+          "submitted_at",
+          "updated_at",
+          "request"
+        ],
+        "title": "ArchivedJob"
+      },
       "AuthenticationConfig": {
         "properties": {
           "authentication_enabled": {
@@ -1223,6 +1705,43 @@
         "title": "HandFimParameters",
         "description": "The shared scenario JSON schema with worker-specific validation."
       },
+      "HistoryClear": {
+        "properties": {
+          "cleared": {
+            "type": "integer",
+            "title": "Cleared",
+            "default": 0
+          },
+          "skipped_active": {
+            "type": "integer",
+            "title": "Skipped Active",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "title": "HistoryClear"
+      },
+      "HistoryExport": {
+        "properties": {
+          "exported": {
+            "type": "integer",
+            "title": "Exported",
+            "default": 0
+          },
+          "skipped_existing": {
+            "type": "integer",
+            "title": "Skipped Existing",
+            "default": 0
+          },
+          "skipped_active": {
+            "type": "integer",
+            "title": "Skipped Active",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "title": "HistoryExport"
+      },
       "JobList": {
         "properties": {
           "jobs": {
@@ -1269,6 +1788,32 @@
               }
             ],
             "title": "Error"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At",
+            "description": "UTC time the worker began executing the job."
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At",
+            "description": "UTC time the worker finished executing the job (success or failure)."
           }
         },
         "type": "object",
@@ -1485,13 +2030,13 @@
           "execution_mode": {
             "type": "string",
             "enum": [
-              "legacy",
-              "updatedlegacy",
-              "streaming",
-              "updatedstreaming"
+              "fimserv-2024",
+              "fimserv-2026",
+              "streaming-2024",
+              "streaming-2026"
             ],
             "title": "Execution Mode",
-            "default": "legacy"
+            "default": "fimserv-2024"
           },
           "files": {
             "items": {
@@ -1624,14 +2169,14 @@
           "execution_mode": {
             "type": "string",
             "enum": [
-              "legacy",
-              "updatedlegacy",
-              "streaming",
-              "updatedstreaming"
+              "fimserv-2024",
+              "fimserv-2026",
+              "streaming-2024",
+              "streaming-2026"
             ],
             "title": "Execution Mode",
-            "description": "legacy downloads whole HUCs and writes one COG per scenario. updatedlegacy uses the same workflow with NOAA v4.8.14.0 instead of the original pinned code. streaming range-reads a prepared cloud-optimized hydrofabric per reach and writes tiled COGs plus a manifest per scenario; it requires output_bucket and a single process. updatedstreaming is streaming with NOAA v4.8.14.0's own flood kernel, matching updatedlegacy.",
-            "default": "legacy"
+            "description": "fimserv-2024 downloads whole HUCs and writes one COG per scenario. fimserv-2026 uses the same workflow with NOAA v4.8.14.0 instead of the original pinned code. streaming-2024 range-reads a prepared cloud-optimized hydrofabric per reach and writes tiled COGs plus a manifest per scenario; it requires output_bucket and a single process. streaming-2026 is streaming with NOAA v4.8.14.0's own flood kernel, matching fimserv-2026.",
+            "default": "fimserv-2024"
           },
           "scenarios": {
             "$ref": "#/components/schemas/HandFimParameters"
@@ -1916,12 +2461,12 @@
           "execution_mode": {
             "type": "string",
             "enum": [
-              "streaming",
-              "updatedstreaming"
+              "streaming-2024",
+              "streaming-2026"
             ],
             "title": "Execution Mode",
-            "description": "Streaming mode to rerun; use updatedstreaming to compare against an updatedlegacy run.",
-            "default": "streaming"
+            "description": "Streaming mode to rerun; use streaming-2026 to compare against a fimserv-2026 run.",
+            "default": "streaming-2024"
           }
         },
         "additionalProperties": false,

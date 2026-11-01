@@ -46,12 +46,12 @@ Rebuild the base image and API worker before using this option. From the host:
 
 ```bash
 fimbox submit --body test-data/single_reach.json \
-  --execution-mode updatedlegacy \
-  --output-bucket YOUR_HYDROSHARE_BUCKET --output-prefix updatedlegacy
+  --execution-mode fimserv-2026 \
+  --output-bucket YOUR_HYDROSHARE_BUCKET --output-prefix fimserv-2026
 ```
 
-In the SDK, use `HandFimJobRequestExecutionMode.UPDATEDLEGACY`; the API wire
-value is `"updatedlegacy"`. It accepts the same output/concurrency settings as
+In the SDK, use `HandFimJobRequestExecutionMode.FIMSERV_2026`; the API wire
+value is `"fimserv-2026"`. It accepts the same output/concurrency settings as
 legacy and returns ordinary `<ScenarioID>.cog` outputs plus `scenarios.json`.
 Use that output prefix as `legacy_prefix` in `POST /jobs/parity` to compare it
 with streaming. Use different prefixes for original, updated, and parity runs.
@@ -72,8 +72,8 @@ docker run --rm --platform linux/amd64 -v "$PWD:/repo:ro" \
 
 ## Updated streaming mode
 
-`stream-scenario --updated` (API/CLI `execution_mode` `updatedstreaming`, SDK
-`HandFimJobRequestExecutionMode.UPDATEDSTREAMING`) streams the same prepared
+`stream-scenario --updated` (API/CLI `execution_mode` `streaming-2026`, SDK
+`HandFimJobRequestExecutionMode.STREAMING_2026`) streams the same prepared
 dataset as streaming mode but classifies every pixel with NOAA v4.8.14.0's own
 code from the updated checkout: `__subset_hydroTable_to_forecast` interpolates
 each HydroID's stage and the numba kernel `__go_fast_mapping` marks wet cells
@@ -84,8 +84,8 @@ checkout. FIMBox still plans blocks, unions branches (equivalent to NOAA's
 prepared dataset.
 
 It has the same constraints as streaming (`output_bucket`, `max_procs` 1,
-`STREAM_INPUT_BUCKET`). To check it, run `updatedlegacy` to one prefix, then
-`POST /jobs/parity` with `"execution_mode": "updatedstreaming"` and that
+`STREAM_INPUT_BUCKET`). To check it, run `fimserv-2026` to one prefix, then
+`POST /jobs/parity` with `"execution_mode": "streaming-2026"` and that
 prefix as `legacy_prefix`. On HUC 03020201 reach 8780625 at 7 cms both modes
 flood the same 1163 cells; plain streaming adds 79 cells shallower than 3 cm.
 
@@ -257,7 +257,7 @@ docker run --rm --platform linux/amd64 \
 By default it uses [`multiple_scenarios.json`](../../test-data/multiple_scenarios.json).
 Select another scenario list by adding, for example,
 `-e FIMBOX_PARITY_SCENARIOS=/repo/test-data/many_hucs_many_reaches.json`.
-Add `-e FIMBOX_PARITY_EXECUTION_MODE=updatedlegacy` to compare the newer NOAA
+Add `-e FIMBOX_PARITY_EXECUTION_MODE=fimserv-2026` to compare the newer NOAA
 workflow with streaming instead of original legacy. This also asserts that
 no grid realignment is needed; genuine flood-extent differences still fail
 the test. Reports include the selected `execution_mode`.

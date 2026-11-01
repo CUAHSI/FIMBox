@@ -737,7 +737,7 @@ def generate_streaming_scenario_fim(
         bool,
         typer.Option(
             "--updated",
-            help="Classify pixels with NOAA inundation-mapping v4.8.14.0's own kernel (updatedstreaming).",
+            help="Classify pixels with NOAA inundation-mapping v4.8.14.0's own kernel (streaming-2026).",
         ),
     ] = False,
 ) -> None:

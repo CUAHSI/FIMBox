@@ -1,4 +1,4 @@
-"""Container-side checks that updatedstreaming delegates to NOAA's newer code; run inside the HAND-FIM image."""
+"""Container-side checks that streaming-2026 delegates to NOAA's newer code; run inside the HAND-FIM image."""
 
 import importlib.util
 import os

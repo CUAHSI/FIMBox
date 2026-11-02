@@ -22,6 +22,9 @@ from .storage import RasterSource
 
 logger = logging.getLogger(__name__)
 COLORMAP = {0: (0, 0, 0, 0), 1: (0, 120, 255, 190)}
+# Parity diffs: 1=base/legacy-only flooding, 2=candidate/streaming-only flooding.
+DIFF_COLORMAP = {0: (0, 0, 0, 0), 1: (220, 40, 40, 210), 2: (255, 160, 0, 210)}
+DIFF_SUFFIX = ".diff.tif"
 EARTH_CIRCUMFERENCE = 40075016.686
 MAX_MANIFEST_BYTES = 8 * 1024 * 1024
 MANIFEST_CACHE_SIZE = 32
@@ -31,6 +34,31 @@ __manifest_lock = threading.Lock()
 
 class RasterReadError(RuntimeError):
     """A sanitized raster read failure."""
+
+
+def raster_preview(source: RasterSource) -> bytes:
+    """Render a bounded first-band preview, stretching sampled valid values."""
+    try:
+        with rasterio.Env(
+            session=source.session,
+            GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR", GDAL_HTTP_TIMEOUT=20,
+            GDAL_HTTP_MAX_RETRY=0, VSI_CACHE=False, **source.options,
+        ), Reader(source.path) as reader:
+            image = reader.preview(max_size=1024, indexes=(1,))
+            image.array = np.ma.masked_invalid(image.array)
+            values = image.array.compressed()
+            if not values.size:
+                return image.render(img_format="PNG", colormap={0: (0, 0, 0, 0)})
+            low, high = np.percentile(values, (2, 98))
+            if high <= low:
+                low, high = float(values.min()), float(values.max())
+            if high <= low:
+                high = low + 1
+            image.rescale(in_range=((float(low), float(high)),))
+            return image.render(img_format="PNG")
+    except (RasterioError, RioTilerError):
+        logger.error("Could not read raster preview")
+        raise RasterReadError("Could not read raster preview from storage.") from None
 
 
 def raster_info(source: RasterSource) -> RasterInfo:
@@ -59,7 +87,8 @@ def raster_tile(source: RasterSource, z: int, x: int, y: int) -> bytes:
         ), Reader(source.path) as reader:
             image = reader.tile(x, y, z, tilesize=256, indexes=(1,))
             # HAND-FIM outputs are binary: show flooded cells, not dry land/nodata.
-            return image.render(img_format="PNG", colormap=COLORMAP)
+            colormap = DIFF_COLORMAP if source.path.lower().endswith(DIFF_SUFFIX) else COLORMAP
+            return image.render(img_format="PNG", colormap=colormap)
     except TileOutsideBounds:
         return ImageData(np.ma.masked_all((1, 256, 256), dtype="uint8")).render(
             img_format="PNG", colormap={0: (0, 0, 0, 0)},

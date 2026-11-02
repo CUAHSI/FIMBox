@@ -9,6 +9,7 @@ from uuid import UUID
 
 import boto3
 import httpx
+from botocore import UNSIGNED
 from botocore.config import Config
 from pydantic import BaseModel, Field, SecretStr, ValidationError, field_validator
 from rasterio.session import AWSSession
@@ -153,6 +154,16 @@ def __session_credentials(session: UserSession) -> HydroShareS3Credentials:
 def output_s3_client(session: UserSession):
     """Read retained outputs using the current user's HydroShare permissions, not job state."""
     return __client(__session_credentials(session))
+
+
+def anonymous_s3_client():
+    """Unsigned reads for a public prepared input dataset (STREAM_INPUT_UNSIGNED)."""
+    return boto3.client(
+        "s3",
+        endpoint_url=settings.s3_endpoint_url,
+        region_name=settings.s3_region,
+        config=Config(signature_version=UNSIGNED, s3={"addressing_style": settings.s3_addressing_style}),
+    )
 
 
 def __client(credentials: HydroShareS3Credentials):

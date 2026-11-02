@@ -12,6 +12,34 @@ that container (`docker/handfim/`), a second Typer CLI (`entry.py`) drives the
 actual FIM computation using NOAA/OWP's `inundation-mapping` tooling and the
 `fimserve` package (vendored/patched under `docker/handfim/patches/`).
 
+`execution_mode="fimserv-2026"` (SDK enum `FIMSERV_2026`) follows the legacy
+worker/output path, passing `scenario --updated-legacy` to the container.
+It selects the independent `/home/code/inundation-mapping-updated` checkout,
+pinned in the Dockerfile to NOAA v4.8.14.0 / b4459b5d4dd71e67f84a5656d7109237e21903ed.
+Original legacy stays on 9d39cb85. Both use the same downloaded hydrofabric;
+the newer code replaces the faulty mosaic and also adds a ~3 cm depth cutoff,
+so streaming parity may expose genuine scientific differences. Updated runs
+retain ordinary COGs/scenarios.json and can be references for `/jobs/parity`.
+`FIMBOX_PARITY_EXECUTION_MODE=fimserv-2026` selects it in the container parity
+test and additionally requires zero grid shift. `tests/test_updated_legacy.py`
+covers checkout routing, missing-code failure, CLI flag, and a real synthetic
+FIMserv/new NOAA run inside the image. New upstream imports need geocube/fsspec.
+
+`execution_mode="streaming-2026"` (SDK `STREAMING_2026`) follows the
+streaming path (`HandFimJobOptions.streamed`, stream queue, S3 required,
+max_procs 1) and passes `stream-scenario --updated`. `streamFIM.run_scenario`
+accepts a `rule` (FloodRule: BranchPlan -> per-window classifier; default
+`pinned_rule`); `BranchPlan.ratings` keeps ordered (feature_id, discharge,
+discharge_cms, stage) rows. `docker/handfim/noaa_stream_rule.py` builds a rule
+from the updated checkout's `__subset_hydroTable_to_forecast` and numba
+`__go_fast_mapping` (0.03048 m minimum depth), so it matches `fimserv-2026`
+exactly on HUC 03020201. Parity accepts `execution_mode` (streaming modes
+only; appended to Celery args only when non-default). Container test:
+`tests/test_updated_streaming.py` (compares with NOAA `inundate()`).
+The NOAA loader registers the canonical `inundation` module name: Numba's
+precompiled kernel cache imports that name when restoring its environment.
+Container regression tests exercise cache reuse across fresh processes.
+
 ## User documentation
 
 - **`readme.md`** — Concise local quickstart and links to the focused guides.
@@ -160,6 +188,85 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
   REQUIRE_HYDROSHARE_OUTPUT defaults false locally; Terraform sets it true for
   the API, which fails startup without OAuth credentials and rejects missing
   output_bucket at the submission route before enqueueing.
+- **`src/fimbox_api/remote_json.py`** — SSRF-guarded `fetch_json(url)`:
+  - accepts https only, with no URL credentials
+  - every redirect hop must resolve to global IPs only, and the connection is
+    pinned to the checked IP (keeping the Host header and SNI)
+  - no environment proxies; limits of 2 MiB, 10 s, and 5 redirects
+  - raises `RemoteJsonError`; tested in `tests/test_remote_json.py`
+- **`src/fimbox_api/retrospective.py`** — `streamflow(reach_id, start, end)`
+  reads hourly flows for one reach from the public NWM v3.0 retrospective Zarr
+  (`chrtout.zarr` on `noaa-nwm-retrospective-3-0-pds`) with plain GETs and
+  `zstandard`: a process-cached sorted `feature_id` index, then one
+  672-hour x 30000-feature int32 chunk per 28 days (scale 0.01, missing
+  -999900). Clips to 1979-02-01T01Z..2023-02-01T00Z, caps 92 days, raises
+  `RetrospectiveError`; tested in `tests/test_retrospective.py`.
+- **`src/fimbox_api/ui.py`** — `/ui` router, excluded from OpenAPI so it is not
+  part of the SDK contract:
+  - `GET /ui` serves `static/ui/index.html`. `main.py` mounts `/ui/static`
+    and adds CSP, nosniff, and no-referrer headers to `/ui*` responses.
+  - JSON helpers for the page:
+    - `/ui/config`: auth and streaming modes, plus the input dataset location
+    - `/ui/examples`: `settings.examples_dir/*.json`; the API image copies
+      `test-data` and sets `EXAMPLES_DIR`
+    - `/ui/objects`: one-level S3 listing
+    - `/ui/objects/preview`: the first 512 KiB of a text file
+    - `/ui/objects/raster`: TIFF/COG first-band PNG preview, max 1024 pixels per
+      side, sampled percentile grayscale stretch and transparent nodata. Uses a
+      permission-scoped short-lived GET URL only inside the API; browser fetches
+      PNG with auth. Shared file browser adds View alongside Download/Map.
+    - `/ui/objects/parquet`: pyarrow schema, counts, and first rows (limit
+      1-200) through a seekable ranged-GET reader with a 64 MiB read budget
+    - `/ui/objects/download`: a 5-minute presigned GET URL
+    - `/ui/scenarios/load?url=`: a scenario list (authenticated, 2 MiB).
+      `s3://` uses the user's S3 client; `https://` uses `remote_json.py`.
+      The page also uploads files client-side and supports
+      `/ui?scenarios_url=`.
+    - `/ui/streamflow/retrospective?reach_id=&start=&end=`: hourly NWM v3.0
+      retrospective flows over whole UTC days via `retrospective.py`
+      (`RetrospectiveError` → 400, HTTP/zstd errors → 502).
+  - Paths reject empty, `.`, and `..` segments. S3 errors map to 404, 403, or
+    503.
+  - Reads use the user's HydroShare S3 client, or `anonymous_s3_client()`
+    (`storage.py`) inside an unsigned input dataset. In local mode without
+    auth they return 409.
+  - `static/ui/app.js` is plain JS that builds the DOM with `textContent`. It
+    handles:
+    - device-flow popup sign-in
+    - the S3 browser
+    - the scenario table/JSON editor, with a per-reach map picker. The picker
+      shows EPA NHDPlus ArcGIS `export` tiles and one WBDLine export image per
+      view (`hudigit <= 8`, with retries). The WBD HUC8 polygon layer is
+      scale-limited, and tile bursts get intermittent 503s. a click calls
+      NLDI `comid/position` and the WBD HUC8 query from the browser.
+      `main.py`'s CSP allowlists these origins. A picked or current reach
+      gets a streamflow panel: NOAA NWPS analysis/forecast series fetched from
+      the browser (ft³/s → m³/s, one `series` per request; forecasts may be
+      empty) and a retrospective date-range lookup; "Use" buttons set the
+      row's Streamflow (plus HUC/ReachID). Each series has a "Make
+      time-step scenarios" form (UTC range, 1–24 h step, ≤ 240): it replaces
+      the row with per-timestep scenarios (`YYYYMMDDTHHMMZ` IDs), merging by
+      ScenarioID so several reaches share timesteps.
+    - job submission and log polling
+    - an "S3 locations" tab storing named `{id,name,bucket,prefix}` entries in
+      `localStorage` under `fimbox-locations:<origin>:<user id or "local">`.
+      `.location-picker` placeholders in forms (`data-bucket`/`data-prefix`, or
+      `data-uri` for the history field) become a saved-location select plus a
+      relative subprefix. The subprefix makes the target fields read-only and
+      writes the joined bucket/prefix. `data-required` makes the subprefix
+      mandatory for outputs. Code that fills target fields first calls
+      `useCustomLocation`.
+    - result views: README (safe markdown subset), parameters, files, and a
+      Leaflet map over `/outputs/tiles` that fetches tiles with the bearer
+      token. `createResultMap` caches one overlay per key and its
+      `animate(frames)` player shows one scenario layer at a time
+      (play/step/slider/delay), preloading the next frame at opacity 0 and
+      waiting for its tiles. Over 12 scenarios, only the first is added
+      up front.
+    - a "Compare two results" form (`POST /jobs/compare`, prefilled by
+      "Compare as base/candidate" on any opened result); comparison jobs show
+      base/candidate links, a parity table with "Map diff", and diff layers
+  - Tests are in `tests/test_ui.py`.
 - **`src/fimbox_api/celery_app.py`** — JSON-only Celery configuration and
   task discovery, started-state tracking, late acknowledgement, and a
   single-process worker.
@@ -188,15 +295,51 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
   `POST /jobs/parity` (ParityJobRequest: legacy bucket/prefix plus a distinct
   output destination) queues `hand_fim_parity`; it requires streaming config
   and authentication, uses STREAM_QUEUE, and releases credentials/tracking if
-  enqueueing fails.
+  enqueueing fails. `POST /jobs/compare` (CompareJobRequest: base and
+  candidate bucket/prefix plus a distinct output destination) queues
+  `hand_fim_compare` on the default queue; it needs authentication only.
 - **`src/fimbox_api/parity.py`** — `compare_scenario_outputs`: windowed
-  wet-cell diff of a legacy raster against the union of streaming tiles on
+  wet-cell diff of a legacy raster (or a list of base tiles, unioned; the
+  first defines the grid) against the union of streaming tiles on
   the legacy grid over both extents. Writes a 0/1/2 (equal/legacy-only/
   streaming-only) diff GeoTIFF and returns counts plus up to 10 sample
   coordinates. A whole-pixel offset (rounded flooded-cell centroid delta,
   at most MAX_GRID_SHIFT=2 px) is realigned when it reduces differences and
   reported as grid_shift_rows/columns plus unaligned_different_cells; the
   grid is padded by that limit so shifted cells can't fall off the edge. Shared by the parity task and `tests/test_scenario_parity.py`.
+  Evidence for the downloaded HUC 03020201 / reach 8780625 / 7 m3/s case is in
+  [`docs/legacy-output-offset-evidence.md`](../docs/legacy-output-offset-evidence.md):
+  identical legacy/streaming arrays, but legacy is 10 m grid-north. Independent
+  NOAA branch 0 REM/catchment/rating reconstruction matches streaming exactly
+  (0 differences), versus 486 for legacy without realignment. Follow-up
+  reproduction locates the defect in pinned NOAA `overlapping_inundation.py`:
+  the 30x30 partition map-coordinate round trip produces row offsets
+  3905.999999999977 / 4339.999999999977; `merge_data` writes these float windows,
+  landing one row north although reads sample the intended rows. An isolated
+  run of the pinned window methods plus Rasterio writes reproduces the
+  downloaded legacy mask AND transform; nearest-integer destination windows
+  restore the streaming transform. No production patch or historical-job
+  intermediate trace yet; do not apply a blanket one-row output shift.
+  `tools/visualize_legacy_offset.py` plus `tools/legacy_offset_report.html`
+  generate a self-contained offline visual report for this specific case:
+  actual NOAA source REM/catchment crop, independently reconstructed flooding
+  from documented rating brackets, native-grid output overlays, difference
+  colors, zoom/pan, pixel inspector, and an explicitly demonstrative one-row
+  legacy shift toggle. Generated local report:
+  `res_download/parity/legacy-offset-report.html` (not committed). Generation
+  needs NumPy/Rasterio and public NOAA access; viewing needs only a browser.
+  Tests: `tests/test_offset_visualization.py` (source rule, native placement,
+  grid rejection, safe JSON embedding). `tests/test_legacy_mosaic_offset.py`
+  runs the real pinned `OverlapWindowMerge.merge_rasters` on a sparse branch 0
+  marker raster, intercepts `write_band`, and asserts the call at
+  `merge_data` L437 uses row_off just below 3906 (3905.999999999971 in-image),
+  moving native row 4281 to 4280; rounding that window keeps row 4281. It skips
+  unless `overlapping_inundation` imports; run it in `cuahsi/handfim` with
+  `PYTHONPATH=/home/code/inundation-mapping/tools` (command in evidence doc).
+  NOAA deleted `overlapping_inundation.py` in v4.8.14.0 (PR #1650, 2025-10-10);
+  latest `dev` mosaics with `rasterio.merge.merge(method="max")`, which placed
+  the marker test case correctly. The defect is specific to the pinned commit;
+  rerun parity before moving the NOAA pin.
 - **`src/fimbox_api/rasters.py`** — rio-tiler/rasterio metadata and 256px
   Web Mercator window/overview reads. Request-scoped credentials configure
   signed S3 range reads with directory listing disabled. Binary flood=1 is blue,
@@ -211,6 +354,10 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
   downloads legacy/tile COGs to a temp dir, diffs them, uploads
   `parity/<ScenarioID>.diff.tif` and `parity/report.json`, and returns the
   streaming result with `parity` entries (mismatches don't fail the job).
+  `hand_fim_compare` diffs the ScenarioIDs shared by two retained results
+  (each `<sid>/manifest.json` tiles or `<sid>.cog`) without rerunning HAND-FIM,
+  writes the same parity files, and returns `parity` (legacy_* = base,
+  streaming_* = candidate) plus `compared` locations/skipped scenarios.
   The main task revalidates input,
   substitutes safe job-specific internal scenario names, writes the scenario
   JSON, invokes the existing container `scenario` CLI in a subprocess, verifies
@@ -246,6 +393,35 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
   failure prevents enqueue.
 - **`src/fimbox_api/job_logs.py`** — Redis-backed append, clear, and byte-offset
   reads for expiring worker logs exposed by `GET /jobs/{job_id}/logs`.
+- **`src/fimbox_api/job_timing.py`** — Redis hash `jobs:timing:<id>` with
+  `started_at`/`finished_at`, using the result TTL. `HistoryTask` records it for every
+  task, copies it into S3 history records, and `get_job_status` returns it
+  (except for queued jobs). The UI derives execution/elapsed time from it.
+- **`src/fimbox_api/history.py`** — Opt-in persistent S3 job metadata selected by
+  `X-FIMBox-History-Location: s3://bucket/prefix`. Queued records are written
+  before enqueue; `HistoryTask` wraps all three worker tasks to retain started
+  and terminal snapshots plus terminal logs. Non-secret `history_archive` task
+  kwargs preserve existing positional arguments. Records contain original
+  request, user/job/type, UTC timestamps, result/error; no tokens/credentials.
+  Per-user SHA256 namespaces and per-job JSON/log objects avoid shared index
+  races. Main job list/status/log/raster endpoints read archives after Redis
+  expiry; `/jobs/{id}/archive` exposes inputs. Reads verify user/job identity,
+  paginate S3 listing, limit records to 32 MiB, and retain byte-offset UTF-8
+  log reads. `/jobs/history/export` (UI export button / CLI `history export`)
+  explicitly copies completed Redis jobs/logs, skipping active jobs and existing
+  archives with conditional S3 writes. Export provenance marks unavailable inputs,
+  job type, and submitted time; Redis is unchanged. Failures are explicit.
+  `/jobs/history/clear` (UI **Clear history** / CLI `history clear --yes`)
+  deletes finished jobs' S3 records/logs (when a location is selected) before
+  forgetting their Redis result/logs/timing/ownership; active jobs and outputs
+  are kept.
+  No automatic backfill or S3 TTL; lifecycle rules still
+  apply. Abrupt worker loss may leave the last running snapshot.
+  UI remembers location per account/browser; CLI `history use/show/disable/job`
+  remembers location per API in the user config directory, with
+  `--history-location`/`FIMBOX_HISTORY_LOCATION` overrides. Server authorization
+  scopes either client's selected location to the authenticated user.
+  Tests: `tests/test_job_history.py`, related CLI cases.
 - **`src/fimbox_api/auth.py`** — HydroShare authorization-code exchange,
   verified user-info identity, Redis-backed opaque sessions with expiry,
   single-use browser-bound OAuth state, and per-user job ownership/tracking.
@@ -424,7 +600,7 @@ single worker per shared watershed cache. `pixi run api` runs FastAPI only.
     `reachfim_interval` command was removed; still available as a standalone
     CLI command.
 
-## Streaming HAND-FIM (opt-in `execution_mode="streaming"`)
+## Streaming HAND-FIM (opt-in `execution_mode="streaming-2024"`)
 
 Targets a 4 GiB Cloud Run worker with no scratch storage: inputs are
 range-read from a prepared cloud-optimized hydrofabric on S3 and outputs are
@@ -432,8 +608,9 @@ uploaded tile by tile.
 
 - **`docker/handfim/prepare_streaming_dataset.py`** — Offline tool (not run per
   request): `prepare_huc` converts a downloaded `flood_<huc>/<huc>` directory
-  into `dataset.json`, `hucs/<huc>/huc.json` (written last), lossless 512-px
-  REM/catchment COGs per branch, and per-reach JSONs with HydroID ratings
+  into `dataset.parquet`, `hucs/<huc>/huc.parquet` (written last), lossless 512-px
+  REM/catchment COGs per branch, and per-reach Snappy-compressed Parquet files
+  with HydroID ratings
   (lake rows dropped) and the COG blocks each reach occupies. `download_huc`
   (run first by the CLI) fetches only those inputs from the public
   `ciroh-owp-hand-fim` bucket (us-east-2, unsigned, `hand_fim_<version>/`)
@@ -443,19 +620,40 @@ uploaded tile by tile.
   source order and uses the first matching row's forecast, as NOAA does.
   HUC 03030002 branch 0 contains HydroID 11690624 mapped to three features;
   this is supported, not rejected as an ambiguous mapping.
+  Dataset version 3 uses Parquet-only metadata and reach indexes. Dataset
+  metadata is a single row (`format`, `version`, `block_size`, `fim_version`).
+  HUC metadata has one row per branch: common `huc`, `crs`, six-coefficient
+  float64 `transform`, reference `width`/`height`, `block_size`; branch columns
+  `branch`, `rem`, `catchments`, `row_off`, `col_off`, `branch_width`/`branch_height`.
+  IDs are strings, dimensions/offsets int64, version/block size int32.
+  The reader reconstructs the planning dictionary via `read_index_parquet`.
+  Each reach
+  table has one row per branch/HydroID, string `huc`/`feature_id`/`branch`,
+  int64 `hydroid`, float64-list `discharge_cms`/`stage`, nullable int64-list
+  `row_order`, and `blocks` (lists of int32 row/column pairs, union per reach
+  and branch). All tables use Snappy compression for viewer compatibility;
+  existing Zstandard files remain readable by the worker (no schema/version change).
+  COG rasters are unchanged.
+  JSON prepared metadata and older dataset versions are not supported.
+  Preparation requires a new output root when migrating (rejects `dataset.json`
+  and incompatible Parquet roots). Job-output scenario manifests stay JSON.
+  PyArrow is an explicit HAND-FIM and test dependency; rebuild images for version 3.
 - HydroShare upload compatibility: the HydroShare S3 gateway was observed
-  storing AWS chunked-upload framing in both JSON indexes and COGs. Recent
+  storing AWS chunked-upload framing in uploaded indexes and COGs. Recent
   external AWS CLI uploads must set
   `AWS_REQUEST_CHECKSUM_CALCULATION=when_required`; affected datasets need
   re-uploading from the original local files. The API/worker boto3 1.35.99
   pin predates the new optional checksum defaults (and does not accept the
   `request_checksum_calculation` Config option).
 - **`docker/handfim/patches/streamFIM.py`** — Copied into fimserve. Pure
-  science/tiling: `plan_huc` (first discharge per feature, stage
+  science/tiling: `read_index_parquet` decodes metadata and reach tables into the planning
+  representation; `plan_huc` (first discharge per feature, stage
   interpolation), `schedule_tiles` (fixed tile_size windows on each HUC's native
   grid), `compute_tile` (reads only scheduled blocks, `stage > rem`, max across
-  branches), `encode_tile` (binary uint8 COG), `run_scenario` (returns the
-  manifest; no-flood is an error like legacy). I/O is injected as callables.
+  branches), `encode_tile` (float32 1/NaN COG), `run_scenario` (returns the
+  manifest). I/O is injected as callables. Dry scenarios retain one all-nodata
+  tile on the first evaluated window's grid, allowing blank animation frames
+  in both streaming modes. No source blocks still fails explicitly.
   Output tiles are cropped to flooded-cell extents before encoding; transforms,
   dimensions and manifest bounds reflect the crop, so map fitting excludes
   dry padding. Filename row/column still refers to the processing window.
@@ -463,8 +661,18 @@ uploaded tile by tile.
   `entry.py stream-scenario` command: `StreamConfig.from_env` (FIMBOX_STREAM_*,
   FIMBOX_S3_*, AWS_*), boto3 index reads, GDAL `s3://` range reads, per-tile
   `put_object`, local `<sid>.manifest.json`.
-  Invalid index JSON reports the full S3 object location and upload remediation
+  Invalid index Parquet reports the full S3 object location and upload remediation
   without including object contents; bounded reads enforce the index size limit.
+  `run_streaming(rule=...)` forwards an optional flood rule to `run_scenario`.
+- **`docker/handfim/noaa_stream_rule.py`** — `streaming-2026` flood rule:
+  `load_inundation` imports only the updated NOAA `tools/inundation.py`
+  (RuntimeError "rebuild the HAND-FIM image" if absent); `updated_rule` turns
+  BranchPlan ratings into NOAA hydro-table/forecast frames and classifies
+  windows with NOAA's kernel (copies inputs; kernel mutates in place).
+- Modes are now `fimserv-2024`, `fimserv-2026`, `streaming-2024`, and
+  `streaming-2026`; old names are deliberately rejected, including stored result
+  validation. No compatibility aliases/history migration. Default HAND-FIM mode
+  is `fimserv-2024`; parity defaults to `streaming-2024`.
 - API: `models.HandFimJobOptions.execution_mode` (streaming requires S3 output
   and one process); `config` STREAM_* settings; `storage.job_s3_environment`
   (credentials for the subprocess environment, rejects near-expiry);
@@ -491,7 +699,7 @@ uploaded tile by tile.
   The CLI has
   `--execution-mode`.
 - Terraform: `stream_input_*` variables and an optional `stream_worker` pool
-  (4Gi) consuming the `streaming` queue.
+  (4Gi) consuming the `streaming-2024` queue.
 - Tests: `tests/test_streaming_fim.py` (NOAA-reference equality, tile-size
   invariance, range-only HTTP reads) and `tests/test_streaming_api.py`.
 - **`tests/test_scenario_parity.py`** — Fast raster-diff regressions plus an
@@ -508,6 +716,9 @@ uploaded tile by tile.
   to `sys.path` so it still runs directly in the container.
 - **`tests/test_parity_api.py`** — Parity request validation, worker (mocked
   S3/streaming, real raster diff on synthetic COGs), and endpoint queuing.
+- **`tests/test_compare_api.py`** — Two-result comparison: request validation,
+  multi-tile base diff, worker (mocked S3, legacy/streaming either side),
+  endpoint queuing/rollback, and the diff tile colormap.
 - Not yet validated against a live HydroShare dataset or on Cloud Run.
 
 ## Known gaps / things to watch

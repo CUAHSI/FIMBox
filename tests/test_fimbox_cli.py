@@ -27,6 +27,71 @@ PAYLOAD = [{
 
 
 class SdkCliTests(unittest.TestCase):
+    def test_execution_modes_use_new_names_and_reject_old_names(self):
+        for mode in ("fimserv-2024", "fimserv-2026", "streaming-2024", "streaming-2026"):
+            result = self.invoke("submit", "--body", str(self.body), "--execution-mode", mode)
+            self.assertEqual(result.exit_code, 0, result.output)
+            body = json.loads(self.requests[-1].content)
+            self.assertEqual(body.get("execution_mode", "fimserv-2024"), mode)
+        for mode in ("legacy", "updatedlegacy", "streaming", "updatedstreaming"):
+            result = self.invoke("submit", "--body", str(self.body), "--execution-mode", mode)
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("Invalid value", result.output)
+
+    def test_history_export_uses_selected_location_and_reports_counts(self):
+        with patch.object(click, "get_app_dir", return_value=self.directory.name):
+            result = self.invoke("history", "export")
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("Select a history location", result.output)
+            self.response = httpx.Response(200, json={"exported": 2, "skipped_existing": 1, "skipped_active": 3})
+            result = self.invoke("--history-location", "s3://resource/archive", "history", "export")
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertIn('"exported": 2', result.output)
+            self.assertEqual(self.requests[-1].method, "POST")
+            self.assertEqual(self.requests[-1].url.path, "/jobs/history/export")
+            self.assertEqual(self.requests[-1].headers["X-FIMBox-History-Location"], "s3://resource/archive")
+
+    def test_history_clear_requires_confirmation(self):
+        with patch.object(click, "get_app_dir", return_value=self.directory.name):
+            count = len(self.requests)
+            result = self.invoke("history", "clear", input="n\n")
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertEqual(len(self.requests), count)
+            self.response = httpx.Response(200, json={"cleared": 4, "skipped_active": 1})
+            result = self.invoke("--history-location", "s3://resource/archive", "history", "clear", "--yes")
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertIn('"cleared": 4', result.output)
+            self.assertEqual(self.requests[-1].method, "POST")
+            self.assertEqual(self.requests[-1].url.path, "/jobs/history/clear")
+            self.assertEqual(self.requests[-1].headers["X-FIMBox-History-Location"], "s3://resource/archive")
+
+    def test_history_location_is_remembered_and_sent_with_submissions(self):
+        with patch.object(click, "get_app_dir", return_value=self.directory.name):
+            self.response = httpx.Response(200, json={"jobs": []})
+            result = self.invoke("history", "use", "s3://resource/archive")
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertEqual(self.requests[-1].headers["X-FIMBox-History-Location"], "s3://resource/archive")
+            self.response = httpx.Response(202, json={
+                "job_id": self.job_id, "status": "queued", "status_url": f"/jobs/{self.job_id}",
+            })
+            result = self.invoke("submit", "--body", str(self.body), "--output-bucket", "resource", "--output-prefix", "p")
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertEqual(self.requests[-1].headers["X-FIMBox-History-Location"], "s3://resource/archive")
+            result = self.invoke("history", "disable")
+            self.assertEqual(result.exit_code, 0, result.output)
+            result = self.invoke("history", "show")
+            self.assertIn("disabled", result.output)
+
+    def test_history_override_and_invalid_location(self):
+        with patch.object(click, "get_app_dir", return_value=self.directory.name):
+            self.response = httpx.Response(200, json={"jobs": []})
+            result = self.invoke("--history-location", "s3://resource/override", "jobs")
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertEqual(self.requests[-1].headers["X-FIMBox-History-Location"], "s3://resource/override")
+            result = self.invoke("history", "use", "https://example.com/no")
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("s3://bucket/prefix", result.output)
+
     def setUp(self):
         self.runner = CliRunner()
         self.real_auth_mode = fimbox_cli.__dict__["__authentication_enabled"]
@@ -125,6 +190,21 @@ class SdkCliTests(unittest.TestCase):
         self.assertIsInstance(response.parsed, JobSubmitted)
         self.assertEqual(response.parsed.job_id, self.job_id)
         self.assertEqual(self.requests[0].headers["Authorization"], "Bearer sdk-session")
+
+    def test_updatedlegacy_mode_is_sent_through_sdk(self):
+        result = self.invoke(
+            "submit", "--body", str(self.body), "--execution-mode", "fimserv-2026",
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(json.loads(self.requests[0].content)["execution_mode"], "fimserv-2026")
+
+    def test_updatedstreaming_mode_is_sent_through_sdk(self):
+        result = self.invoke(
+            "submit", "--body", str(self.body), "--execution-mode", "streaming-2026",
+            "--output-bucket", "bucket", "--output-prefix", "runs",
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(json.loads(self.requests[0].content)["execution_mode"], "streaming-2026")
 
     def test_invalid_input_is_not_silently_discarded_or_submitted(self):
         for payload in ([], {}, [{**PAYLOAD[0], "extra": "not allowed"}], [{"ScenarioID": "missing"}]):

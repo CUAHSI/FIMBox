@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     stream_min_credential_seconds: int = Field(default=3600, ge=60)
     stream_queue: str = ""
     stream_display_max_tiles: int = Field(default=16, ge=4, le=64)
+    examples_dir: Path = Path(__file__).resolve().parents[2] / "test-data"
     redis_url: str = "redis://localhost:6379/2"
     session_ttl_seconds: int = Field(default=86400, ge=1)
     hydroshare_oauth_authorize_url: str = "https://www.hydroshare.org/o/authorize/"

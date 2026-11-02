@@ -6,7 +6,6 @@ are produced. Nothing is staged on the local (memory-backed) filesystem except
 the small per-scenario manifests returned to the worker.
 """
 
-import json
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -105,7 +104,7 @@ def __gdal_environment(config: StreamConfig, options: dict) -> rasterio.Env:
 
 def run_streaming(
     scenarios: list[dict], output_dir: Path, stream_module, config: StreamConfig,
-    log: Callable[[str], None] = print,
+    log: Callable[[str], None] = print, rule=None,
 ) -> list[Path]:
     """
     Streams each scenario from the prepared dataset to S3 tiles.
@@ -116,6 +115,7 @@ def run_streaming(
         stream_module: The ``fimserve.streamFIM`` module.
         config: S3 locations and credentials.
         log: Progress output function.
+        rule: Optional ``streamFIM.FloodRule``; None uses the module default.
     Returns:
         The written manifest paths, one per scenario.
     """
@@ -123,7 +123,7 @@ def run_streaming(
     input_client = __client(config, config.input_unsigned)
     output_client = __client(config, False)
 
-    def read_json(key: str) -> dict | None:
+    def read_index(key: str) -> dict | None:
         location = f"s3://{config.input_bucket}/{join_key(config.input_prefix, key)}"
         try:
             response = input_client.get_object(
@@ -140,18 +140,15 @@ def run_streaming(
         if len(content) > MAX_INDEX_BYTES:
             raise RuntimeError(f"Prepared dataset index {location} is too large")
         try:
-            document = json.loads(content)
-        except (json.JSONDecodeError, UnicodeDecodeError):
+            return stream_module.read_index_parquet(key, content)
+        except stream_module.StreamingInputError as error:
             raise RuntimeError(
-                f"Prepared dataset index {location} is not valid JSON. "
+                f"Prepared dataset index {location}: {error}. "
                 "Check the uploaded object against the local prepared file. "
                 "For HydroShare AWS CLI uploads, set "
                 "AWS_REQUEST_CHECKSUM_CALCULATION=when_required and re-upload "
                 "the HUC indexes and COGs from the original files."
-            ) from None
-        if not isinstance(document, dict):
-            raise RuntimeError(f"Prepared dataset index {location} must be a JSON object")
-        return document
+            ) from error
 
     def raster_path(key: str) -> str:
         return f"s3://{config.input_bucket}/{join_key(config.input_prefix, key)}"
@@ -170,7 +167,8 @@ def run_streaming(
                 return key
 
             manifest = stream_module.run_scenario(
-                scenario, read_json, raster_path, write_tile, tile_size=config.tile_size, log=log,
+                scenario, read_index, raster_path, write_tile, tile_size=config.tile_size, log=log,
+                **({"rule": rule} if rule is not None else {}),
             )
             path = output_dir / f"{scenario['ScenarioID']}.manifest.json"
             path.write_bytes(stream_module.dumps_manifest(manifest))

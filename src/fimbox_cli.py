@@ -26,6 +26,9 @@ from fimbox_sdk.api.default import (
     get_job_status_jobs_job_id_get,
     health_health_get,
     list_jobs_jobs_get,
+    get_job_archive_jobs_job_id_archive_get,
+    export_job_history_jobs_history_export_post,
+    clear_job_history_jobs_history_clear_post,
     submit_hand_fim_jobs_hand_fim_post,
 )
 from fimbox_sdk.models import AuthenticationConfig, HandFimJobRequest, HandFimJobRequestExecutionMode, Scenario
@@ -38,6 +41,39 @@ class Settings:
     session_token: str | None
     timeout: float
     api_config: AuthenticationConfig | None = None
+    history_location: str | None = None
+
+
+def __history_preferences() -> tuple[Path, dict[str, str]]:
+    path = Path(click.get_app_dir("fimbox")) / "history.json"
+    try:
+        preferences = json.loads(path.read_text()) if path.exists() else {}
+    except (OSError, ValueError):
+        raise click.ClickException("Cannot read saved FIMBox history locations.") from None
+    if not isinstance(preferences, dict) or any(
+        not isinstance(key, str) or not isinstance(value, str) for key, value in preferences.items()
+    ):
+        raise click.ClickException("Saved FIMBox history locations are invalid.")
+    return path, preferences
+
+
+def __history_location(settings: Settings) -> str | None:
+    if settings.history_location is not None:
+        return settings.history_location
+    return __history_preferences()[1].get(settings.api_url)
+
+
+def __save_history(settings: Settings, location: str | None) -> None:
+    path, preferences = __history_preferences()
+    if location is None:
+        preferences.pop(settings.api_url, None)
+    else:
+        preferences[settings.api_url] = location
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(preferences, indent=2) + "\n")
+    except OSError:
+        raise click.ClickException("Cannot save the FIMBox history location.") from None
 
 
 def __credential_store() -> KeyringBackend:
@@ -137,8 +173,11 @@ def __call(
     client: Client | AuthenticatedClient
     browser_login = False
     saved = False
+    history = __history_location(settings) if authenticated else None
     if authenticated:
         authenticated = __authentication_enabled(settings)
+    if history and not authenticated:
+        raise click.ClickException("Persistent S3 history requires an authenticated API.")
     if authenticated:
         token = settings.session_token
         if not token:
@@ -158,6 +197,8 @@ def __call(
             base_url=settings.api_url, timeout=httpx.Timeout(settings.timeout),
             follow_redirects=False,
         )
+    if history:
+        client = client.with_headers({"X-FIMBox-History-Location": history})
     try:
         with client:
             response = operation(client=client, **kwargs)
@@ -264,8 +305,12 @@ def __interactive_scenarios() -> list[Scenario]:
 @click.option("--session-token", envvar="FIMBOX_SESSION_TOKEN",
               help="Prefer FIMBOX_SESSION_TOKEN or omit to use a saved session or browser login.")
 @click.option("--timeout", type=click.FloatRange(min=0, min_open=True), default=30.0, show_default=True)
+@click.option("--history-location", envvar="FIMBOX_HISTORY_LOCATION",
+              help="Persistent history at s3://bucket/prefix; overrides the saved location.")
 @click.pass_context
-def app(ctx: click.Context, api_url: str, session_token: str | None, timeout: float) -> None:
+def app(
+    ctx: click.Context, api_url: str, session_token: str | None, timeout: float, history_location: str | None,
+) -> None:
     """Submit and manage HAND-FIM jobs with the generated Python SDK."""
     origin = urlsplit(api_url)
     if (
@@ -274,6 +319,67 @@ def app(ctx: click.Context, api_url: str, session_token: str | None, timeout: fl
     ):
         raise click.ClickException("API URL must be HTTP(S), without credentials, query, or fragment.")
     ctx.obj = Settings(api_url.rstrip("/"), session_token, timeout)
+    ctx.obj.history_location = history_location
+
+
+@app.group()
+def history() -> None:
+    """Select persistent S3 job history (outputs retain their separate location)."""
+
+
+@history.command("use")
+@click.argument("location")
+@click.pass_context
+def history_use(ctx: click.Context, location: str) -> None:
+    """Check read access and remember an S3 location for this API."""
+    parts = urlsplit(location)
+    if parts.scheme != "s3" or not parts.netloc or not parts.path.strip("/") \
+            or parts.query or parts.fragment or parts.username or parts.password:
+        raise click.ClickException("History location must be s3://bucket/prefix without credentials.")
+    ctx.obj.history_location = location
+    __call(ctx, list_jobs_jobs_get.sync_detailed)
+    __save_history(ctx.obj, location)
+    click.echo(f"Future submissions retain history at {location}, scoped to the signed-in user.")
+
+
+@history.command("show")
+@click.pass_context
+def history_show(ctx: click.Context) -> None:
+    click.echo(__history_location(ctx.obj) or "Persistent history is disabled.")
+
+
+@history.command("export")
+@click.pass_context
+def history_export(ctx: click.Context) -> None:
+    """Copy completed Redis jobs and logs to the selected S3 location."""
+    if not __history_location(ctx.obj):
+        raise click.ClickException("Select a history location with 'fimbox history use s3://bucket/prefix'.")
+    __call(ctx, export_job_history_jobs_history_export_post.sync_detailed)
+
+
+@history.command("clear")
+@click.confirmation_option(prompt="Remove all finished jobs and logs from the job list and selected S3 history?")
+@click.pass_context
+def history_clear(ctx: click.Context) -> None:
+    """Remove finished jobs from Redis and the selected S3 location; keep active jobs and outputs."""
+    __call(ctx, clear_job_history_jobs_history_clear_post.sync_detailed)
+
+
+@history.command("disable")
+@click.pass_context
+def history_disable(ctx: click.Context) -> None:
+    __save_history(ctx.obj, None)
+    click.echo("Saved history location removed. Existing S3 records are unchanged.")
+
+
+@history.command("job")
+@click.argument("job_id", type=click.UUID)
+@click.pass_context
+def history_job(ctx: click.Context, job_id: UUID) -> None:
+    """Show an archived job's inputs, timestamps, and outcome."""
+    if not __history_location(ctx.obj):
+        raise click.ClickException("Select a history location with 'fimbox history use s3://bucket/prefix'.")
+    __call(ctx, get_job_archive_jobs_job_id_archive_get.sync_detailed, job_id=str(job_id))
 
 
 @app.command()
@@ -286,8 +392,10 @@ def app(ctx: click.Context, api_url: str, session_token: str | None, timeout: fl
               help="Max concurrent HAND-FIM processes; JSON submissions default to worker configuration, interactive default is 1.")
 @click.option("--overwrite/--no-overwrite", default=False, show_default=True,
               help="Replace existing S3 objects with matching output keys.")
-@click.option("--execution-mode", type=click.Choice(["legacy", "streaming"]), default="legacy", show_default=True,
-              help="streaming range-reads a prepared cloud-optimized hydrofabric and writes tiled COGs; requires --output-bucket.")
+@click.option("--execution-mode", type=click.Choice(["fimserv-2024", "fimserv-2026", "streaming-2024", "streaming-2026"]),
+              default="fimserv-2024", show_default=True,
+              help="streaming-* range-reads a prepared cloud-optimized hydrofabric and writes tiled COGs; requires "
+                   "--output-bucket. *-2026 modes use NOAA inundation-mapping v4.8.14.0.")
 @click.pass_context
 def submit(
     ctx: click.Context, body: Path | None, output_bucket: str | None,
@@ -297,7 +405,7 @@ def submit(
     if body is not None and output_bucket is None and output_prefix:
         raise click.ClickException("--output-prefix requires --output-bucket.")
     scenarios = __scenarios(__body(body)) if body is not None else __interactive_scenarios()
-    if body is None and max_procs is None and execution_mode == "legacy":
+    if body is None and max_procs is None and execution_mode not in ("streaming-2024", "streaming-2026"):
         max_procs = click.prompt(
             "Max concurrent processes", default=1, type=click.IntRange(min=1),
         )
@@ -320,9 +428,9 @@ def submit(
             output_prefix=output_prefix,
             max_procs=max_procs,
             overwrite=overwrite,
-            # Omitted for legacy so servers without streaming support still accept the request.
+            # The default mode is omitted from the request.
             execution_mode=(
-                HandFimJobRequestExecutionMode(execution_mode) if execution_mode != "legacy" else UNSET
+                HandFimJobRequestExecutionMode(execution_mode) if execution_mode != "fimserv-2024" else UNSET
             ),
         ),
     )

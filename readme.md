@@ -31,6 +31,22 @@ pixi run fimbox status --job-id JOB_ID
 The image build and initial watershed downloads need network access. Stop the
 stack without deleting local data with `docker compose down`.
 
+A browser page at [http://localhost:8000/ui](http://localhost:8000/ui) can also
+submit jobs. It lets you edit the parameters, starting from the `test-data`
+examples, and you can follow logs there. With HydroShare authentication enabled,
+the page also browses and downloads the input dataset and retained results, and
+maps the results. See the [API guide](docker/api/README.md#web-page).
+
+To retain job history beyond Redis expiry, authenticated users can select a
+writable S3 history location in the Results tab or with
+`fimbox history use s3://resource/RESOURCE_ID/data/contents/fimbox-history`.
+Future jobs archive their inputs, status/results, timestamps, and logs there;
+use **Export Redis history** or `fimbox history export` to copy completed jobs
+already in Redis. **Clear history** or `fimbox history clear` removes finished
+jobs from Redis and the selected history location without deleting outputs.
+The output location remains separate.
+See [persistent history](docker/api/README.md#persistent-s3-job-history).
+
 ### Use a different API domain
 
 The CLI defaults to `http://localhost:8000`. To connect to an existing API

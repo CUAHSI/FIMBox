@@ -3,11 +3,11 @@
 Converts one downloaded FIM HUC directory (``flood_<huc>/<huc>``) into the
 layout read by ``fimserve.streamFIM``::
 
-    dataset.json
-    hucs/<huc>/huc.json
+    dataset.parquet
+    hucs/<huc>/huc.parquet
     hucs/<huc>/branches/<branch>/rem.tif         lossless COG
     hucs/<huc>/branches/<branch>/catchments.tif  lossless COG
-    hucs/<huc>/reaches/<feature_id>.json         ratings and occupied blocks
+    hucs/<huc>/reaches/<feature_id>.parquet      ratings and occupied blocks
 
 If the HUC is not available locally, only the files read here are downloaded
 from NOAA's public HAND-FIM bucket first. Publish the output directory to the
@@ -15,7 +15,6 @@ configured HydroShare resource. It is not used during request execution.
 """
 
 import csv
-import json
 import math
 import re
 import shutil
@@ -24,6 +23,8 @@ from pathlib import Path
 
 import boto3
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 import rasterio
 from botocore import UNSIGNED
 from botocore.config import Config
@@ -31,7 +32,7 @@ from rasterio.shutil import copy as raster_copy
 from rasterio.windows import Window
 
 DATASET_FORMAT = "fimbox-hand-stream"
-DATASET_VERSION = 1
+DATASET_VERSION = 3
 LAKE_FREE = -999
 SOURCE_BUCKET = "ciroh-owp-hand-fim"
 SOURCE_REGION = "us-east-2"
@@ -140,9 +141,48 @@ def __occupied_blocks(path: Path, hydroids: np.ndarray, block_size: int) -> dict
     return blocks
 
 
-def __write_json(path: Path, value: dict) -> None:
+def __write_parquet(path: Path, rows: list[dict], schema: pa.Schema) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, separators=(",", ":"), sort_keys=True), encoding="utf-8")
+    pq.write_table(pa.Table.from_pylist(rows, schema=schema), path, compression="snappy")
+
+
+def __write_huc(path: Path, metadata: dict) -> None:
+    schema = pa.schema([
+        ("huc", pa.string()), ("crs", pa.string()), ("transform", pa.list_(pa.float64(), 6)),
+        ("width", pa.int64()), ("height", pa.int64()), ("block_size", pa.int32()),
+        ("branch", pa.string()), ("rem", pa.string()), ("catchments", pa.string()),
+        ("row_off", pa.int64()), ("col_off", pa.int64()),
+        ("branch_width", pa.int64()), ("branch_height", pa.int64()),
+    ])
+    grid = {key: metadata[key] for key in ("huc", "crs", "transform", "width", "height", "block_size")}
+    rows = [
+        {
+            **grid, "branch": branch, "rem": source["rem"], "catchments": source["catchments"],
+            "row_off": source["row_off"], "col_off": source["col_off"],
+            "branch_width": source["width"], "branch_height": source["height"],
+        }
+        for branch, source in metadata["branches"].items()
+    ]
+    __write_parquet(path, rows, schema)
+
+
+def __write_reach(path: Path, huc: str, feature_id: str, entries: list[dict]) -> None:
+    schema = pa.schema([
+        ("huc", pa.string()), ("feature_id", pa.string()), ("branch", pa.string()),
+        ("hydroid", pa.int64()), ("discharge_cms", pa.list_(pa.float64())),
+        ("stage", pa.list_(pa.float64())), ("row_order", pa.list_(pa.int64())),
+        ("blocks", pa.list_(pa.list_(pa.int32(), 2))),
+    ])
+    rows = [
+        {
+            "huc": huc, "feature_id": feature_id, "branch": entry["branch"],
+            "hydroid": rating["id"], "discharge_cms": rating["discharge_cms"],
+            "stage": rating["stage"], "row_order": rating.get("row_order"),
+            "blocks": entry["blocks"],
+        }
+        for entry in entries for rating in entry["hydroids"]
+    ]
+    __write_parquet(path, rows, schema)
 
 
 def __dataset_root(output_dir: Path, block_size: int, fim_version: str) -> None:
@@ -150,12 +190,21 @@ def __dataset_root(output_dir: Path, block_size: int, fim_version: str) -> None:
         "format": DATASET_FORMAT, "version": DATASET_VERSION,
         "block_size": block_size, "fim_version": fim_version,
     }
-    path = output_dir / "dataset.json"
+    path = output_dir / "dataset.parquet"
+    if (output_dir / "dataset.json").exists():
+        raise PreparationError("JSON metadata is no longer supported; prepare into a new output directory")
     if path.is_file():
-        if json.loads(path.read_text()) != expected:
+        try:
+            rows = pq.read_table(path).to_pylist()
+        except (pa.ArrowException, OSError) as error:
+            raise PreparationError(f"{path} is not valid Parquet") from error
+        if rows != [expected]:
             raise PreparationError(f"{path} describes a different dataset version or block size")
     else:
-        __write_json(path, expected)
+        __write_parquet(path, [expected], pa.schema([
+            ("format", pa.string()), ("version", pa.int32()),
+            ("block_size", pa.int32()), ("fim_version", pa.string()),
+        ]))
 
 
 def __source_prefix(huc: str, fim_version: str) -> str:
@@ -230,14 +279,14 @@ def prepare_huc(
     log: Callable[[str], None] = print,
 ) -> dict:
     """
-    Converts one HUC into lossless COGs and a per-reach block/rating index.
+    Converts one HUC into lossless COGs and per-reach Parquet block/rating tables.
 
     Arguments:
         huc: Eight-digit HUC identifier.
         huc_dir: Downloaded hydrofabric directory containing ``branches/``.
         output_dir: Dataset root to create or extend.
         block_size: COG block size; also the index granularity.
-        fim_version: Source hydrofabric version recorded in dataset.json.
+        fim_version: Source hydrofabric version recorded in dataset.parquet.
         branches_file: Optional HUC,branch CSV; defaults to branch_ids.csv.
         log: Progress output function.
     Returns:
@@ -306,9 +355,9 @@ def prepare_huc(
                 reaches.setdefault(feature_id, []).append(entry)
     metadata["branches"] = branches
     for feature_id, entries in reaches.items():
-        __write_json(huc_out / "reaches" / f"{feature_id}.json", {"feature_id": feature_id, "branches": entries})
+        __write_reach(huc_out / "reaches" / f"{feature_id}.parquet", huc, feature_id, entries)
     # Written last so a partially prepared HUC is never discoverable.
-    __write_json(huc_out / "huc.json", metadata)
+    __write_huc(huc_out / "huc.parquet", metadata)
     log(f"Prepared HUC {huc}: {len(branches)} branches, {len(reaches)} reaches")
     return metadata
 

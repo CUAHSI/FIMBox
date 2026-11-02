@@ -1,5 +1,6 @@
 import math
 import re
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -48,6 +49,11 @@ class OutputDestination(BaseModel):
         return value
 
 
+StreamingMode = Literal["streaming-2024", "streaming-2026"]
+ExecutionMode = Literal["fimserv-2024", "fimserv-2026", "streaming-2024", "streaming-2026"]
+STREAMING_MODES = ("streaming-2024", "streaming-2026")
+
+
 class HandFimJobOptions(OutputDestination):
     max_procs: int | None = Field(
         default=None, ge=1,
@@ -57,22 +63,28 @@ class HandFimJobOptions(OutputDestination):
         default=False,
         description="Replace existing S3 objects with matching output keys; by default, conflicting keys fail the job.",
     )
-    execution_mode: Literal["legacy", "streaming"] = Field(
-        default="legacy",
+    execution_mode: ExecutionMode = Field(
+        default="fimserv-2024",
         description=(
-            "legacy downloads whole HUCs and writes one COG per scenario. streaming range-reads a prepared "
+            "fimserv-2024 downloads whole HUCs and writes one COG per scenario. fimserv-2026 uses the same "
+            "workflow with NOAA v4.8.14.0 instead of the original pinned code. streaming-2024 range-reads a prepared "
             "cloud-optimized hydrofabric per reach and writes tiled COGs plus a manifest per scenario; "
-            "it requires output_bucket and a single process."
+            "it requires output_bucket and a single process. streaming-2026 is streaming with NOAA "
+            "v4.8.14.0's own flood kernel, matching fimserv-2026."
         ),
     )
 
+    @property
+    def streamed(self) -> bool:
+        return self.execution_mode in STREAMING_MODES
+
     @model_validator(mode="after")
     def validate_execution_mode(self) -> "HandFimJobOptions":
-        if self.execution_mode == "streaming":
+        if self.streamed:
             if self.output_bucket is None:
-                raise ValueError("streaming execution_mode requires output_bucket")
+                raise ValueError(f"{self.execution_mode} execution_mode requires output_bucket")
             if self.max_procs not in (None, 1):
-                raise ValueError("streaming execution_mode runs one process; omit max_procs or use 1")
+                raise ValueError(f"{self.execution_mode} execution_mode runs one process; omit max_procs or use 1")
         return self
 
 
@@ -120,6 +132,10 @@ class ParityJobRequest(OutputDestination):
         default=False,
         description="Replace existing S3 objects with matching output keys; by default, conflicting keys fail the job.",
     )
+    execution_mode: StreamingMode = Field(
+        default="streaming-2024",
+        description="Streaming mode to rerun; use streaming-2026 to compare against a fimserv-2026 run.",
+    )
 
     @model_validator(mode="after")
     def validate_parity_destination(self) -> "ParityJobRequest":
@@ -130,6 +146,55 @@ class ParityJobRequest(OutputDestination):
         if (self.legacy_bucket, self.legacy_prefix.strip("/")) == (self.output_bucket, self.output_prefix.strip("/")):
             raise ValueError("output_prefix must differ from the legacy run's prefix")
         return self
+
+
+class CompareJobRequest(OutputDestination):
+    """Diff two retained results' scenario flood masks without rerunning HAND-FIM."""
+
+    base_bucket: str = Field(min_length=1, max_length=255, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    base_prefix: str = Field(
+        max_length=900,
+        description="Output prefix of the base result containing scenarios.json and <ScenarioID>.cog "
+                    "or <ScenarioID>/manifest.json outputs.",
+    )
+    candidate_bucket: str = Field(min_length=1, max_length=255, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    candidate_prefix: str = Field(
+        max_length=900, description="Output prefix of the result compared against the base.",
+    )
+    overwrite: bool = Field(
+        default=False,
+        description="Replace existing parity objects under output_prefix; by default, conflicting keys fail the job.",
+    )
+
+    @model_validator(mode="after")
+    def validate_compare_locations(self) -> "CompareJobRequest":
+        if self.output_bucket is None:
+            raise ValueError("result comparison requires output_bucket")
+        if not self.output_prefix.strip("/"):
+            raise ValueError("result comparison requires output_prefix, e.g. <resource id>/data/contents/compare-1")
+        sources = []
+        for name in ("base", "candidate"):
+            prefix = getattr(self, f"{name}_prefix")
+            if any(part in {".", ".."} for part in prefix.split("/")):
+                raise ValueError(f"{name}_prefix must not contain '.' or '..' segments")
+            sources.append((getattr(self, f"{name}_bucket"), prefix.strip("/")))
+        if sources[0] == sources[1]:
+            raise ValueError("base and candidate must be different results")
+        if (self.output_bucket, self.output_prefix.strip("/")) in sources:
+            raise ValueError("output_prefix must differ from the compared results' prefixes")
+        return self
+
+
+class ComparedResults(BaseModel):
+    """The two retained results diffed by a comparison job."""
+
+    base_bucket: str
+    base_prefix: str
+    candidate_bucket: str
+    candidate_prefix: str
+    skipped_scenarios: list[str] = Field(
+        default_factory=list, description="ScenarioIDs present in only one of the two results.",
+    )
 
 
 class ParityDifference(BaseModel):
@@ -171,12 +236,16 @@ class ScenarioParity(BaseModel):
 class StoredHandFimResult(HandFimResult, OutputDestination):
     """Successful outputs and the destination persisted by the worker."""
 
-    execution_mode: Literal["legacy", "streaming"] = "legacy"
+    execution_mode: ExecutionMode = "fimserv-2024"
     files: list[OutputFile] = Field(default_factory=list)
     scenario_manifests: list[ScenarioManifest] = Field(default_factory=list)
     parity: list[ScenarioParity] = Field(
         default_factory=list,
-        description="Legacy/streaming comparisons; present only for parity jobs.",
+        description="Legacy/streaming comparisons; present only for parity and comparison jobs. "
+                    "For comparison jobs legacy_* fields describe the base and streaming_* the candidate.",
+    )
+    compared: ComparedResults | None = Field(
+        default=None, description="Compared result locations; present only for comparison jobs.",
     )
     local_output_dir: str | None = None
 
@@ -193,6 +262,12 @@ class JobList(BaseModel):
 class JobStatus(JobSummary):
     result: StoredHandFimResult | None = None
     error: str | None = None
+    started_at: datetime | None = Field(
+        default=None, description="UTC time the worker began executing the job.",
+    )
+    finished_at: datetime | None = Field(
+        default=None, description="UTC time the worker finished executing the job (success or failure).",
+    )
 
 
 class JobLogs(BaseModel):

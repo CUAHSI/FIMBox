@@ -24,6 +24,11 @@ API. The CLI does not start Docker; start the API stack separately.
 
 ## CLI quick reference
 
+Execution modes are `fimserv-2024` (default), `fimserv-2026`, `streaming-2024`,
+and `streaming-2026`. The old names are rejected rather than accepted as aliases.
+SDK enum members are `FIMSERV_2024`, `FIMSERV_2026`, `STREAMING_2024`, and
+`STREAMING_2026`.
+
 ```bash
 fimbox submit --body test-data/single_reach.json
 fimbox jobs
@@ -43,9 +48,20 @@ for a missing output bucket when HydroShare output is required. When a bucket
 is selected, they also prompt for the output prefix (default empty) and
 whether to overwrite existing output objects (default no). Explicit
 `--output-bucket`, `--output-prefix`, `--overwrite`/`--no-overwrite`, and
-`--max-procs` flags skip the corresponding prompts. `--execution-mode streaming`
+`--max-procs` flags skip the corresponding prompts. `--execution-mode streaming-2024`
 selects the opt-in streaming computation; it requires `--output-bucket`, and
 the field is omitted from legacy requests.
+
+`--execution-mode fimserv-2026` runs the normal FIMserv/COG workflow with
+NOAA v4.8.14.0 instead of the original pinned NOAA code. In SDK submissions,
+select `HandFimJobRequestExecutionMode.FIMSERV_2026`. Rebuild the worker
+first; use a separate output prefix and pass it to the parity endpoint as
+the reference run. See [updated legacy mode](../docker/handfim/README.md#updated-legacy-mode).
+
+`--execution-mode streaming-2026` (`HandFimJobRequestExecutionMode.STREAMING_2026`)
+streams with NOAA v4.8.14.0's own per-pixel rule, matching `fimserv-2026`; it
+has the same requirements as streaming. See
+[updated streaming mode](../docker/handfim/README.md#updated-streaming-mode).
 
 Submissions using `--body` remain noninteractive for job options; pass
 `--output-bucket` explicitly when the deployment requires it:
@@ -66,6 +82,51 @@ values remain available for noninteractive use and are not saved.
 `fimbox logout` revokes the session and removes the saved token.
 
 ## Use the SDK
+
+### Persistent job history
+
+Select an existing HydroShare S3 location to retain metadata for future jobs:
+
+```bash
+fimbox history use s3://resource/RESOURCE_ID/data/contents/fimbox-history
+fimbox history show
+fimbox submit --body test-data/single_reach.json --output-bucket resource --output-prefix NEW_OUTPUT_PREFIX
+fimbox jobs
+fimbox status --job-id JOB_ID
+fimbox history job JOB_ID
+fimbox history export
+fimbox history disable
+```
+
+The CLI remembers this non-secret location in its user configuration directory,
+scoped to the API URL. The server isolates archived jobs by authenticated
+HydroShare user, even if users select the same location. For another API/device,
+run `history use` again. Browser preferences are separate. Override the saved
+location with `--history-location s3://bucket/prefix` before the command or
+`FIMBOX_HISTORY_LOCATION`. Disabling removes only the saved CLI preference, not
+the archived S3 objects; an environment/command-line override still takes effect.
+
+Job status/results, submission inputs, timestamps, and terminal logs are retained
+without FIMBox's Redis TTL. This requires authentication and S3 read/write
+permission. `fimbox history export` explicitly copies completed Redis jobs and
+available logs to this location, skipping active jobs and existing archives.
+Redis is unchanged; expired jobs, original submission parameters, job types,
+and submission timestamps cannot be recovered. Exported records label these
+missing fields and record the export time. Failed partial exports can be retried.
+History does not retain local output files or override a bucket lifecycle policy.
+
+SDK callers can use the same location on submissions and reads:
+
+```python
+client = authenticated_client.with_headers({
+    "X-FIMBox-History-Location": "s3://resource/RESOURCE_ID/data/contents/fimbox-history",
+})
+```
+
+The regenerated SDK also includes `get_job_archive_jobs_job_id_archive_get` and
+`export_job_history_jobs_history_export_post`.
+
+### Generated operations
 
 Generate SDK operation modules from the committed OpenAPI document. The
 generated client provides typed models and synchronous and asynchronous

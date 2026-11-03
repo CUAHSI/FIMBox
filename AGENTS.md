@@ -95,3 +95,16 @@ making structural changes to the project, so future sessions can rely on it.
 - Update sdk/openapi.json and regenerate the SDK when the API schema changes.
 - Preserve explicit HTTP/transport errors and user ownership checks.
 - Use one worker per shared watershed cache.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs live in Jira CAM under Objective CAM-1059, labelled FIMBox.
+GitHub CUAHSI/FIMBox is for source code and pull requests only.
+See [issue-tracker guidance](docs/agents/issue-tracker.md).
+
+### Domain docs
+
+Use a single-context glossary and ADR layout; retain .ai/CONTEXT.md as the
+project's file-purpose reference. See [domain guidance](docs/agents/domain.md).

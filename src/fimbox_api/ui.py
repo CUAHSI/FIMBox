@@ -8,7 +8,6 @@ public API routes.
 import io
 import json
 import logging
-import re
 from datetime import UTC, date, datetime, time
 from pathlib import Path
 from typing import Annotated, Any
@@ -23,7 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
-from . import remote_json, retrospective
+from . import retrospective
 from .auth import UserSession, get_authenticated_session
 from .config import settings
 from .models import ExecutionMode
@@ -108,11 +107,6 @@ class ParquetPreview(BaseModel):
     truncated: bool
 
 
-class LoadedScenarios(BaseModel):
-    source: str
-    scenarios: list[Any]
-
-
 class RetrospectiveFlows(BaseModel):
     reach_id: int
     start: datetime
@@ -141,7 +135,7 @@ def ui_config() -> UiConfig:
         authentication_enabled=settings.authentication_enabled,
         require_hydroshare_output=settings.require_hydroshare_output,
         streaming_enabled=streaming,
-        execution_modes=["fimserv-2024", "fimserv-2026", *(["streaming-2024", "streaming-2026"] if streaming else [])],
+        execution_modes=[*(["streaming-2026", "streaming-2024"] if streaming else []), "fimserv-2026", "fimserv-2024"],
         input_dataset=InputDataset(
             bucket=settings.stream_input_bucket,
             prefix=settings.stream_input_prefix.strip("/"),
@@ -329,44 +323,6 @@ def preview_parquet(
         columns=[ParquetColumn(name=field.name, type=str(field.type)) for field in parquet.schema_arrow],
         rows=rows, truncated=metadata.num_rows > len(rows),
     )
-
-
-def __load_s3_json(url: str, session: UserSession) -> Any:
-    bucket, _, key = url.removeprefix("s3://").partition("/")
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,254}", bucket):
-        raise HTTPException(status_code=400, detail="Invalid S3 bucket in URL")
-    key = __clean_path(key, folder=False)
-    client = __s3_client(bucket, key, session)
-    try:
-        response = client.get_object(Bucket=bucket, Key=key, Range=f"bytes=0-{remote_json.MAX_BYTES}")
-        content = response["Body"].read(remote_json.MAX_BYTES + 1)
-    except ClientError as error:
-        raise __s3_error(error) from None
-    if len(content) > remote_json.MAX_BYTES:
-        raise HTTPException(status_code=413, detail="Scenario JSON is larger than 2 MiB")
-    try:
-        return json.loads(content)
-    except (ValueError, UnicodeDecodeError):
-        raise HTTPException(status_code=422, detail="Object is not valid JSON") from None
-
-
-@router.get("/scenarios/load", response_model=LoadedScenarios)
-def load_scenarios(
-    url: Annotated[str, Query(min_length=1, max_length=2048)], session: AuthenticatedSession,
-) -> LoadedScenarios:
-    """Load a scenario JSON array from s3://bucket/key (user's credentials) or a public https URL."""
-    if url.startswith("s3://"):
-        value = __load_s3_json(url, session)
-    else:
-        try:
-            value = remote_json.fetch_json(url)
-        except remote_json.RemoteJsonError as error:
-            raise HTTPException(status_code=400, detail=str(error)) from None
-        except httpx.HTTPError as error:
-            raise HTTPException(status_code=502, detail=f"Could not fetch URL ({type(error).__name__})") from None
-    if not isinstance(value, list):
-        raise HTTPException(status_code=422, detail="Scenario JSON must be an array of scenarios")
-    return LoadedScenarios(source=url, scenarios=value)
 
 
 @router.get("/streamflow/retrospective", response_model=RetrospectiveFlows)

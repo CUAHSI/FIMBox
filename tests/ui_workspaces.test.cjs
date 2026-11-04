@@ -139,6 +139,7 @@ test("forget is browser-only and account lists remain isolated across sign-out",
   ui.run(`
     $ = () => ({});
     renderScenarioEditor = () => {};
+    renderReachSet = () => {};
     showSignedOut();
   `);
   assert.deepEqual(ui.json("state.workspaces"), []);

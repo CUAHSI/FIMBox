@@ -1,5 +1,6 @@
 """Opt-in S3 job archives, independent of Redis result and ownership expiry."""
 
+import logging
 from datetime import datetime, timezone
 from hashlib import sha256
 from typing import Annotated, Any, Literal
@@ -15,11 +16,13 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 from .auth import UserSession, get_redis_client
 from .config import settings
 from .job_logs import JOB_LOG_PREFIX
+from .job_resources import PeakMemorySampler
 from .job_timing import mark_job_time
 from .models import JobStatus, StoredHandFimResult
 from .storage import output_file_key, output_s3_client, s3_client
 
 MAX_RECORD_BYTES = 32 * 1024 * 1024
+logger = logging.getLogger(__name__)
 
 
 class HistoryLocation(BaseModel):
@@ -256,10 +259,12 @@ class HistoryTask(Task):
             if job_id:
                 mark_job_time(job_id, "started_at")
             try:
-                return super().__call__(*args, **kwargs)
+                with PeakMemorySampler() as memory:
+                    result = super().__call__(*args, **kwargs)
             finally:
                 if job_id:
                     mark_job_time(job_id, "finished_at")
+            return self.__add_memory_usage(result, memory.peak_bytes)
         location = HistoryLocation.model_validate(archive["location"])
         record = ArchivedJob.model_validate(archive["record"])
         client = s3_client(UUID(record.job_id))
@@ -268,7 +273,8 @@ class HistoryTask(Task):
         record.updated_at = datetime.now(timezone.utc)
         persist(client, location, record)
         try:
-            result = super().__call__(*args, **kwargs)
+            with PeakMemorySampler() as memory:
+                result = super().__call__(*args, **kwargs)
         except Exception as error:
             # Preserve failed jobs as well as successes; never swallow execution/archive errors.
             record.status = "failure"
@@ -276,11 +282,20 @@ class HistoryTask(Task):
             record.finished_at = mark_job_time(record.job_id, "finished_at")
             self.__finish(client, location, record)
             raise
+        result = self.__add_memory_usage(result, memory.peak_bytes)
         record.status = "success"
         record.result = StoredHandFimResult.model_validate(result)
         record.finished_at = mark_job_time(record.job_id, "finished_at")
         self.__finish(client, location, record)
         return result
+
+    @staticmethod
+    def __add_memory_usage(result: Any, peak_bytes: int | None) -> dict[str, Any]:
+        if peak_bytes is None:
+            logger.warning("Peak worker memory could not be measured for this job")
+        if not isinstance(result, dict):
+            raise TypeError("Worker task result must be a mapping")
+        return {**result, "peak_memory_bytes": peak_bytes}
 
     @staticmethod
     def __finish(client: Any, location: HistoryLocation, record: ArchivedJob) -> None:

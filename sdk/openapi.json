@@ -2081,6 +2081,18 @@
               }
             ],
             "title": "Local Output Dir"
+          },
+          "peak_memory_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Peak Memory Bytes",
+            "description": "Sampled peak total worker-container memory while this job ran, in bytes. Concurrent jobs may contribute, short-lived peaks may be missed, and the value is null when cgroup memory metrics are unavailable."
           }
         },
         "additionalProperties": false,

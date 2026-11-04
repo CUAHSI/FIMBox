@@ -1334,6 +1334,12 @@ function formatDuration(ms) {
   return minutes ? `${minutes}m ${seconds}s` : `${seconds}s`;
 }
 
+function formatMemory(bytes) {
+  if (bytes < 1024 ** 2) return `${Math.round(bytes / 1024)} KiB`;
+  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MiB`;
+  return `${(bytes / 1024 ** 3).toFixed(2)} GiB`;
+}
+
 function formatTime(value) {
   return value ? new Date(value).toLocaleString(undefined, { timeZoneName: "short" }) : null;
 }
@@ -1727,6 +1733,8 @@ async function openJob(jobId) {
     ["Candidate", compared ? locationLink(compared.candidate_bucket, compared.candidate_prefix) : null],
     ["Skipped scenarios", compared && compared.skipped_scenarios.join(", ")],
     ["Execution mode", result && !compared ? result.execution_mode : null],
+    ["Peak worker-container memory", result && result.peak_memory_bytes != null
+      ? `${formatMemory(result.peak_memory_bytes)} (sampled)` : null],
     ["Scenarios", result && (result.outputs || []).map((output) => output.ScenarioID).join(", ")],
     ["Output location", location],
     ["Output files", result && (result.files || []).length],

@@ -130,32 +130,18 @@ class ApiTests(unittest.TestCase):
             self.create_job_credentials.assert_called_once()
             enqueue.assert_called_once()
 
-    def test_anonymous_local_job_workflow_and_s3_rejection(self):
+    def test_anonymous_s3_submission_is_rejected(self):
         main.app.dependency_overrides.clear()
         with patch.object(main.settings, "hydroshare_client_id", ""), patch.object(
             main.settings, "hydroshare_client_secret", SecretStr(""),
         ), patch.object(tasks.hand_fim, "apply_async") as enqueue:
-            response = self.client.post("/jobs/hand-fim", json={"scenarios": PAYLOAD})
-            self.assertEqual(response.status_code, 202, response.text)
-            job_id = response.json()["job_id"]
-            self.track_user_job.assert_called_with(auth.LOCAL_USER_ID, job_id)
-            self.assertEqual(enqueue.call_args.kwargs["args"], [job_id, PAYLOAD, None, "", None, False])
-            self.assertEqual(self.client.post(HAND_FIM_ROUTE, json=SUBMISSION).status_code, 409)
-            self.assertEqual(enqueue.call_count, 1)
+            response = self.client.post(HAND_FIM_ROUTE, json={
+                "scenarios": PAYLOAD, "output_prefix": "runs/test",
+            })
+            self.assertEqual(response.status_code, 409, response.text)
+            enqueue.assert_not_called()
+            self.track_user_job.assert_not_called()
             self.create_job_credentials.assert_not_called()
-            with patch.object(main.celery_app, "AsyncResult", return_value=Mock(state="PENDING")), patch.object(
-                main, "list_user_jobs", return_value=[job_id],
-            ) as jobs, patch.object(main.celery_app.control, "revoke") as revoke:
-                self.assertEqual(self.client.get("/jobs").json(), {
-                    "jobs": [{"job_id": job_id, "status": "queued"}],
-                })
-                jobs.assert_called_with(auth.LOCAL_USER_ID)
-                self.assertEqual(self.client.get(f"/jobs/{job_id}").json()["status"], "queued")
-                self.assertEqual(self.client.delete(f"/jobs/{job_id}").status_code, 204)
-                revoke.assert_called_once_with(job_id, terminate=False)
-                self.user_has_job.assert_called_with(auth.LOCAL_USER_ID, job_id)
-            self.user_has_job.return_value = False
-            self.assertEqual(self.client.get(f"/jobs/{job_id}").status_code, 403)
         self.assertEqual(self.client.get("/jobs").status_code, 401)
 
     def test_invalid_payloads_never_enqueue(self):
@@ -319,23 +305,26 @@ class ApiTests(unittest.TestCase):
     def test_invalid_destination_is_rejected(self):
         with patch.object(tasks.hand_fim, "apply_async") as enqueue:
             for body in (
-                {"scenarios": PAYLOAD, "output_prefix": "orphan"},
-                {"scenarios": PAYLOAD, "output_bucket": ""},
+                {"scenarios": PAYLOAD, "output_bucket": None, "output_prefix": "orphan"},
+                {"scenarios": PAYLOAD, "output_bucket": "", "output_prefix": "runs/test"},
+                {"scenarios": PAYLOAD},
             ):
                 self.assertEqual(self.client.post(HAND_FIM_ROUTE, json=body).status_code, 422)
             enqueue.assert_not_called()
 
-    def test_local_submission_skips_s3_credentials(self):
+    def test_default_resource_bucket_creates_s3_credentials(self):
         with patch.object(tasks.hand_fim, "apply_async") as enqueue:
-            response = self.client.post("/jobs/hand-fim", json={"scenarios": PAYLOAD})
+            response = self.client.post(HAND_FIM_ROUTE, json={
+                "scenarios": PAYLOAD, "output_prefix": "runs/test",
+            })
             self.assertEqual(response.status_code, 202, response.text)
-            self.assertEqual(enqueue.call_args.kwargs["args"][2:], [None, "", None, False])
-        self.create_job_credentials.assert_not_called()
+            self.assertEqual(enqueue.call_args.kwargs["args"][2:], ["resource", "runs/test", None, False])
+        self.create_job_credentials.assert_called_once()
 
     def test_max_procs_is_validated_and_queued(self):
         with patch.object(tasks.hand_fim, "apply_async") as enqueue:
             response = self.client.post(
-                HAND_FIM_ROUTE, json={"scenarios": PAYLOAD, "max_procs": 3}
+                HAND_FIM_ROUTE, json={**SUBMISSION, "max_procs": 3}
             )
             self.assertEqual(response.status_code, 202, response.text)
             self.assertEqual(enqueue.call_args.kwargs["args"][-2], 3)
@@ -343,7 +332,7 @@ class ApiTests(unittest.TestCase):
             for value in (0, -1, "invalid", 1.5):
                 self.assertEqual(
                     self.client.post(
-                        HAND_FIM_ROUTE, json={"scenarios": PAYLOAD, "max_procs": value}
+                        HAND_FIM_ROUTE, json={**SUBMISSION, "max_procs": value}
                     ).status_code,
                     422,
                 )

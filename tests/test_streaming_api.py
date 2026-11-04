@@ -241,7 +241,7 @@ class StreamingWorkerTests(unittest.TestCase):
                     "# HAND-FIM scenario outputs", "scenarios.json", "m^3/s",
                     f"`{self.job_id}`", f"Execution mode: `{mode}`", "Worker run started (UTC)",
                     "Scenario count: `2`", "Reach entries: `2`",
-                    f"Effective maximum processes: `{1 if mode == 'streaming' else 3}`",
+                    f"Effective maximum processes: `{1 if mode == 'streaming-2024' else 3}`",
                     f"--execution-mode {mode}", "NEW_OUTPUT_PREFIX", "output_map(api_client, paths)",
                 ):
                     self.assertIn(text, readme)

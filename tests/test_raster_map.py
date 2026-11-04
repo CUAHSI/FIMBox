@@ -435,13 +435,15 @@ class RasterCredentialsTests(unittest.TestCase):
 
 class NotebookMapTests(unittest.TestCase):
     def test_notebook_map_can_reopen_paths_without_job_or_result_variables(self):
-        from fimbox_sdk.models import Scenario
+        from fimbox_sdk.models import HandFimJobRequestExecutionMode, Scenario
 
         notebook = json.loads((Path(__file__).resolve().parents[1] / "notebooks/cloud_hand_fim.ipynb").read_text())
         source = next("".join(cell["source"]) for cell in notebook["cells"] if cell["id"] == "map")
         namespace = {
             "api_client": Mock(), "OUTPUT_BUCKET": "resource", "OUTPUT_PREFIX": "abc/data/contents/flood/",
             "scenarios": [Scenario.from_dict({"ScenarioID": "s1", "Reaches": []})], "display": Mock(),
+            "EXECUTION_MODE": HandFimJobRequestExecutionMode.STREAMING_2026,
+            "HandFimJobRequestExecutionMode": HandFimJobRequestExecutionMode,
         }
         with patch("importlib.reload", return_value=fimbox_map), patch.object(
             fimbox_map, "output_map",

@@ -12,6 +12,9 @@ sdk-generate = "uv tool run --from openapi-python-client==0.28.0 python sdk/gene
 [dependencies]
 python = "==3.14"
 pydantic = ">=2.0,<3"
+pyarrow = "==22.0.0"
+rasterio = ">=1.4,<2"
+attrs = ">=25.3,<26"
 
 [pypi-dependencies]
 fimbox = { path = ".", editable = true }
@@ -24,5 +27,6 @@ boto3 = "==1.35.99"
 httpx = "==0.28.1"
 python-multipart = "==0.0.20"
 rio-tiler = "==7.9.2"
-pyarrow = "==22.0.0"
 zstandard = "==0.25.0"
+ipython = ">=9,<10"
+ipyleaflet = ">=0.20,<0.21"

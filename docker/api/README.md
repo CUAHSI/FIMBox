@@ -51,16 +51,18 @@ Submit a scenario JSON array through the CLI:
 pixi run fimbox submit --body test-data/single_reach.json
 ```
 
-Or use `POST /jobs/hand-fim` with an object containing `scenarios` and optional
-`output_bucket`, `output_prefix`, `overwrite`, `max_procs`, and
+Or use `POST /jobs/hand-fim` with an object containing `scenarios`, a required
+`output_prefix` (an empty string selects the bucket root), and optional
+`output_bucket` (defaults to `resource`), `overwrite`, `max_procs`, and
 `execution_mode` fields.
 Requests require unique scenario IDs, eight-digit HUCs, and finite,
 nonnegative streamflows. The API validates requests before enqueueing.
 
-Without `output_bucket`, the worker writes to the Compose output mount under
+S3 submissions require authentication. With an explicitly null `output_bucket`
+and an empty `output_prefix`, the worker writes to the Compose output mount under
 `scenarios/<job_id>/`, then removes the files before job completion. Results
 contain metadata, not downloadable artifacts. To retain output, provide a
-HydroShare S3 bucket and optional prefix; the bucket/resource must already
+HydroShare S3 bucket and a prefix; the bucket/resource must already
 exist and the submitting user must have write access. Uploaded files are
 reported in the job's file manifest. Existing keys cause failure unless
 `overwrite` is enabled.
@@ -431,9 +433,15 @@ a separately running container worker are still required.
 Host tests mock the expensive scientific computation:
 
 ```bash
+pixi install
 pixi run sdk-generate
-PYTHONPATH=src python -m unittest discover -s tests -v
+PYTHONPATH=src pixi run python -m unittest discover -s tests -v
 ```
+
+The Pixi environment includes IPython and ipyleaflet for notebook/map tests.
+Rasterio and PyArrow come from conda-forge so GDAL and Arrow share a compatible
+native library stack instead of mixing a Homebrew-linked Rasterio build with
+PyArrow wheel libraries.
 
 Container scenario regressions require the worker image:
 

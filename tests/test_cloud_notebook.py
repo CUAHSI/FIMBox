@@ -88,7 +88,7 @@ class CloudNotebookTests(unittest.TestCase):
 
     def test_sdk_authentication_submission_and_monitoring(self):
         from fimbox_sdk import AuthenticatedClient, Client
-        from fimbox_sdk.models import StoredHandFimResult
+        from fimbox_sdk.models import HandFimJobRequestExecutionMode, StoredHandFimResult
 
         job_id = "4ec24445-d50f-434b-bce6-c1364762bfac"
         requests = []
@@ -123,14 +123,18 @@ class CloudNotebookTests(unittest.TestCase):
                 self.assertEqual(body["scenarios"][0]["Reaches"][0]["HUC"], "03020201")
                 self.assertEqual(body["max_procs"], 1)
                 return httpx.Response(202, json={"job_id": job_id, "status": "queued", "status_url": f"/jobs/{job_id}"})
-            if path == f"/jobs/{job_id}":
-                state = next(states)
+            if path == f"/jobs/{job_id}/logs":
                 return httpx.Response(200, json={
-                    "job_id": job_id, "status": state,
+                    "job_id": job_id, "status": next(states), "logs": "", "next_offset": 0,
+                })
+            if path == f"/jobs/{job_id}":
+                return httpx.Response(200, json={
+                    "job_id": job_id, "status": "success",
                     "result": {
+                        "output_bucket": "bucket", "output_prefix": "demo",
                         "outputs": [],
                         "files": [{"path": f"{job_id}-0.cog", "size_bytes": 123}],
-                    } if state == "success" else None,
+                    },
                 })
             return httpx.Response(401, json={"detail": "sensitive-server-detail"})
 
@@ -138,6 +142,7 @@ class CloudNotebookTests(unittest.TestCase):
             "API_URL": "https://api.example.org", "os": os,
             "Path": Path, "RESUME_JOB_ID": "", "OUTPUT_BUCKET": "bucket",
             "OUTPUT_PREFIX": "demo", "MAX_PROCS": 1, "WAIT_SECONDS": 60, "POLL_SECONDS": 0,
+            "OVERWRITE": False, "EXECUTION_MODE": HandFimJobRequestExecutionMode.FIMSERV_2024,
         }
         imports = self.sources["dependencies"].split("from fimbox_sdk import", 1)[1]
         exec("from fimbox_sdk import" + imports, namespace)
@@ -166,7 +171,7 @@ class CloudNotebookTests(unittest.TestCase):
             self.assertNotIn(job_id, output.getvalue())
             self.assertIn("0.cog", output.getvalue())
             operation = Mock()
-            operation.sync_detailed.return_value = Mock(status_code=401)
+            operation.sync_detailed.return_value = Mock(status_code=401, content=b"Unauthorized")
             with self.assertRaisesRegex(RuntimeError, "HTTP 401"):
                 namespace["call_api"](operation, client=namespace["api_client"])
             self.assertTrue(all("notebook-test-token" not in str(request.url) for request in requests))

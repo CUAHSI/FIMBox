@@ -42,6 +42,10 @@ Container regression tests exercise cache reuse across fresh processes.
 
 ## User documentation
 
+The Pixi host environment uses conda-forge Rasterio/PyArrow together to avoid
+duplicate Arrow filesystem registration from Homebrew GDAL and PyArrow wheels.
+IPython/ipyleaflet are included for host notebook and map regression tests.
+
 - **`readme.md`** — Concise local quickstart and links to the focused guides.
 - **`docker/api/README.md`** — Compose API/worker, authentication, output, and
   host/container testing.

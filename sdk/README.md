@@ -33,6 +33,7 @@ SDK enum members are `FIMSERV_2024`, `FIMSERV_2026`, `STREAMING_2024`, and
 fimbox submit --body test-data/single_reach.json
 fimbox jobs
 fimbox status --job-id JOB_ID
+fimbox rename --job-id JOB_ID --display-name "Spring flood v2"
 fimbox cancel --job-id JOB_ID
 fimbox session
 fimbox logout
@@ -42,8 +43,13 @@ fimbox health
 Omitting `--body` prompts for manual reach inputs or a scenario JSON file.
 `--max-procs N` sets positive per-job concurrency; without it, JSON submissions
 use the worker's `HAND_FIM_MAX_PROCS` setting. Output location is derived by
-the server from the selected workspace. `--execution-mode streaming-2024`
+the server from the selected workspace. Use `--display-name "Spring flood"` to
+set the optional human-readable label; duplicate names are allowed and the
+immutable job ID remains available in the job details. `--execution-mode streaming-2024`
 selects the opt-in streaming computation.
+Rename an existing job with `fimbox rename`; any authenticated workspace user
+with write access can rename it. `fimbox rename` changes a name; leaving the
+browser's name field empty clears the label.
 
 `--execution-mode fimserv-2026` runs the normal FIMserv/COG workflow with
 NOAA v4.8.14.0 instead of the original pinned NOAA code. In SDK submissions,

@@ -208,6 +208,68 @@ class HistoryTests(unittest.TestCase):
         self.assertTrue(workspaces.job_is_bound(self.workspace, response.json()["job_id"]))
         tasks.hand_fim.__header__(*call["args"], **call["kwargs"])
 
+    def test_duplicate_display_names_are_allowed_and_job_ids_remain_distinct(self):
+        submitted_ids = []
+        with patch.object(tasks.hand_fim, "apply_async"):
+            for name in ("  Spring flood  ", "Spring flood"):
+                response = self.api.post("/jobs/hand-fim", headers=self.headers, json={
+                    "scenarios": SCENARIOS, "display_name": name,
+                })
+                self.assertEqual(response.status_code, 202, response.text)
+                submitted_ids.append(response.json()["job_id"])
+        self.assertEqual(len(set(submitted_ids)), 2)
+        with patch.object(main.celery_app, "AsyncResult", return_value=Mock(state="STARTED")):
+            list_response = self.api.get("/jobs", headers=self.headers)
+            self.assertEqual(list_response.status_code, 200, list_response.text)
+            listed = list_response.json()["jobs"]
+            self.assertEqual(
+                {(job["job_id"], job["display_name"]) for job in listed},
+                {(job_id, "Spring flood") for job_id in submitted_ids},
+            )
+            for job_id in submitted_ids:
+                response = self.api.get(f"/jobs/{job_id}", headers=self.headers)
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()["display_name"], "Spring flood")
+
+    def test_workspace_writer_can_rename_job_without_worker_snapshot_reverting_it(self):
+        archive = history.prepare(
+            self.job_id, self.session, self.workspace, "hand-fim",
+            {"scenarios": SCENARIOS, "display_name": "Original"},
+        )
+        self.as_bob()
+        response = self.api.patch(
+            f"/jobs/{self.job_id}", headers=self.headers,
+            json={"display_name": "  Renamed by Bob  "},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["display_name"], "Renamed by Bob")
+
+        stale_worker_record = history.ArchivedJob.model_validate(archive["history_archive"]["record"])
+        stale_worker_record.status = "started"
+        history.persist(self.storage("alice"), self.workspace, stale_worker_record)
+        record = history.read(self.session, self.workspace, self.job_id)
+        self.assertEqual(record.display_name, "Renamed by Bob")
+        self.assertEqual(record.request["display_name"], "Original")
+
+        cleared = self.api.patch(
+            f"/jobs/{self.job_id}", headers=self.headers, json={"display_name": None},
+        )
+        self.assertEqual(cleared.status_code, 200, cleared.text)
+        self.assertIsNone(history.read(self.session, self.workspace, self.job_id).display_name)
+
+    def test_read_only_workspace_user_cannot_rename_job(self):
+        history.prepare(
+            self.job_id, self.session, self.workspace, "hand-fim",
+            {"scenarios": SCENARIOS, "display_name": "Original"},
+        )
+        self.as_bob()
+        self.write_users.remove("bob")
+        response = self.api.patch(
+            f"/jobs/{self.job_id}", headers=self.headers, json={"display_name": "Unauthorized"},
+        )
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(history.read(self.session, self.workspace, self.job_id).display_name, "Original")
+
     def test_destinations_and_comparison_inputs_cannot_escape_workspace(self):
         with patch.object(tasks.hand_fim, "apply_async") as enqueue:
             response = self.api.post("/jobs/hand-fim", headers=self.headers, json={
@@ -229,6 +291,7 @@ class HistoryTests(unittest.TestCase):
             ("/jobs/compare", tasks.hand_fim_compare, {
                 "base_bucket": "resource", "base_prefix": self.workspace.prefix + "/jobs/base/outputs",
                 "candidate_bucket": "resource", "candidate_prefix": self.workspace.prefix + "/jobs/candidate/outputs",
+                "display_name": "Spring comparison",
             }),
             ("/jobs/parity", tasks.hand_fim_parity, {
                 "legacy_bucket": "resource", "legacy_prefix": self.workspace.prefix + "/jobs/base/outputs",
@@ -243,6 +306,7 @@ class HistoryTests(unittest.TestCase):
                     record = history.read(self.session, self.workspace, job_id)
                     self.assertEqual(record.workspace_id, self.workspace.workspace_id)
                     self.assertEqual(record.user_id, "alice")
+                    self.assertEqual(record.display_name, body.get("display_name"))
                     self.assertEqual(record.request["output_prefix"], f"{self.workspace.prefix}/jobs/{job_id}/outputs")
                     self.assertIn("history_archive", enqueue.call_args.kwargs["kwargs"])
                     task.__header__(*enqueue.call_args.kwargs["args"], **enqueue.call_args.kwargs["kwargs"])

@@ -1296,6 +1296,8 @@ async function submitJob(event) {
     scenarios: state.scenarios,
     execution_mode: form.elements.execution_mode.value,
   };
+  const displayName = form.elements.display_name.value.trim();
+  if (displayName) body.display_name = displayName;
   if (maxProcs && !form.elements.max_procs.disabled) body.max_procs = Number(maxProcs);
   const button = $("button[type=submit]", form);
   const workspaceVersion = state.workspaceVersion;
@@ -1329,7 +1331,7 @@ async function loadJobs() {
     list.replaceChildren(...jobs.slice().reverse().map((job) => {
       const stateLabel = job.execution_state_known === false ? `${job.status} · stale` : job.status;
       const item = el("li", { onclick: () => openJob(job.job_id) },
-        el("span", { text: job.job_id.slice(0, 8) + "…", title: job.job_id }),
+        el("span", { text: job.display_name || job.job_id.slice(0, 8) + "…", title: job.display_name || job.job_id }),
         el("span", { text: job.user_id || "Unknown submitter" }),
         el("span", { className: `status ${job.execution_state_known === false ? "stale" : job.status}`, text: stateLabel }));
       item.dataset.job = job.job_id;
@@ -1737,6 +1739,38 @@ function startLogPolling(view, jobId, status) {
   poll();
 }
 
+function jobNameEditor(view, jobId, job, workspaceVersion, viewId) {
+  if (!canWriteWorkspace()) return null;
+  const form = el("form", { className: "row" });
+  const input = el("input", {
+    type: "text", maxLength: 120, value: job.display_name || "",
+    placeholder: "Leave empty to clear",
+  });
+  const button = el("button", { type: "submit", text: "Save name" });
+  form.append(el("label", { text: "Job display name" }, input), button);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    button.disabled = true;
+    try {
+      await api(`/jobs/${jobId}`, {
+        method: "PATCH",
+        json: { display_name: input.value.trim() || null },
+      });
+      if (workspaceVersion !== state.workspaceVersion || viewId !== state.viewId) return;
+      showMessage("Job name updated.");
+      await loadJobs();
+      openJob(jobId);
+    } catch (error) {
+      if (!error.stale && workspaceVersion === state.workspaceVersion && viewId === state.viewId) {
+        showMessage(`Could not update job name: ${error.message}`, true);
+      }
+    } finally {
+      if (workspaceVersion === state.workspaceVersion && viewId === state.viewId) button.disabled = false;
+    }
+  });
+  return form;
+}
+
 async function openJob(jobId) {
   if (!state.workspace) { showMessage("Open a workspace before viewing jobs.", true); return; }
   state.currentJob = jobId;
@@ -1754,10 +1788,14 @@ async function openJob(jobId) {
     return;
   }
   const result = job.result;
+  $(".result-title", view).textContent = job.display_name
+    ? `${job.display_name} (${jobId})` : `Job ${jobId}`;
   const location = result && result.output_bucket
     ? `s3://${result.output_bucket}/${joinKey(result.output_prefix)}` : null;
   const compared = result && result.compared;
   addSummary(view, [
+    ["Job ID", jobId],
+    ["Display name", job.display_name],
     ["Status", el("span", { className: `status ${job.status}`, text: job.status })],
     ["Error", job.error],
     ["Started", formatTime(job.started_at)],
@@ -1777,6 +1815,8 @@ async function openJob(jobId) {
     ["Output location", location],
     ["Output files", result && (result.files || []).length],
   ]);
+  const nameEditor = jobNameEditor(view, jobId, job, workspaceVersion, viewId);
+  if (nameEditor) $("dl.summary", view).after(nameEditor);
   if (job.status === "queued" && job.execution_state_known !== false && job.user_id === state.userId) {
     $("dl.summary", view).after(el("div", { className: "row" }, el("button", { type: "button", text: "Cancel job", onclick: async () => {
       try {
@@ -1877,6 +1917,8 @@ async function submitCompare(event) {
     candidate_bucket: state.workspace.bucket,
     candidate_prefix: joinKey(state.workspace.prefix, candidateRelative),
   };
+  const displayName = value("display_name");
+  if (displayName) body.display_name = displayName;
   const button = $("button[type=submit]", form);
   const workspaceVersion = state.workspaceVersion;
   button.disabled = true;

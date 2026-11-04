@@ -250,6 +250,23 @@ class SdkCliTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(json.loads(self.requests[0].content)["execution_mode"], "fimserv-2026")
 
+    def test_display_name_is_sent_through_sdk(self):
+        result = self.invoke(
+            "submit", "--body", str(self.body), "--display-name", "Spring flood",
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(json.loads(self.requests[0].content)["display_name"], "Spring flood")
+
+    def test_rename_sends_patch_for_the_immutable_job_id(self):
+        result = self.invoke(
+            "rename", "--job-id", self.job_id, "--display-name", "Spring flood v2",
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        request = self.requests[0]
+        self.assertEqual(request.method, "PATCH")
+        self.assertEqual(request.url.path, f"/jobs/{self.job_id}")
+        self.assertEqual(json.loads(request.content), {"display_name": "Spring flood v2"})
+
     def test_updatedstreaming_mode_is_sent_through_sdk(self):
         result = self.invoke(
             "submit", "--body", str(self.body), "--execution-mode", "streaming-2026",

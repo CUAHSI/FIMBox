@@ -74,10 +74,12 @@ class UiTests(unittest.TestCase):
         self.assertIn('id="workspace-create"', page)
         self.assertIn('id="workspace-open"', page)
         self.assertIn("Workspace jobs", page)
+        self.assertIn('name="display_name"', page)
+        self.assertIn("duplicate names are allowed", page)
         self.assertNotIn("Your jobs", page)
-        self.assertIn('href="/ui/static/app.css?v=cam-1524-recent-workspaces"', page)
-        self.assertIn('src="/ui/static/app.js?v=cam-1524-recent-workspaces"', page)
-        css = self.client.get("/ui/static/app.css?v=cam-1524-recent-workspaces").text
+        self.assertIn('href="/ui/static/app.css?v=cam-1525-job-display-names"', page)
+        self.assertIn('src="/ui/static/app.js?v=cam-1525-job-display-names"', page)
+        css = self.client.get("/ui/static/app.css?v=cam-1525-job-display-names").text
         self.assertIn("[hidden] { display: none !important; }", css)
         self.assertIn("s3://resource/&lt;resource_id&gt;/data/contents/&lt;empty_subprefix&gt;", page)
         self.assertIn("no existing files or folders", page)
@@ -100,6 +102,11 @@ class UiTests(unittest.TestCase):
         self.assertIn("No work can be performed in anonymous mode.", script)
         submit_job = script.split("async function submitJob", 1)[1].split("// ---------- Results", 1)[0]
         compare_job = script.split("async function submitCompare", 1)[1].split("// ---------- Startup", 1)[0]
+        self.assertIn("body.display_name = displayName", submit_job)
+        self.assertIn("body.display_name = displayName", compare_job)
+        self.assertIn('method: "PATCH"', script)
+        self.assertIn("api(`/jobs/${jobId}`", script)
+        self.assertIn('["Job ID", jobId]', script)
         for field in ("output_bucket", "output_prefix", "overwrite"):
             self.assertNotIn(field, submit_job)
             self.assertNotIn(field, compare_job)

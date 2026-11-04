@@ -177,7 +177,10 @@ class ApiTests(unittest.TestCase):
                 [{**PAYLOAD[0], "unexpected": True}],
                 PAYLOAD * 2,
             )
-        ] + [{}, {"duration": 1}]
+        ] + [
+            {}, {"duration": 1}, {"scenarios": PAYLOAD, "display_name": "   "},
+            {"scenarios": PAYLOAD, "display_name": "x" * 121},
+        ]
         with patch.object(tasks.hand_fim, "apply_async") as enqueue:
             for payload in payloads:
                 with self.subTest(payload=payload):

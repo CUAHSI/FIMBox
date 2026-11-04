@@ -6,10 +6,10 @@
   <title>FIMBox HAND-FIM</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
-  <link rel="stylesheet" href="/ui/static/app.css?v=cam-1524-recent-workspaces">
+  <link rel="stylesheet" href="/ui/static/app.css?v=cam-1525-job-display-names">
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
           integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="" defer></script>
-  <script src="/ui/static/app.js?v=cam-1524-recent-workspaces" defer></script>
+  <script src="/ui/static/app.js?v=cam-1525-job-display-names" defer></script>
 </head>
 <body>
   <header>
@@ -103,6 +103,7 @@
       <form id="job-options">
         <h3>Job options</h3>
         <div class="grid">
+          <label>Job display name <input name="display_name" maxlength="120" placeholder="Optional; duplicate names are allowed"></label>
           <label>Execution mode <select name="execution_mode"></select></label>
           <label>Max processes <input name="max_procs" type="number" min="1" placeholder="worker default"></label>
         </div>
@@ -124,6 +125,7 @@
           <form id="compare-results">
             <h3>Compare two results</h3>
             <p class="hint">Compare two outputs inside this workspace. Creating a comparison writes a new job and requires write access.</p>
+            <label>Job display name <input name="display_name" maxlength="120" placeholder="Optional; duplicate names are allowed"></label>
             <fieldset>
               <legend>Base</legend>
               <label>Workspace-relative prefix <input name="base_prefix" placeholder="jobs/&lt;job id&gt;/outputs" required></label>

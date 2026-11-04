@@ -433,7 +433,10 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
   before enqueue; `HistoryTask` wraps all three worker tasks to retain started
   and terminal snapshots plus terminal logs. Non-secret `history_archive` task
   kwargs preserve existing positional arguments. Records contain original
-  request, user/job/type, UTC timestamps, result/error; no tokens/credentials.
+  request, optional display name, user/job/type, UTC timestamps, result/error;
+  duplicate display names are allowed and immutable job IDs remain unique; no
+  tokens/credentials. Post-submission name edits are stored in a separate
+  per-job `display-name.json` override so worker snapshots cannot revert them.
   Per-job `jobs/<id>/record.json`, `worker.log`, and `outputs/` paths avoid
   shared-index races. Version-2 records retain submitter/workspace identity.
   Main job list/status/log/raster endpoints read archives after Redis

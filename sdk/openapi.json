@@ -896,6 +896,76 @@
             }
           }
         }
+      },
+      "patch": {
+        "summary": "Update Job Display Name",
+        "description": "Rename a job in the selected workspace; the immutable job ID is unchanged.",
+        "operationId": "update_job_display_name_jobs__job_id__patch",
+        "security": [
+          {
+            "OAuth2AuthorizationCodeBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Job Id"
+            }
+          },
+          {
+            "name": "X-FIMBox-Workspace",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fimbox-Workspace"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JobDisplayNameUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobSummary"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/jobs/{job_id}/archive": {
@@ -1588,6 +1658,17 @@
             "type": "string",
             "title": "Job Id"
           },
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
+          },
           "status": {
             "type": "string",
             "title": "Status"
@@ -1812,6 +1893,20 @@
             "title": "Output Prefix",
             "default": ""
           },
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 120,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name",
+            "description": "Optional human-readable job name. Duplicate names are allowed; job IDs remain unique."
+          },
           "base_bucket": {
             "type": "string",
             "maxLength": 255,
@@ -2002,6 +2097,20 @@
             "title": "Output Prefix",
             "default": ""
           },
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 120,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name",
+            "description": "Optional human-readable job name. Duplicate names are allowed; job IDs remain unique."
+          },
           "max_procs": {
             "anyOf": [
               {
@@ -2117,6 +2226,17 @@
           "job_id": {
             "type": "string",
             "title": "Job Id"
+          },
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
           },
           "status": {
             "type": "string",
@@ -2244,6 +2364,17 @@
           "job_id": {
             "type": "string",
             "title": "Job Id"
+          },
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
           },
           "status": {
             "type": "string",
@@ -2374,6 +2505,20 @@
             "maxLength": 900,
             "title": "Output Prefix",
             "default": ""
+          },
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 120,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name",
+            "description": "Optional human-readable job name. Duplicate names are allowed; job IDs remain unique."
           },
           "legacy_bucket": {
             "type": "string",
@@ -2936,6 +3081,29 @@
           "location"
         ],
         "title": "WorkspaceOpen"
+      },
+      "JobDisplayNameUpdate": {
+        "properties": {
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 120,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "display_name"
+        ],
+        "title": "JobDisplayNameUpdate"
       }
     },
     "securitySchemes": {

@@ -71,6 +71,9 @@ class UiTests(unittest.TestCase):
         self.assertIn('id="workspace-list"', page)
         self.assertIn("Remembered workspaces", page)
         self.assertIn("Forget only removes the browser shortcut", page)
+        self.assertIn('id="workspace-context"', page)
+        self.assertIn('id="workspace-name"', page)
+        self.assertIn('id="workspace-switch"', page)
         self.assertIn('id="workspace-create"', page)
         self.assertIn('id="workspace-open"', page)
         self.assertNotIn('id="open-output"', page)
@@ -83,9 +86,9 @@ class UiTests(unittest.TestCase):
         self.assertNotIn('name="base_prefix"', page)
         self.assertNotIn('name="candidate_prefix"', page)
         self.assertNotIn("Your jobs", page)
-        self.assertIn('href="/ui/static/app.css?v=cam-1525-job-display-names"', page)
-        self.assertIn('src="/ui/static/app.js?v=cam-1525-job-select-comparison"', page)
-        css = self.client.get("/ui/static/app.css?v=cam-1525-job-display-names").text
+        self.assertIn('href="/ui/static/app.css?v=cam-1525-workspace-header"', page)
+        self.assertIn('src="/ui/static/app.js?v=cam-1525-workspace-header"', page)
+        css = self.client.get("/ui/static/app.css?v=cam-1525-workspace-header").text
         self.assertIn("[hidden] { display: none !important; }", css)
         self.assertIn("s3://resource/&lt;resource_id&gt;/data/contents/&lt;empty_subprefix&gt;", page)
         self.assertIn("no existing files or folders", page)

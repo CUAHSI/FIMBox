@@ -204,16 +204,16 @@ function canWriteWorkspace() { return state.scope.split(/\s+/).includes("write")
 function syncWorkspaceGate() {
   const signedIn = authReady();
   const active = signedIn && Boolean(state.workspace);
-  $("#workspace-gate").hidden = !state.config || !state.config.authentication_enabled;
+  $("#workspace-gate").hidden = !state.config || !state.config.authentication_enabled || active;
   $("#workspace-auth-required").hidden = signedIn;
-  $("#workspace-active").hidden = !active;
+  $("#workspace-context").hidden = !active;
   $("#workspace-choice").hidden = !signedIn || active;
+  if (active) {
+    $("#workspace-name").textContent = state.workspace.name;
+    $("#workspace-name").title = state.workspace.name;
+  }
   $("#main-tabs").hidden = !active;
   $("#main-content").hidden = !active;
-  if (active) {
-    $("#workspace-summary").textContent =
-      `${state.workspace.name} — s3://${state.workspace.bucket}/${state.workspace.prefix}`;
-  }
   $("#workspace-create button[type=submit]").disabled = !canWriteWorkspace();
   $("#job-options button[type=submit]").disabled = !active || !canWriteWorkspace();
   $("#compare-results button[type=submit]").disabled = !active || !canWriteWorkspace();

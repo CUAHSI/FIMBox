@@ -265,6 +265,8 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
     - mandatory create/open workspace gate, per-user/browser last-workspace
       restoration through the API, job submission and log polling; workspace
       switches clear results/maps and ignore stale in-flight responses
+    - active workspace name and switch control in the top header; workspace
+      creation/opening choices appear only when no workspace is active
     - remembered `{name,location}` workspace shortcuts in `localStorage` under
       `fimbox-workspaces:v1:<origin>:<user id>`, ordered most recently opened
       first and deduplicated by location. Switch workspace reveals the list

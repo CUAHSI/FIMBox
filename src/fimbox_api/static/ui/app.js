@@ -204,16 +204,16 @@ function canWriteWorkspace() { return state.scope.split(/\s+/).includes("write")
 function syncWorkspaceGate() {
   const signedIn = authReady();
   const active = signedIn && Boolean(state.workspace);
-  $("#workspace-gate").hidden = !state.config || !state.config.authentication_enabled;
+  $("#workspace-gate").hidden = !state.config || !state.config.authentication_enabled || active;
   $("#workspace-auth-required").hidden = signedIn;
-  $("#workspace-active").hidden = !active;
+  $("#workspace-context").hidden = !active;
   $("#workspace-choice").hidden = !signedIn || active;
+  if (active) {
+    $("#workspace-name").textContent = state.workspace.name;
+    $("#workspace-name").title = state.workspace.name;
+  }
   $("#main-tabs").hidden = !active;
   $("#main-content").hidden = !active;
-  if (active) {
-    $("#workspace-summary").textContent =
-      `${state.workspace.name} — s3://${state.workspace.bucket}/${state.workspace.prefix}`;
-  }
   $("#workspace-create button[type=submit]").disabled = !canWriteWorkspace();
   $("#job-options button[type=submit]").disabled = !active || !canWriteWorkspace();
   $("#compare-results button[type=submit]").disabled = !active || !canWriteWorkspace();
@@ -241,7 +241,7 @@ function clearActiveWorkspace({ removePreference = false } = {}) {
     $("#input-description").textContent = "Sign in and open a workspace before browsing the input dataset or using the reach map.";
     $("#input-browser").replaceChildren();
   }
-  if ($("#open-output")) $("#open-output").reset();
+
   if ($("#compare-results")) $("#compare-results").reset();
   if ($("#reach-picker")) closeReachPicker();
   if (picker.map) {
@@ -356,7 +356,7 @@ async function openWorkspaceLocation(locationValue, button) {
   try {
     const workspace = await api("/workspaces/open", { method: "POST", json: { location: locationValue } });
     if (state.workspaceAction !== action || state.userId !== userId) return;
-    showMessage(`Opened workspace ${workspace.name}.`);
+    showMessage("");
     activateWorkspace(workspace);
   } catch (error) {
     if (state.workspaceAction === action && state.userId === userId) showMessage(`Could not open workspace: ${error.message}`, true);
@@ -1296,6 +1296,8 @@ async function submitJob(event) {
     scenarios: state.scenarios,
     execution_mode: form.elements.execution_mode.value,
   };
+  const displayName = form.elements.display_name.value.trim();
+  if (displayName) body.display_name = displayName;
   if (maxProcs && !form.elements.max_procs.disabled) body.max_procs = Number(maxProcs);
   const button = $("button[type=submit]", form);
   const workspaceVersion = state.workspaceVersion;
@@ -1319,6 +1321,7 @@ async function submitJob(event) {
 async function loadJobs() {
   const list = $("#job-list");
   if (!authReady() || !state.workspace) {
+    updateCompareJobOptions([]);
     list.replaceChildren(el("li", { className: "hint", text: "Open a workspace to list jobs." }));
     return;
   }
@@ -1326,10 +1329,11 @@ async function loadJobs() {
   try {
     const { jobs } = await api("/jobs");
     if (workspaceVersion !== state.workspaceVersion) return;
+    updateCompareJobOptions(jobs);
     list.replaceChildren(...jobs.slice().reverse().map((job) => {
       const stateLabel = job.execution_state_known === false ? `${job.status} · stale` : job.status;
       const item = el("li", { onclick: () => openJob(job.job_id) },
-        el("span", { text: job.job_id.slice(0, 8) + "…", title: job.job_id }),
+        el("span", { text: job.display_name || job.job_id.slice(0, 8) + "…", title: job.display_name || job.job_id }),
         el("span", { text: job.user_id || "Unknown submitter" }),
         el("span", { className: `status ${job.execution_state_known === false ? "stale" : job.status}`, text: stateLabel }));
       item.dataset.job = job.job_id;
@@ -1339,7 +1343,29 @@ async function loadJobs() {
     if (!jobs.length) list.append(el("li", { className: "hint", text: "No jobs in this workspace." }));
   } catch (error) {
     if (workspaceVersion !== state.workspaceVersion || error.stale) return;
+    updateCompareJobOptions([]);
     list.replaceChildren(el("li", { className: "hint", text: `Could not list jobs: ${error.message}` }));
+  }
+}
+
+function updateCompareJobOptions(jobs) {
+  const completed = jobs.filter((job) => job.status === "success");
+  for (const side of ["base", "candidate"]) {
+    const select = $(`#compare-results select[name="${side}_job_id"]`);
+    if (!select) continue;
+    const selected = select.value;
+    select.replaceChildren(el("option", {
+      value: "", text: completed.length ? "Choose a completed job" : "No completed jobs available",
+      disabled: true, selected: true,
+    }), ...completed.map((job) => {
+      const shortId = job.job_id.slice(0, 8);
+      return el("option", {
+        value: job.job_id,
+        text: `${job.display_name || job.job_type || "Job"} · ${shortId}`,
+        title: job.job_id,
+      });
+    }));
+    if (completed.some((job) => job.job_id === selected)) select.value = selected;
   }
 }
 
@@ -1737,6 +1763,38 @@ function startLogPolling(view, jobId, status) {
   poll();
 }
 
+function jobNameEditor(view, jobId, job, workspaceVersion, viewId) {
+  if (!canWriteWorkspace()) return null;
+  const form = el("form", { className: "row" });
+  const input = el("input", {
+    type: "text", maxLength: 120, value: job.display_name || "",
+    placeholder: "Leave empty to clear",
+  });
+  const button = el("button", { type: "submit", text: "Save name" });
+  form.append(el("label", { text: "Job display name" }, input), button);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    button.disabled = true;
+    try {
+      await api(`/jobs/${jobId}`, {
+        method: "PATCH",
+        json: { display_name: input.value.trim() || null },
+      });
+      if (workspaceVersion !== state.workspaceVersion || viewId !== state.viewId) return;
+      showMessage("Job name updated.");
+      await loadJobs();
+      openJob(jobId);
+    } catch (error) {
+      if (!error.stale && workspaceVersion === state.workspaceVersion && viewId === state.viewId) {
+        showMessage(`Could not update job name: ${error.message}`, true);
+      }
+    } finally {
+      if (workspaceVersion === state.workspaceVersion && viewId === state.viewId) button.disabled = false;
+    }
+  });
+  return form;
+}
+
 async function openJob(jobId) {
   if (!state.workspace) { showMessage("Open a workspace before viewing jobs.", true); return; }
   state.currentJob = jobId;
@@ -1754,10 +1812,14 @@ async function openJob(jobId) {
     return;
   }
   const result = job.result;
+  $(".result-title", view).textContent = job.display_name
+    ? `${job.display_name} (${jobId})` : `Job ${jobId}`;
   const location = result && result.output_bucket
     ? `s3://${result.output_bucket}/${joinKey(result.output_prefix)}` : null;
   const compared = result && result.compared;
   addSummary(view, [
+    ["Job ID", jobId],
+    ["Display name", job.display_name],
     ["Status", el("span", { className: `status ${job.status}`, text: job.status })],
     ["Error", job.error],
     ["Started", formatTime(job.started_at)],
@@ -1777,6 +1839,8 @@ async function openJob(jobId) {
     ["Output location", location],
     ["Output files", result && (result.files || []).length],
   ]);
+  const nameEditor = jobNameEditor(view, jobId, job, workspaceVersion, viewId);
+  if (nameEditor) $("dl.summary", view).after(nameEditor);
   if (job.status === "queued" && job.execution_state_known !== false && job.user_id === state.userId) {
     $("dl.summary", view).after(el("div", { className: "row" }, el("button", { type: "button", text: "Cancel job", onclick: async () => {
       try {
@@ -1789,10 +1853,6 @@ async function openJob(jobId) {
     } })));
   }
   if (job.execution_state_known !== false) startLogPolling(view, jobId, job.status);
-  if (result && result.output_bucket && !compared
-      && workspaceRelativePrefix(result.output_bucket, result.output_prefix) !== null) {
-    $("dl.summary", view).after(compareButtons(result.output_bucket, result.output_prefix));
-  }
   if (result && result.output_bucket) {
     loadOutputDetails(view, result.output_bucket, result.output_prefix, result);
   } else {
@@ -1818,17 +1878,8 @@ function openLocation(bucket, prefix) {
   for (const item of document.querySelectorAll("#job-list li")) item.classList.remove("active");
   const view = newResultView(`s3://${bucket}/${prefix}`);
   addSummary(view, [["Output location", `s3://${bucket}/${prefix}`]]);
-  if (workspaceRelativePrefix(bucket, prefix) !== null) $("dl.summary", view).after(compareButtons(bucket, prefix));
   $("[data-tabs=result] [data-tab=logs]", view).hidden = true;
   loadOutputDetails(view, bucket, prefix, null);
-}
-
-function openOutput(event) {
-  event.preventDefault();
-  const prefix = event.target.elements.prefix.value.trim();
-  const error = workspaceRelativeError(prefix, "Workspace-relative prefix");
-  if (error) { showMessage(error, true); return; }
-  openLocation(state.workspace.bucket, joinKey(state.workspace.prefix, prefix));
 }
 
 function workspaceRelativePrefix(bucket, prefix) {
@@ -1845,42 +1896,42 @@ function locationLink(bucket, prefix) {
   } });
 }
 
-function compareButtons(bucket, prefix) {
-  const use = (side) => () => {
-    const form = $("#compare-results");
-    const relative = workspaceRelativePrefix(bucket, prefix);
-    if (relative === null) { showMessage("Comparison inputs must be inside the active workspace.", true); return; }
-    form.elements[`${side}_prefix`].value = relative;
-    form.scrollIntoView({ behavior: "smooth", block: "nearest" });
-    showMessage(`Set the comparison ${side} to ${relative}.`);
-  };
-  return el("div", { className: "row" },
-    el("button", { type: "button", text: "Compare as base", onclick: use("base") }),
-    el("button", { type: "button", text: "Compare as candidate", onclick: use("candidate") }));
-}
-
 async function submitCompare(event) {
   event.preventDefault();
   if (!requireRetainedAccess("compare results")) return;
   if (!canWriteWorkspace()) { showMessage("Creating a comparison requires HydroShare write access.", true); return; }
   const form = event.target;
   const value = (name) => form.elements[name].value.trim();
-  const baseRelative = value("base_prefix");
-  const candidateRelative = value("candidate_prefix");
-  for (const prefix of [baseRelative, candidateRelative]) {
-    const error = workspaceRelativeError(prefix, "Workspace-relative prefix");
-    if (error) { showMessage(error, true); return; }
+  const baseJobId = value("base_job_id");
+  const candidateJobId = value("candidate_job_id");
+  if (baseJobId === candidateJobId) {
+    showMessage("Choose two different workspace jobs to compare.", true);
+    return;
   }
-  const body = {
-    base_bucket: state.workspace.bucket,
-    base_prefix: joinKey(state.workspace.prefix, baseRelative),
-    candidate_bucket: state.workspace.bucket,
-    candidate_prefix: joinKey(state.workspace.prefix, candidateRelative),
-  };
+  const displayName = value("display_name");
   const button = $("button[type=submit]", form);
   const workspaceVersion = state.workspaceVersion;
   button.disabled = true;
   try {
+    const [baseJob, candidateJob] = await Promise.all([
+      api(`/jobs/${baseJobId}`), api(`/jobs/${candidateJobId}`),
+    ]);
+    if (workspaceVersion !== state.workspaceVersion) return;
+    for (const job of [baseJob, candidateJob]) {
+      if (job.status !== "success" || !job.result || !job.result.output_bucket || !job.result.output_prefix) {
+        throw new Error(`Job ${job.job_id} has no successful retained output to compare.`);
+      }
+      if (workspaceRelativePrefix(job.result.output_bucket, job.result.output_prefix) === null) {
+        throw new Error(`Job ${job.job_id} output is outside the active workspace.`);
+      }
+    }
+    const body = {
+      base_bucket: baseJob.result.output_bucket,
+      base_prefix: baseJob.result.output_prefix,
+      candidate_bucket: candidateJob.result.output_bucket,
+      candidate_prefix: candidateJob.result.output_prefix,
+    };
+    if (displayName) body.display_name = displayName;
     const submitted = await api("/jobs/compare", { method: "POST", json: body });
     if (workspaceVersion !== state.workspaceVersion) return;
     showMessage(`Comparison job ${submitted.job_id} submitted (${submitted.status}).`);
@@ -1945,7 +1996,6 @@ async function start() {
   });
   $("#job-options").addEventListener("submit", submitJob);
   $("#jobs-refresh").addEventListener("click", loadJobs);
-  $("#open-output").addEventListener("submit", openOutput);
   $("#compare-results").addEventListener("submit", submitCompare);
   setupJobOptions();
   renderScenarioEditor();

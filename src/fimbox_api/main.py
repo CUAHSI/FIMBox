@@ -26,6 +26,7 @@ from .models import (
     HandFimJobOptions,
     HandFimJobRequest,
     HandFimParameters,
+    JobDisplayNameUpdate,
     JobLogs,
     JobList,
     JobSummary,
@@ -296,7 +297,8 @@ def list_jobs(session: AuthenticatedSession, history: HistorySelection) -> JobLi
     records = job_history.list_records(session, history)
     return JobList(jobs=[
         JobSummary(
-            job_id=record.job_id, user_id=record.user_id, job_type=record.job_type,
+            job_id=record.job_id, display_name=record.display_name,
+            user_id=record.user_id, job_type=record.job_type,
             submitted_at=record.submitted_at, status=record.status,
             execution_state_known=(
                 record.status in {"success", "failure", "revoked"}
@@ -305,6 +307,22 @@ def list_jobs(session: AuthenticatedSession, history: HistorySelection) -> JobLi
             ),
         ) for record in records
     ])
+
+
+@app.patch("/jobs/{job_id}", response_model=JobSummary)
+def update_job_display_name(
+    job_id: UUID, body: JobDisplayNameUpdate,
+    session: AuthenticatedSession, history: HistorySelection,
+) -> JobSummary:
+    """Rename a job in the selected workspace; the immutable job ID is unchanged."""
+    record = get_job_archive(job_id, session, history)
+    job_history.update_display_name(session, history, record, body.display_name)
+    logger.info("Updated display name for workspace job %s", job_id)
+    return JobSummary(
+        job_id=record.job_id, display_name=record.display_name, status=record.status,
+        user_id=record.user_id, job_type=record.job_type, submitted_at=record.submitted_at,
+        execution_state_known=record.status in {"success", "failure", "revoked"},
+    )
 
 
 def __require_job_owner(job_id: UUID, session: UserSession) -> None:

@@ -49,12 +49,35 @@ class OutputDestination(BaseModel):
         return value
 
 
+class JobRequestOptions(OutputDestination):
+    display_name: str | None = Field(
+        default=None, min_length=1, max_length=120,
+        description="Optional human-readable job name. Duplicate names are allowed; job IDs remain unique.",
+    )
+
+    @field_validator("display_name", mode="before")
+    @classmethod
+    def normalize_display_name(cls, value: str | None) -> str | None:
+        return value.strip() if isinstance(value, str) else value
+
+
+class JobDisplayNameUpdate(BaseModel):
+    display_name: str | None = Field(min_length=1, max_length=120)
+
+    model_config = {"extra": "forbid"}
+
+    @field_validator("display_name", mode="before")
+    @classmethod
+    def normalize_display_name(cls, value: str | None) -> str | None:
+        return value.strip() if isinstance(value, str) else value
+
+
 StreamingMode = Literal["streaming-2024", "streaming-2026"]
 ExecutionMode = Literal["fimserv-2024", "fimserv-2026", "streaming-2024", "streaming-2026"]
 STREAMING_MODES = ("streaming-2024", "streaming-2026")
 
 
-class HandFimJobOptions(OutputDestination):
+class HandFimJobOptions(JobRequestOptions):
     max_procs: int | None = Field(
         default=None, ge=1,
         description="Max concurrent HAND-FIM processes; omit to use the worker's HAND_FIM_MAX_PROCS (default 1).",
@@ -119,7 +142,7 @@ class ScenarioManifest(BaseModel):
     tile_size: int = Field(gt=0)
 
 
-class ParityJobRequest(OutputDestination):
+class ParityJobRequest(JobRequestOptions):
     """Rerun a retained legacy run's scenarios with streaming and diff the outputs."""
 
     legacy_bucket: str = Field(min_length=1, max_length=255, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -145,7 +168,7 @@ class ParityJobRequest(OutputDestination):
         return self
 
 
-class CompareJobRequest(OutputDestination):
+class CompareJobRequest(JobRequestOptions):
     """Diff two retained results' scenario flood masks without rerunning HAND-FIM."""
 
     base_bucket: str = Field(min_length=1, max_length=255, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -245,6 +268,7 @@ class StoredHandFimResult(HandFimResult, OutputDestination):
 
 class JobSummary(BaseModel):
     job_id: str
+    display_name: str | None = None
     status: str
     user_id: str | None = None
     job_type: str | None = None

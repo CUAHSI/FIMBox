@@ -265,6 +265,8 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
     - mandatory create/open workspace gate, per-user/browser last-workspace
       restoration through the API, job submission and log polling; workspace
       switches clear results/maps and ignore stale in-flight responses
+    - active workspace name and switch control in the top header; workspace
+      creation/opening choices appear only when no workspace is active
     - remembered `{name,location}` workspace shortcuts in `localStorage` under
       `fimbox-workspaces:v1:<origin>:<user id>`, ordered most recently opened
       first and deduplicated by location. Switch workspace reveals the list
@@ -280,8 +282,8 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
       (play/step/slider/delay), preloading the next frame at opacity 0 and
       waiting for its tiles. Over 12 scenarios, only the first is added
       up front.
-    - a "Compare two results" form (`POST /jobs/compare`, prefilled by
-      "Compare as base/candidate" on any opened result); comparison jobs show
+    - a "Compare two results" form (`POST /jobs/compare`) that selects two
+      successful jobs from the active workspace; comparison jobs show
       base/candidate links, a parity table with "Map diff", and diff layers
   - Tests are in `tests/test_ui.py`; browser-state regressions in
     `tests/ui_workspaces.test.cjs` run through Node's built-in test runner
@@ -433,7 +435,10 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
   before enqueue; `HistoryTask` wraps all three worker tasks to retain started
   and terminal snapshots plus terminal logs. Non-secret `history_archive` task
   kwargs preserve existing positional arguments. Records contain original
-  request, user/job/type, UTC timestamps, result/error; no tokens/credentials.
+  request, optional display name, user/job/type, UTC timestamps, result/error;
+  duplicate display names are allowed and immutable job IDs remain unique; no
+  tokens/credentials. Post-submission name edits are stored in a separate
+  per-job `display-name.json` override so worker snapshots cannot revert them.
   Per-job `jobs/<id>/record.json`, `worker.log`, and `outputs/` paths avoid
   shared-index races. Version-2 records retain submitter/workspace identity.
   Main job list/status/log/raster endpoints read archives after Redis

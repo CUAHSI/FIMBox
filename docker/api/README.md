@@ -52,8 +52,11 @@ pixi run fimbox submit --body test-data/single_reach.json
 
 First create or open a [workspace](#persistent-s3-workspaces).
 Use `POST /jobs/hand-fim` with an object containing `scenarios` and optional
-`max_procs` and `execution_mode` fields, plus the required
+`display_name`, `max_procs`, and `execution_mode` fields, plus the required
 `X-FIMBox-Workspace: s3://bucket/prefix` header.
+`display_name` is a trimmed, optional label of at most 120 characters. Duplicate
+names are allowed within a workspace; history shows the name alongside the
+immutable job ID. Older jobs without a name continue to appear by job ID.
 Requests require unique scenario IDs, eight-digit HUCs, and finite,
 nonnegative streamflows. The API validates requests before enqueueing.
 
@@ -122,6 +125,14 @@ with run-specific tile paths remain readable and are cleaned up when replaced.
 
 `GET /jobs` lists tracked jobs. Use `GET /jobs/{job_id}` to poll and
 `GET /jobs/{job_id}/logs?offset=0` to read worker logs by byte offset.
+Job submissions, including parity and comparison jobs, accept the same optional
+`display_name`; the browser lets you set it before submitting and shows it in
+workspace history and the job detail view.
+Use `PATCH /jobs/{job_id}` with `{"display_name":"New name"}` to rename an
+existing job, or `{"display_name":null}` to clear the label. Any authenticated
+workspace user with S3 write access can rename it; read-only collaborators can
+view names but cannot edit them. Renaming does not change the original request
+or the immutable job ID, and worker status updates cannot revert the new name.
 Once a worker begins a job, its status includes `started_at`, and finished jobs
 also include `finished_at` (UTC). Both are omitted while queued; the web page
 shows these times and the execution time, with a live elapsed time while running.
@@ -256,13 +267,13 @@ are not synchronized across browsers, and old saved S3 locations are not importe
     scenario shown, and the others load as the player reaches them
   - parity reports, with each scenario's diff raster on the map
 
-  The **Compare two results** form submits `POST /jobs/compare`; "Compare as
-  base"/"Compare as candidate" on an opened result fills it in. A comparison
-  job's view links to both results and shows its input parameters from the
-  base result.
+  The **Compare two results** form selects two successful jobs in the active
+  workspace and submits their retained output locations to `POST /jobs/compare`.
+  A comparison job's view links to both results and shows its input parameters
+  from the base result.
 
-  Retained output prefixes inside the active workspace can also be opened
-  directly, even after Redis metadata has expired.
+  Retained outputs can be opened from links in a job's results, even after Redis
+  metadata has expired.
 
 ### Persistent S3 workspaces
 

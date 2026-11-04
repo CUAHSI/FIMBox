@@ -29,9 +29,10 @@ from fimbox_sdk.api.default import (
     list_jobs_jobs_get,
     load_workspace_workspaces_open_post,
     submit_hand_fim_jobs_hand_fim_post,
+    update_job_display_name_jobs_job_id_patch,
 )
 from fimbox_sdk.models import (
-    AuthenticationConfig, HandFimJobRequest, HandFimJobRequestExecutionMode, Scenario,
+    AuthenticationConfig, HandFimJobRequest, HandFimJobRequestExecutionMode, JobDisplayNameUpdate, Scenario,
     Workspace, WorkspaceCreate, WorkspaceOpen,
 )
 from fimbox_sdk.types import UNSET, Response
@@ -451,9 +452,11 @@ def workspace_job(ctx: click.Context, job_id: UUID) -> None:
               default="fimserv-2024", show_default=True,
               help="streaming-* range-reads a prepared cloud-optimized hydrofabric and writes tiled COGs. "
                    "*-2026 modes use NOAA inundation-mapping v4.8.14.0.")
+@click.option("--display-name", help="Optional human-readable name shown in workspace job history.")
 @click.pass_context
 def submit(
     ctx: click.Context, body: Path | None, max_procs: int | None, execution_mode: str,
+    display_name: str | None,
 ) -> None:
     """Submit HAND-FIM scenarios from JSON or interactive inputs."""
     scenarios = __scenarios(__body(body)) if body is not None else __interactive_scenarios()
@@ -466,6 +469,7 @@ def submit(
         workspace_required=True,
         body=HandFimJobRequest(
             scenarios=scenarios,
+            display_name=display_name if display_name is not None else UNSET,
             output_prefix=UNSET,
             overwrite=UNSET,
             max_procs=max_procs if max_procs is not None else UNSET,
@@ -490,6 +494,19 @@ def jobs(ctx: click.Context) -> None:
 def status(ctx: click.Context, job_id: UUID) -> None:
     """Get a job's status and output manifest."""
     __call(ctx, get_job_status_jobs_job_id_get.sync_detailed, workspace_required=True, job_id=job_id)
+
+
+@app.command()
+@click.option("--job-id", required=True, type=click.UUID)
+@click.option("--display-name", required=True, help="New human-readable job name.")
+@click.pass_context
+def rename(ctx: click.Context, job_id: UUID, display_name: str) -> None:
+    """Rename a job in the active workspace."""
+    __call(
+        ctx, update_job_display_name_jobs_job_id_patch.sync_detailed,
+        workspace_required=True, job_id=job_id,
+        body=JobDisplayNameUpdate(display_name=display_name),
+    )
 
 
 @app.command()

@@ -6,28 +6,29 @@
   <title>FIMBox HAND-FIM</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
-  <link rel="stylesheet" href="/ui/static/app.css?v=cam-1524-recent-workspaces">
+  <link rel="stylesheet" href="/ui/static/app.css?v=cam-1525-workspace-header">
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
           integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="" defer></script>
-  <script src="/ui/static/app.js?v=cam-1524-recent-workspaces" defer></script>
+  <script src="/ui/static/app.js?v=cam-1525-workspace-header" defer></script>
 </head>
 <body>
   <header>
     <h1>FIMBox HAND-FIM</h1>
-    <div id="auth">
-      <span id="auth-status">Loading…</span>
-      <button id="sign-in" type="button" hidden>Sign in with HydroShare</button>
-      <button id="sign-out" type="button" hidden>Sign out</button>
+    <div class="header-actions">
+      <div id="workspace-context" hidden>
+        <span id="workspace-name"></span>
+        <button type="button" id="workspace-switch">Switch workspace</button>
+      </div>
+      <div id="auth">
+        <span id="auth-status">Loading…</span>
+        <button id="sign-in" type="button" hidden>Sign in with HydroShare</button>
+        <button id="sign-out" type="button" hidden>Sign out</button>
+      </div>
     </div>
   </header>
 
   <section id="workspace-gate" aria-live="polite">
-    <h2>Workspace</h2>
     <p id="workspace-auth-required" class="hint">Sign in with HydroShare to create or open a workspace.</p>
-    <div id="workspace-active" hidden>
-      <p id="workspace-summary"></p>
-      <button type="button" id="workspace-switch">Switch workspace</button>
-    </div>
     <div id="workspace-choice" hidden>
       <h3>Remembered workspaces</h3>
       <p class="hint">Workspaces you create or open are remembered for your account in this browser. Opening checks your current access. Forget only removes the browser shortcut, not shared data.</p>
@@ -103,6 +104,7 @@
       <form id="job-options">
         <h3>Job options</h3>
         <div class="grid">
+          <label>Job display name <input name="display_name" maxlength="120" placeholder="Optional; duplicate names are allowed"></label>
           <label>Execution mode <select name="execution_mode"></select></label>
           <label>Max processes <input name="max_procs" type="number" min="1" placeholder="worker default"></label>
         </div>
@@ -116,27 +118,31 @@
         <aside>
           <h3>Workspace jobs <button type="button" id="jobs-refresh" class="small">Refresh</button></h3>
           <ul id="job-list" class="list"></ul>
-          <form id="open-output">
-            <h3>Open workspace output</h3>
-            <label>Workspace-relative prefix <input name="prefix" placeholder="jobs/&lt;job id&gt;/outputs" required></label>
-            <button type="submit">Open</button>
-          </form>
           <form id="compare-results">
             <h3>Compare two results</h3>
-            <p class="hint">Compare two outputs inside this workspace. Creating a comparison writes a new job and requires write access.</p>
+            <p class="hint">Choose completed jobs from this workspace. Creating a comparison writes a new job and requires write access.</p>
+            <label>Job display name <input name="display_name" maxlength="120" placeholder="Optional; duplicate names are allowed"></label>
             <fieldset>
               <legend>Base</legend>
-              <label>Workspace-relative prefix <input name="base_prefix" placeholder="jobs/&lt;job id&gt;/outputs" required></label>
+              <label>Workspace job
+                <select name="base_job_id" required>
+                  <option value="" selected disabled>Choose a completed job</option>
+                </select>
+              </label>
             </fieldset>
             <fieldset>
               <legend>Candidate</legend>
-              <label>Workspace-relative prefix <input name="candidate_prefix" placeholder="jobs/&lt;job id&gt;/outputs" required></label>
+              <label>Workspace job
+                <select name="candidate_job_id" required>
+                  <option value="" selected disabled>Choose a completed job</option>
+                </select>
+              </label>
             </fieldset>
             <button type="submit">Compare</button>
           </form>
         </aside>
         <div id="result-view">
-          <p class="hint">Select a job or open a retained output location.</p>
+          <p class="hint">Select a job to view its results.</p>
         </div>
       </div>
     </section>

@@ -15,18 +15,20 @@ from .auth import UserSession, get_redis_client
 from .job_logs import JOB_LOG_PREFIX
 from .job_resources import PeakMemorySampler
 from .job_timing import mark_job_time
-from .models import JobStatus, StoredHandFimResult
+from .models import JobDisplayNameUpdate, JobStatus, StoredHandFimResult
 from .storage import output_file_key, output_s3_client, s3_client
 from .workspaces import Workspace as HistoryLocation
 from .workspaces import require_path
 
 MAX_RECORD_BYTES = 32 * 1024 * 1024
+MAX_DISPLAY_NAME_RECORD_BYTES = 1024
 logger = logging.getLogger(__name__)
 
 
 class ArchivedJob(JobStatus):
     format: str = "fimbox-job-history"
     version: int = 2
+    display_name: str | None = None
     workspace_id: UUID
     user_id: str
     job_type: str
@@ -42,6 +44,10 @@ def __key(location: HistoryLocation, job_id: str) -> str:
 
 def __log_key(location: HistoryLocation, job_id: str) -> str:
     return output_file_key(location.prefix, f"jobs/{UUID(job_id)}/worker.log")
+
+
+def __display_name_key(location: HistoryLocation, job_id: str) -> str:
+    return output_file_key(location.prefix, f"jobs/{UUID(job_id)}/display-name.json")
 
 
 def __write(client: Any, location: HistoryLocation, record: ArchivedJob, *, if_absent: bool = False) -> None:
@@ -74,7 +80,8 @@ def prepare(
     """Write queued metadata before enqueueing; return non-secret task kwargs."""
     now = datetime.now(timezone.utc)
     record = ArchivedJob(
-        job_id=job_id, status="queued", user_id=session.user_id, job_type=job_type,
+        job_id=job_id, display_name=request.get("display_name"),
+        status="queued", user_id=session.user_id, job_type=job_type,
         workspace_id=location.workspace_id,
         submitted_at=now, updated_at=now, request=request,
     )
@@ -116,7 +123,44 @@ def read(session: UserSession, location: HistoryLocation, job_id: str) -> Archiv
         for key in [item.key for item in result.files] + [item.key for item in result.scenario_manifests]:
             if key is not None:
                 require_path(location, result.output_bucket, key)
+    record.display_name = __read_display_name(client, location, record)
     return record
+
+
+def __read_display_name(client: Any, location: HistoryLocation, record: ArchivedJob) -> str | None:
+    try:
+        response = client.get_object(
+            Bucket=location.bucket, Key=__display_name_key(location, record.job_id),
+        )
+    except ClientError as error:
+        if error.response.get("Error", {}).get("Code") in {"NoSuchKey", "404", "NotFound"}:
+            return record.display_name
+        raise
+    body = response["Body"]
+    try:
+        content = body.read(MAX_DISPLAY_NAME_RECORD_BYTES + 1)
+    finally:
+        body.close()
+    if len(content) > MAX_DISPLAY_NAME_RECORD_BYTES:
+        raise HTTPException(status_code=502, detail="Invalid S3 job display-name record")
+    try:
+        return JobDisplayNameUpdate.model_validate_json(content).display_name
+    except ValidationError:
+        raise HTTPException(status_code=502, detail="Invalid S3 job display-name record") from None
+
+
+def update_display_name(
+    session: UserSession, location: HistoryLocation, record: ArchivedJob, display_name: str | None,
+) -> None:
+    """Write a separate name override so worker snapshots cannot revert edits."""
+    override = JobDisplayNameUpdate(display_name=display_name)
+    output_s3_client(session).put_object(
+        Bucket=location.bucket,
+        Key=__display_name_key(location, record.job_id),
+        Body=override.model_dump_json().encode(),
+        ContentType="application/json",
+    )
+    record.display_name = display_name
 
 
 def list_records(session: UserSession, location: HistoryLocation) -> list[ArchivedJob]:

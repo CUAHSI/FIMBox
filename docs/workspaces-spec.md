@@ -128,14 +128,19 @@ Implemented layout:
 <prefix>/
   workspace.json
   jobs/<job_id>/record.json
+  jobs/<job_id>/display-name.json  # only after the name is edited
   jobs/<job_id>/worker.log
   jobs/<job_id>/outputs/...
 ```
 
-Records include workspace identity, job ID/type, submitter identity, original
-request when available, timestamps, status, and result/error metadata. No
-provider tokens, credentials, or credential-bearing URLs belong in durable
-records.
+Records include workspace identity, immutable job ID/type, optional user-supplied
+display name, submitter identity, original request when available, timestamps,
+status, and result/error metadata. Display names may repeat within a workspace;
+the job ID remains the unique identifier. A separate `display-name.json`
+override keeps post-submission edits from being overwritten by an active
+worker's status snapshots; it changes neither the original request nor job ID.
+Any workspace user with S3 write access can rename a job. No provider tokens,
+credentials, or credential-bearing URLs belong in durable records.
 
 Use independent job objects rather than a single mutable history index.
 Concurrent submissions must not overwrite one another's records or outputs.

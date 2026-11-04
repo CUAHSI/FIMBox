@@ -356,7 +356,7 @@ async function openWorkspaceLocation(locationValue, button) {
   try {
     const workspace = await api("/workspaces/open", { method: "POST", json: { location: locationValue } });
     if (state.workspaceAction !== action || state.userId !== userId) return;
-    showMessage(`Opened workspace ${workspace.name}.`);
+    showMessage("");
     activateWorkspace(workspace);
   } catch (error) {
     if (state.workspaceAction === action && state.userId === userId) showMessage(`Could not open workspace: ${error.message}`, true);

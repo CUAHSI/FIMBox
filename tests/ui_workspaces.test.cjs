@@ -61,6 +61,7 @@ test("successful opens remember server names, deduplicate locations, and order b
   assert.deepEqual(ui.json("state.workspaces"), [
     { location: locationA, name: "Renamed A" }, { location: locationB, name: "Study B" },
   ]);
+  assert.equal(ui.run("message"), "");
   assert.equal(ui.run("localStorage.getItem(workspacePreferenceKey())"), locationA);
   ui.run("state.workspaces = []; loadRememberedWorkspaces();");
   assert.equal(ui.json("state.workspaces").length, 2);

@@ -1,8 +1,8 @@
 # FIMBox
 
 FIMBox runs HAND-based Flood Inundation Mapping (HAND-FIM) jobs through a local
-API, a Celery worker, and a `fimbox` command-line client. Job outputs are
-temporary in local mode; HydroShare S3 output is optional.
+API, a Celery worker, and a `fimbox` command-line client. HydroShare
+authentication and a persistent S3 workspace are required.
 
 ## Get started locally
 
@@ -13,16 +13,19 @@ pixi install
 docker compose up --build
 ```
 
-This starts the API at [http://localhost:8000](http://localhost:8000), a worker, and Redis. The API is
-bound to loopback and uses a shared anonymous local identity by default; use
-only on a trusted machine. HAND-FIM input data and generated files use the
-`data/input/` and `data/output/` mounts. Local output is removed when each job
-finishes.
+Configure both HydroShare OAuth credentials and callback URLs as described in
+the [API guide](docker/api/README.md#authentication). Anonymous/local submission
+is no longer supported. Without OAuth configuration, protected operations
+return a configuration error. The stack starts the API at
+[http://localhost:8000](http://localhost:8000), a worker, and Redis. Worker
+mounts are temporary computation storage, not the durable results store.
 
 `pixi install` generates the local SDK and installs the `fimbox` CLI.
 In another terminal, submit a sample job:
 
 ```bash
+pixi run fimbox workspace create \
+  s3://resource/RESOURCE_ID/data/contents/workspaces/study-a --name "Study A"
 pixi run fimbox submit --body test-data/single_reach.json
 pixi run fimbox jobs
 pixi run fimbox status --job-id JOB_ID
@@ -37,15 +40,14 @@ examples, and you can follow logs there. With HydroShare authentication enabled,
 the page also browses and downloads the input dataset and retained results, and
 maps the results. See the [API guide](docker/api/README.md#web-page).
 
-To retain job history beyond Redis expiry, authenticated users can select a
-writable S3 history location in the Results tab or with
-`fimbox history use s3://resource/RESOURCE_ID/data/contents/fimbox-history`.
-Future jobs archive their inputs, status/results, timestamps, and logs there;
-use **Export Redis history** or `fimbox history export` to copy completed jobs
-already in Redis. **Clear history** or `fimbox history clear` removes finished
-jobs from Redis and the selected history location without deleting outputs.
-The output location remains separate.
-See [persistent history](docker/api/README.md#persistent-s3-job-history).
+Create a workspace at an empty subprefix under an existing HydroShare resource's
+`RESOURCE_ID/data/contents/`, or open one with `fimbox workspace open LOCATION`.
+Collaborators open the same location using their own HydroShare permissions.
+All new job history, logs, and outputs stay inside the workspace. Write access
+allows submission; read access allows inspection. Only a job's submitter can
+cancel it. History persists beyond Redis expiry, subject to storage lifecycle
+policies. Legacy personal archives are not imported, and shared deletion is
+not provided. See [workspaces](docker/api/README.md#persistent-s3-workspaces).
 
 ### Use a different API domain
 

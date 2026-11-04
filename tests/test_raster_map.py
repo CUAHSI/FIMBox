@@ -22,7 +22,7 @@ from rasterio.transform import from_bounds
 from pydantic import SecretStr
 
 import fimbox_map
-from fimbox_api import auth, main, rasters, storage
+from fimbox_api import auth, history, main, rasters, storage, workspaces
 from fimbox_api.models import RasterInfo
 from fimbox_sdk import AuthenticatedClient
 from fimbox_sdk.models import StoredHandFimResult
@@ -53,13 +53,18 @@ class RasterApiTests(unittest.TestCase):
             user_id="alice", access_token="provider-secret", scope="read", expires_at=time.time() + 600,
         )
         main.app.dependency_overrides[auth.get_authenticated_session] = lambda: self.session
+        self.workspace = workspaces.Workspace(
+            bucket="resource", prefix="outputs", workspace_id=uuid4(), name="Raster test",
+            created_by="alice", created_at=datetime.now(timezone.utc),
+        )
+        main.app.dependency_overrides[workspaces.selected_workspace] = lambda: self.workspace
         self.addCleanup(main.app.dependency_overrides.clear)
         self.client = TestClient(main.app)
         self.addCleanup(self.client.close)
         self.job = Mock(state="SUCCESS", result=manifest())
         for name, value in (
             ("user_has_job", True),
-            ("raster_source", storage.RasterSource("s3://resource/outputs/flood.cog")),
+            ("output_raster_source", storage.RasterSource("s3://resource/outputs/flood.cog")),
             ("raster_info", RasterInfo(bounds=(-80, 30, -79, 31), minzoom=5, maxzoom=15)),
             ("raster_tile", PNG),
         ):
@@ -67,6 +72,17 @@ class RasterApiTests(unittest.TestCase):
             setattr(self, name, patcher.start())
             self.addCleanup(patcher.stop)
         patcher = patch.object(main.celery_app, "AsyncResult", return_value=self.job)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        patcher = patch.object(main, "get_job_archive", side_effect=lambda *args: history.ArchivedJob(
+            job_id=str(self.job_id), workspace_id=self.workspace.workspace_id, user_id="alice",
+            job_type="hand-fim", submitted_at=None, updated_at=datetime.now(timezone.utc), request={},
+            status={"SUCCESS": "success", "STARTED": "started"}.get(self.job.state, "queued"),
+            result=self.job.result if self.job.state == "SUCCESS" else None,
+        ))
+        self.archive = patcher.start()
+        self.addCleanup(patcher.stop)
+        patcher = patch.object(workspaces, "job_is_bound", return_value=True)
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -81,14 +97,14 @@ class RasterApiTests(unittest.TestCase):
         self.assertEqual(response.content, PNG)
         self.assertEqual(response.headers["content-type"], "image/png")
         self.assertEqual(response.headers["cache-control"], "no-store")
-        self.raster_source.assert_called_with(self.job_id, self.session, "resource", "outputs/flood.tif")
-        self.raster_tile.assert_called_once_with(self.raster_source.return_value, 5, 8, 12)
+        self.output_raster_source.assert_called_with(self.session, "resource", "outputs/flood.tif")
+        self.raster_tile.assert_called_once_with(self.output_raster_source.return_value, 5, 8, 12)
 
-    def test_foreign_jobs_are_denied_before_any_object_access(self):
-        self.user_has_job.return_value = False
+    def test_jobs_outside_workspace_are_denied_before_any_object_access(self):
+        self.archive.side_effect = main.HTTPException(status_code=404, detail="Not in workspace")
         for suffix in ("/0/info", "/0/tiles/0/0/0.png"):
-            self.assertEqual(self.client.get(self.base + suffix).status_code, 403)
-        self.raster_source.assert_not_called()
+            self.assertEqual(self.client.get(self.base + suffix).status_code, 404)
+        self.output_raster_source.assert_not_called()
 
     def test_missing_authentication_is_denied(self):
         main.app.dependency_overrides.clear()
@@ -96,7 +112,7 @@ class RasterApiTests(unittest.TestCase):
             main.settings, "hydroshare_client_secret", SecretStr("test"),
         ):
             self.assertEqual(self.client.get(self.base + "/0/info").status_code, 401)
-        self.raster_source.assert_not_called()
+        self.output_raster_source.assert_not_called()
 
     def test_invalid_file_indices_types_states_and_coordinates_do_not_read_s3(self):
         for suffix, status in (
@@ -110,7 +126,7 @@ class RasterApiTests(unittest.TestCase):
         self.job.state = "SUCCESS"
         self.job.result = {**manifest(), "output_bucket": None, "output_prefix": ""}
         self.assertEqual(self.client.get(self.base + "/0/info").status_code, 409)
-        self.raster_source.assert_not_called()
+        self.output_raster_source.assert_not_called()
 
     def test_read_errors_are_explicit_and_sanitized(self):
         self.raster_tile.side_effect = rasters.RasterReadError("Could not read job raster tile from S3.")
@@ -257,6 +273,11 @@ class OutputPathApiTests(unittest.TestCase):
             user_id="alice", access_token="provider-secret", scope="read", expires_at=time.time() + 600,
         )
         main.app.dependency_overrides[auth.get_authenticated_session] = lambda: self.session
+        self.workspace = workspaces.Workspace(
+            bucket="resource", prefix="abc/data/contents/flood", workspace_id=uuid4(), name="Map test",
+            created_by="alice", created_at=datetime.now(timezone.utc),
+        )
+        main.app.dependency_overrides[workspaces.selected_workspace] = lambda: self.workspace
         self.addCleanup(main.app.dependency_overrides.clear)
         self.client = TestClient(main.app)
         self.addCleanup(self.client.close)
@@ -331,11 +352,12 @@ class OutputPathApiTests(unittest.TestCase):
         self.assertEqual(self.client.get("/outputs/info", params=params).status_code, 401)
         self.output_s3_client.assert_not_called()
         main.app.dependency_overrides[auth.get_authenticated_session] = lambda: self.session
+        main.app.dependency_overrides[workspaces.selected_workspace] = lambda: self.workspace
         self.output_s3_client.return_value.get_object.side_effect = ClientError(
             {"Error": {"Code": "AccessDenied", "Message": "private-storage-detail"}}, "GetObject",
         )
         response = self.client.get("/outputs/info", params=params)
-        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.status_code, 403)
         self.assertNotIn("private-storage-detail", response.text)
 
     def test_invalid_manifest_and_out_of_directory_tiles_are_rejected(self):
@@ -434,13 +456,15 @@ class RasterCredentialsTests(unittest.TestCase):
 
 
 class NotebookMapTests(unittest.TestCase):
-    def test_notebook_map_can_reopen_paths_without_job_or_result_variables(self):
+    def test_notebook_map_can_reopen_resumed_workspace_paths_without_a_result(self):
         from fimbox_sdk.models import HandFimJobRequestExecutionMode, Scenario
 
         notebook = json.loads((Path(__file__).resolve().parents[1] / "notebooks/cloud_hand_fim.ipynb").read_text())
         source = next("".join(cell["source"]) for cell in notebook["cells"] if cell["id"] == "map")
         namespace = {
-            "api_client": Mock(), "OUTPUT_BUCKET": "resource", "OUTPUT_PREFIX": "abc/data/contents/flood/",
+            "api_client": Mock(),
+            "active_workspace": Mock(bucket="resource", prefix="abc/data/contents/study"),
+            "RESUME_JOB_ID": "4ec24445-d50f-434b-bce6-c1364762bfac",
             "scenarios": [Scenario.from_dict({"ScenarioID": "s1", "Reaches": []})], "display": Mock(),
             "EXECUTION_MODE": HandFimJobRequestExecutionMode.STREAMING_2026,
             "HandFimJobRequestExecutionMode": HandFimJobRequestExecutionMode,
@@ -450,7 +474,9 @@ class NotebookMapTests(unittest.TestCase):
         ) as output_map:
             exec(source, namespace)
         output_map.assert_called_once_with(
-            namespace["api_client"], ["s3://resource/abc/data/contents/flood/s1/manifest.json"],
+            namespace["api_client"], [
+                "s3://resource/abc/data/contents/study/jobs/4ec24445-d50f-434b-bce6-c1364762bfac/outputs/s1/manifest.json",
+            ],
         )
 
     def test_paths_are_validated_before_requesting_metadata(self):
@@ -469,7 +495,8 @@ class NotebookMapTests(unittest.TestCase):
         source = "".join(cell["source"])
         compile(source, "map", "exec")
         self.assertIn("output_map(api_client, SCENARIO_PATHS)", source)
-        self.assertNotIn("job_id", source)
+        self.assertIn("RESUME_JOB_ID", source)
+        self.assertIn("active_workspace", source)
         self.assertNotIn("final_result", source)
         self.assertNotIn("session_token", source)
 

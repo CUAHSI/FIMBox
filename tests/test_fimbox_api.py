@@ -18,7 +18,7 @@ from kombu.exceptions import OperationalError
 from pydantic import SecretStr, ValidationError
 from redis.exceptions import ConnectionError as RedisConnectionError
 
-from fimbox_api import auth, job_logs, job_timing, main, storage, tasks
+from fimbox_api import auth, history, job_logs, job_timing, main, storage, tasks, workspaces
 from fimbox_api.models import HandFimParameters, OutputDestination
 
 
@@ -30,6 +30,7 @@ PAYLOAD = [
 ]
 DESTINATION = {"output_bucket": "fim-output", "output_prefix": "data/output"}
 SUBMISSION = {"scenarios": PAYLOAD, **DESTINATION}
+WORKSPACE_SUBMISSION = {"scenarios": PAYLOAD}
 HAND_FIM_ROUTE = "/jobs/hand-fim"
 
 def credentials_fixture():
@@ -43,7 +44,7 @@ class ApiTests(unittest.TestCase):
     def test_old_execution_mode_names_are_rejected_before_enqueue(self):
         with patch.object(tasks.hand_fim, "apply_async") as enqueue:
             for mode in ("legacy", "updatedlegacy", "streaming", "updatedstreaming"):
-                response = self.client.post(HAND_FIM_ROUTE, json={**SUBMISSION, "execution_mode": mode})
+                response = self.client.post(HAND_FIM_ROUTE, json={**WORKSPACE_SUBMISSION, "execution_mode": mode})
                 self.assertEqual(response.status_code, 422, mode)
             enqueue.assert_not_called()
 
@@ -63,6 +64,33 @@ class ApiTests(unittest.TestCase):
             user_id="alice", access_token="provider-token", scope="read", expires_at=time.time() + 60,
         )
         self.addCleanup(main.app.dependency_overrides.clear)
+        self.workspace = workspaces.Workspace(
+            bucket="fim-output", prefix="data", workspace_id=uuid4(), name="Test",
+            created_by="alice", created_at=datetime.now(timezone.utc),
+        )
+        main.app.dependency_overrides[workspaces.selected_workspace] = lambda: self.workspace
+        self.missing_job = False
+
+        def record(session, workspace, job_id):
+            if self.missing_job:
+                return None
+            return history.ArchivedJob(
+                job_id=job_id, status="queued", workspace_id=workspace.workspace_id,
+                user_id="alice", job_type="hand-fim", submitted_at=None,
+                updated_at=datetime.now(timezone.utc), request={},
+            )
+
+        for module, name, kwargs in (
+            (history, "prepare", {"return_value": {}}),
+            (history, "enqueue_failed", {}),
+            (history, "mark_cancelled", {}),
+            (history, "read", {"side_effect": record}),
+            (workspaces, "bind_job", {}),
+            (workspaces, "job_is_bound", {"return_value": True}),
+        ):
+            patcher = patch.object(module, name, **kwargs)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         for name in (
             "track_user_job", "untrack_user_job", "user_has_job",
             "create_job_credentials", "delete_job_credentials",
@@ -79,13 +107,13 @@ class ApiTests(unittest.TestCase):
         operation = main.app.openapi()["paths"]["/jobs/hand-fim"]["post"]
         self.assertTrue(all(parameter["in"] == "header" for parameter in operation.get("parameters", [])))
         with patch.object(tasks.hand_fim, "apply_async") as enqueue:
-            response = self.client.post(HAND_FIM_ROUTE, json=SUBMISSION)
+            response = self.client.post(HAND_FIM_ROUTE, json=WORKSPACE_SUBMISSION)
             self.assertEqual(response.status_code, 202)
             result = response.json()
             self.assertEqual(result["status"], "queued")
             self.assertEqual(result["status_url"], f"/jobs/{result['job_id']}")
             enqueue.assert_called_once_with(
-                args=[result["job_id"], PAYLOAD, "fim-output", "data/output", None, False],
+                args=[result["job_id"], PAYLOAD, "fim-output", f"data/jobs/{result['job_id']}/outputs", None, False],
                 task_id=result["job_id"],
                 retry=False,
             )
@@ -96,7 +124,7 @@ class ApiTests(unittest.TestCase):
     def test_submit_forwards_overwrite_option(self):
         with patch.object(tasks.hand_fim, "apply_async") as enqueue:
             response = self.client.post(
-                HAND_FIM_ROUTE, json={**SUBMISSION, "overwrite": True},
+                HAND_FIM_ROUTE, json={**WORKSPACE_SUBMISSION, "overwrite": True},
             )
         self.assertEqual(response.status_code, 202)
         self.assertEqual(enqueue.call_args.kwargs["args"][-1], True)
@@ -104,29 +132,21 @@ class ApiTests(unittest.TestCase):
     def test_submit_forwards_updatedlegacy_without_stream_queue(self):
         with patch.object(tasks.hand_fim, "apply_async") as enqueue:
             response = self.client.post(
-                HAND_FIM_ROUTE, json={**SUBMISSION, "execution_mode": "fimserv-2026"},
+                HAND_FIM_ROUTE, json={**WORKSPACE_SUBMISSION, "execution_mode": "fimserv-2026"},
             )
         self.assertEqual(response.status_code, 202, response.text)
         self.assertEqual(enqueue.call_args.kwargs["args"][-1], "fimserv-2026")
         self.assertNotIn("queue", enqueue.call_args.kwargs)
 
-    def test_cloud_policy_requires_s3_for_submission(self):
+    def test_workspace_assigns_s3_for_cloud_policy(self):
         with patch.object(main.settings, "require_hydroshare_output", True), patch.object(
             tasks.hand_fim, "apply_async",
         ) as enqueue:
             response = self.client.post("/jobs/hand-fim", json={
                 "scenarios": PAYLOAD, "output_bucket": None, "output_prefix": "",
             })
-            self.assertEqual(response.status_code, 422)
-            self.assertEqual(response.json()["detail"], [{
-                "loc": ["body", "output_bucket"],
-                "msg": "This deployment requires a HydroShare output_bucket",
-                "type": "value_error",
-            }])
-            enqueue.assert_not_called()
-            self.track_user_job.assert_not_called()
-            self.create_job_credentials.assert_not_called()
-            self.assertEqual(self.client.post(HAND_FIM_ROUTE, json=SUBMISSION).status_code, 202)
+            self.assertEqual(response.status_code, 202, response.text)
+            self.assertEqual(enqueue.call_args.kwargs["args"][2], self.workspace.bucket)
             self.create_job_credentials.assert_called_once()
             enqueue.assert_called_once()
 
@@ -138,7 +158,7 @@ class ApiTests(unittest.TestCase):
             response = self.client.post(HAND_FIM_ROUTE, json={
                 "scenarios": PAYLOAD, "output_prefix": "runs/test",
             })
-            self.assertEqual(response.status_code, 409, response.text)
+            self.assertEqual(response.status_code, 503, response.text)
             enqueue.assert_not_called()
             self.track_user_job.assert_not_called()
             self.create_job_credentials.assert_not_called()
@@ -175,7 +195,7 @@ class ApiTests(unittest.TestCase):
 
     def test_broker_failure_is_503(self):
         with patch.object(tasks.hand_fim, "apply_async", side_effect=OperationalError("offline")):
-            response = self.client.post(HAND_FIM_ROUTE, json=SUBMISSION)
+            response = self.client.post(HAND_FIM_ROUTE, json=WORKSPACE_SUBMISSION)
         self.assertEqual(response.status_code, 503)
         self.untrack_user_job.assert_called_once()
         self.delete_job_credentials.assert_called_once()
@@ -183,13 +203,14 @@ class ApiTests(unittest.TestCase):
     def test_credential_failure_never_enqueues(self):
         self.create_job_credentials.side_effect = storage.StorageCredentialsError("Credential exchange failed")
         with patch.object(tasks.hand_fim, "apply_async") as enqueue:
-            response = self.client.post(HAND_FIM_ROUTE, json=SUBMISSION)
+            response = self.client.post(HAND_FIM_ROUTE, json=WORKSPACE_SUBMISSION)
         self.assertEqual(response.status_code, 503)
         enqueue.assert_not_called()
         self.track_user_job.assert_not_called()
 
-    def test_other_users_cannot_access_jobs(self):
+    def test_jobs_missing_from_workspace_cannot_be_read(self):
         self.user_has_job.return_value = False
+        self.missing_job = True
         job_id = str(uuid4())
         with patch.object(storage, "s3_client") as client, patch.object(main.celery_app, "AsyncResult") as result:
             for method, route in (
@@ -197,7 +218,7 @@ class ApiTests(unittest.TestCase):
                 ("GET", f"/jobs/{job_id}/logs"),
                 ("DELETE", f"/jobs/{job_id}"),
             ):
-                self.assertEqual(self.client.request(method, route).status_code, 403)
+                self.assertEqual(self.client.request(method, route).status_code, 403 if method == "DELETE" else 404)
             client.assert_not_called()
             result.assert_not_called()
 
@@ -240,33 +261,36 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(client.getrange.call_count, 2)
         get_client.assert_called_with(decode_responses=False)
 
-    def test_other_users_cannot_read_job_logs(self):
-        self.user_has_job.return_value = False
+    def test_logs_missing_from_workspace_cannot_be_read(self):
+        self.missing_job = True
         job_id = str(uuid4())
         with patch.object(main, "read_job_logs") as read_logs, patch.object(
             main.celery_app, "AsyncResult",
         ) as result:
-            self.assertEqual(self.client.get(f"/jobs/{job_id}/logs").status_code, 403)
+            self.assertEqual(self.client.get(f"/jobs/{job_id}/logs").status_code, 404)
         read_logs.assert_not_called()
         result.assert_not_called()
 
-    def test_list_jobs_for_authenticated_user(self):
+    def test_list_jobs_for_selected_workspace(self):
         states = {
             "PENDING": "queued", "RECEIVED": "queued", "STARTED": "started",
             "RETRY": "started", "SUCCESS": "success", "FAILURE": "failure",
             "REVOKED": "revoked", "CUSTOM": "custom",
         }
-        with patch.object(main, "list_user_jobs", return_value=list(states)) as jobs, patch.object(
-            main.celery_app, "AsyncResult", side_effect=lambda job_id: Mock(state=job_id),
-        ) as results:
-            self.assertEqual(self.client.get("/jobs").json(), {
-                "jobs": [{"job_id": state, "status": status} for state, status in states.items()],
-            })
-            jobs.assert_called_once_with("alice")
-            self.assertEqual(results.call_count, len(states))
+        records = [history.ArchivedJob(
+            job_id=str(uuid4()), status=status, workspace_id=self.workspace.workspace_id,
+            user_id="alice", job_type="hand-fim", submitted_at=None, request={},
+            updated_at=datetime.now(timezone.utc),
+        ) for status in states.values()]
+        with patch.object(history, "list_records", return_value=records) as jobs, \
+                patch.object(main.celery_app, "AsyncResult", return_value=Mock(state="STARTED")):
+            response = self.client.get("/jobs")
+        self.assertEqual([job["status"] for job in response.json()["jobs"]], list(states.values()))
+        self.assertTrue(all(job["user_id"] == "alice" for job in response.json()["jobs"]))
+        self.assertEqual(jobs.call_args.args[1], self.workspace)
 
     def test_empty_job_list_does_not_fetch_task_statuses(self):
-        with patch.object(main, "list_user_jobs", return_value=[]), patch.object(
+        with patch.object(history, "list_records", return_value=[]), patch.object(
             main.celery_app, "AsyncResult",
         ) as results:
             self.assertEqual(self.client.get("/jobs").json(), {"jobs": []})
@@ -307,7 +331,7 @@ class ApiTests(unittest.TestCase):
             for body in (
                 {"scenarios": PAYLOAD, "output_bucket": None, "output_prefix": "orphan"},
                 {"scenarios": PAYLOAD, "output_bucket": "", "output_prefix": "runs/test"},
-                {"scenarios": PAYLOAD},
+                {"scenarios": PAYLOAD, "output_bucket": "elsewhere"},
             ):
                 self.assertEqual(self.client.post(HAND_FIM_ROUTE, json=body).status_code, 422)
             enqueue.assert_not_called()
@@ -315,16 +339,18 @@ class ApiTests(unittest.TestCase):
     def test_default_resource_bucket_creates_s3_credentials(self):
         with patch.object(tasks.hand_fim, "apply_async") as enqueue:
             response = self.client.post(HAND_FIM_ROUTE, json={
-                "scenarios": PAYLOAD, "output_prefix": "runs/test",
+                "scenarios": PAYLOAD,
             })
             self.assertEqual(response.status_code, 202, response.text)
-            self.assertEqual(enqueue.call_args.kwargs["args"][2:], ["resource", "runs/test", None, False])
+            self.assertEqual(enqueue.call_args.kwargs["args"][2:], [
+                self.workspace.bucket, f"data/jobs/{response.json()['job_id']}/outputs", None, False,
+            ])
         self.create_job_credentials.assert_called_once()
 
     def test_max_procs_is_validated_and_queued(self):
         with patch.object(tasks.hand_fim, "apply_async") as enqueue:
             response = self.client.post(
-                HAND_FIM_ROUTE, json={**SUBMISSION, "max_procs": 3}
+                HAND_FIM_ROUTE, json={**WORKSPACE_SUBMISSION, "max_procs": 3}
             )
             self.assertEqual(response.status_code, 202, response.text)
             self.assertEqual(enqueue.call_args.kwargs["args"][-2], 3)
@@ -332,7 +358,7 @@ class ApiTests(unittest.TestCase):
             for value in (0, -1, "invalid", 1.5):
                 self.assertEqual(
                     self.client.post(
-                        HAND_FIM_ROUTE, json={**SUBMISSION, "max_procs": value}
+                        HAND_FIM_ROUTE, json={**WORKSPACE_SUBMISSION, "max_procs": value}
                     ).status_code,
                     422,
                 )

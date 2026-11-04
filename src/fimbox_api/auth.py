@@ -205,9 +205,7 @@ def complete_oauth_authorization(code: str, state: str, cookie_state: str | None
 
 def get_authenticated_session(token: Annotated[str | None, Depends(oauth2_scheme)]) -> UserSession:
     if not settings.authentication_enabled:
-        return UserSession(
-            user_id=LOCAL_USER_ID, access_token=SecretStr(""), scope="", expires_at=0,
-        )
+        raise HTTPException(status_code=503, detail="HydroShare OAuth must be configured; anonymous mode is no longer supported")
     if not token:
         raise HTTPException(
             status_code=401, detail="Authentication required", headers={"WWW-Authenticate": "Bearer"},

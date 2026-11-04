@@ -2,21 +2,28 @@
 
 [`cloud_hand_fim.ipynb`](cloud_hand_fim.ipynb) demonstrates submitting and
 monitoring a job against a cloud FIMBox API using the generated Python SDK.
-It accepts an API URL and HydroShare output bucket, provides a browser login
-link, and polls job status and output metadata.
+It accepts an API URL and HydroShare workspace location, provides a browser
+login link, and polls job status and output metadata.
 
 Open the notebook in Jupyter or VS Code with a Python kernel. Click the login
 link while the authentication cell waits, then run the separate Connect cell.
+Connect opens `WORKSPACE_LOCATION` by default. To initialize a new workspace,
+choose an empty subprefix under `<resource_id>/data/contents/`, set
+`WORKSPACE_NAME`, and enable `CREATE_WORKSPACE` once. Set it back to `False`
+after successful creation. Opening never creates missing workspaces, and a
+failed open/create never falls back to another workspace.
+Every subsequent request carries `X-FIMBox-Workspace`.
+The notebook rejects older APIs without explicit workspace enforcement before login.
 Set `RESUME_JOB_ID` to monitor an existing job after restarting the kernel;
 otherwise, submission starts a real cloud computation that may incur cost.
 Before submission, choose the inline scenario example or the JSON-loading cell,
 which reads `test-data/single_reach.json` into generated SDK `Scenario` models.
 The submission cell uses the current `scenarios` value without replacing it.
 Both execution modes retain the input scenario array at
-`s3://<OUTPUT_BUCKET>/<OUTPUT_PREFIX>/scenarios.json` alongside the output data.
+`<WORKSPACE_LOCATION>/jobs/<job_id>/outputs/scenarios.json` alongside the output data.
 This JSON uses the original scenario IDs, reaches, and streamflows and can be
 reused as scenario input. It is listed in the result's `files` metadata and
-follows the same overwrite setting as the other output objects.
+is scoped to that job's unique server-assigned output destination.
 The accompanying `README.md` explains the output layout and input units, records
 the execution settings, and provides rerun and path-based viewing examples.
 
@@ -24,22 +31,24 @@ the execution settings, and provides rerun and path-based viewing examples.
 
 Install the optional `fimbox[map]` dependency for ipyleaflet/Jupyter widgets,
 then run the map cell. `fimbox_map.output_map(api_client, SCENARIO_PATHS)` loads
-retained outputs directly from `s3://bucket/key` paths, not an expiring job ID.
+retained outputs directly from `s3://bucket/key` paths without a live Redis lookup.
 The example uses `EXECUTION_MODE` to build legacy `<ScenarioID>.cog` paths or
-streaming `<ScenarioID>/manifest.json` paths from the configured destination
-and scenario names. Match the mode and `OUTPUT_PREFIX` to the saved run being
+streaming `<ScenarioID>/manifest.json` paths from the active workspace,
+`RESUME_JOB_ID` (or newly submitted job ID), and scenario names. Match the mode to the saved run being
 viewed; legacy runs do not produce streaming manifests.
 Edit `SCENARIO_PATHS` to use explicit manifest
 paths or `.cog`, `.tif`, and `.tiff` object paths (prefer COGs).
 To reopen outputs after 24 hours or a kernel restart, run setup, configuration,
-authentication/Connect, scenario inputs, and the map cell. Do not submit or
-monitor a job just to reopen a map. Neither `job_id` nor `final_result` is needed.
+authentication/Connect, scenario inputs, and the map cell, with `RESUME_JOB_ID`
+set to that run. Do not submit or monitor a job just to reopen a map.
+No saved `final_result` is needed.
 Pan/zoom to load visible 256-pixel tiles; at most 64 are requested per view.
 Blue represents inundated cells; dry/nodata pixels are transparent.
 
 The API must be redeployed with the raster endpoints and rio-tiler installed.
 The path-based `/outputs` endpoints use the existing login and current user's
-HydroShare S3 permissions to read objects from `https://s3.hydroshare.org`.
+HydroShare S3 permissions to read objects inside the active workspace from
+`https://s3.hydroshare.org`. Paths outside that workspace are rejected.
 Job ownership/result expiry does not affect these reads. Private files need not be public.
 COGs use HTTP range requests/overviews rather than full-file downloads; normal
 TIFFs can be less efficient. Raster tiles travel through the API and notebook
@@ -50,6 +59,8 @@ OpenStreetMap receives the normal basemap tile requests.
 Rerun authentication/Connect and the map cell after session expiry. The Reload
 tiles button retries reads and clears the in-memory tile cache. Deleted S3
 objects or revoked HydroShare permissions still prevent viewing.
+The optional parity example also reads a legacy run inside the active workspace;
+its new results receive their own server-assigned job output prefix.
 Do not resubmit a job merely to refresh the map. Clear widget outputs
 before saving/sharing: they contain raster imagery even though no credentials
 are embedded. Static HTML exports cannot fetch new authenticated tiles.

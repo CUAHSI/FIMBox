@@ -1,7 +1,6 @@
 import json
 import re
 import tempfile
-import time
 import unittest
 from http import HTTPStatus
 from pathlib import Path
@@ -11,19 +10,31 @@ from uuid import uuid4
 import httpx
 import click
 from click.testing import CliRunner
-from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
 import fimbox_cli
-from fimbox_api import auth, main, tasks
 from fimbox_sdk import AuthenticatedClient, Client
 from fimbox_sdk.api.default import submit_hand_fim_jobs_hand_fim_post
-from fimbox_sdk.models import AuthenticationConfig, HandFimJobRequest, HTTPValidationError, JobSubmitted, Reach, Scenario
+from fimbox_sdk.models import (
+    AuthenticationConfig, HandFimJobRequest, HTTPValidationError, JobSubmitted, Reach, Scenario,
+    Workspace,
+)
+from fimbox_api import main, tasks
+import test_job_history
+
+LOCATION = test_job_history.LOCATION
 
 PAYLOAD = [{
     "ScenarioID": "test",
     "Reaches": [{"HUC": "03020201", "ReachID": "8780625", "Streamflow": 7}],
 }]
+
+
+class FakeSdkResponse:
+    def __init__(self, status_code, payload):
+        self.status_code = HTTPStatus(status_code)
+        self.content = json.dumps(payload).encode()
+        self.parsed = Workspace.from_dict(payload) if 200 <= status_code < 300 else None
 
 
 class SdkCliTests(unittest.TestCase):
@@ -38,59 +49,76 @@ class SdkCliTests(unittest.TestCase):
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("Invalid value", result.output)
 
-    def test_history_export_uses_selected_location_and_reports_counts(self):
+    def test_workspace_create_open_save_only_after_success(self):
+        location = "s3://resource/123/data/contents/workspaces/study"
         with patch.object(click, "get_app_dir", return_value=self.directory.name):
-            result = self.invoke("history", "export")
-            self.assertNotEqual(result.exit_code, 0)
-            self.assertIn("Select a history location", result.output)
-            self.response = httpx.Response(200, json={"exported": 2, "skipped_existing": 1, "skipped_active": 3})
-            result = self.invoke("--history-location", "s3://resource/archive", "history", "export")
-            self.assertEqual(result.exit_code, 0, result.output)
-            self.assertIn('"exported": 2', result.output)
-            self.assertEqual(self.requests[-1].method, "POST")
-            self.assertEqual(self.requests[-1].url.path, "/jobs/history/export")
-            self.assertEqual(self.requests[-1].headers["X-FIMBox-History-Location"], "s3://resource/archive")
-
-    def test_history_clear_requires_confirmation(self):
-        with patch.object(click, "get_app_dir", return_value=self.directory.name):
-            count = len(self.requests)
-            result = self.invoke("history", "clear", input="n\n")
-            self.assertNotEqual(result.exit_code, 0)
-            self.assertEqual(len(self.requests), count)
-            self.response = httpx.Response(200, json={"cleared": 4, "skipped_active": 1})
-            result = self.invoke("--history-location", "s3://resource/archive", "history", "clear", "--yes")
-            self.assertEqual(result.exit_code, 0, result.output)
-            self.assertIn('"cleared": 4', result.output)
-            self.assertEqual(self.requests[-1].method, "POST")
-            self.assertEqual(self.requests[-1].url.path, "/jobs/history/clear")
-            self.assertEqual(self.requests[-1].headers["X-FIMBox-History-Location"], "s3://resource/archive")
-
-    def test_history_location_is_remembered_and_sent_with_submissions(self):
-        with patch.object(click, "get_app_dir", return_value=self.directory.name):
-            self.response = httpx.Response(200, json={"jobs": []})
-            result = self.invoke("history", "use", "s3://resource/archive")
-            self.assertEqual(result.exit_code, 0, result.output)
-            self.assertEqual(self.requests[-1].headers["X-FIMBox-History-Location"], "s3://resource/archive")
-            self.response = httpx.Response(202, json={
-                "job_id": self.job_id, "status": "queued", "status_url": f"/jobs/{self.job_id}",
+            self.workspace_response = FakeSdkResponse(201, {
+                "workspace_id": "91ebf4cc-f901-4445-a59e-f45dac551f36", "name": "Flood study", "bucket": "resource",
+                "prefix": "123/data/contents/workspaces/study", "created_by": "alice", "created_at": "2026-01-01T00:00:00Z",
+                "format": "fimbox-workspace", "version": 1,
             })
-            result = self.invoke("submit", "--body", str(self.body), "--output-bucket", "resource", "--output-prefix", "p")
+            result = self.invoke("workspace", "create", location, "--name", "Flood study")
             self.assertEqual(result.exit_code, 0, result.output)
-            self.assertEqual(self.requests[-1].headers["X-FIMBox-History-Location"], "s3://resource/archive")
-            result = self.invoke("history", "disable")
-            self.assertEqual(result.exit_code, 0, result.output)
-            result = self.invoke("history", "show")
-            self.assertIn("disabled", result.output)
+            self.assertEqual(self.workspace_requests[-1], (
+                "create", {"location": location, "name": "Flood study"},
+            ))
+            preferences = json.loads((Path(self.directory.name) / "workspace.json").read_text())
+            self.assertEqual(preferences, {"http://localhost:8000": location})
 
-    def test_history_override_and_invalid_location(self):
-        with patch.object(click, "get_app_dir", return_value=self.directory.name):
-            self.response = httpx.Response(200, json={"jobs": []})
-            result = self.invoke("--history-location", "s3://resource/override", "jobs")
+            other_location = "s3://resource/456/data/contents/analysis"
+            self.workspace_response = FakeSdkResponse(200, {
+                "workspace_id": "7ef717ee-b632-4339-931c-859b7b30023a", "name": "Analysis", "bucket": "resource",
+                "prefix": "456/data/contents/analysis", "created_by": "alice",
+                "created_at": "2026-01-01T00:00:00Z", "format": "fimbox-workspace", "version": 1,
+            })
+            result = self.invoke("workspace", "open", other_location)
             self.assertEqual(result.exit_code, 0, result.output)
-            self.assertEqual(self.requests[-1].headers["X-FIMBox-History-Location"], "s3://resource/override")
-            result = self.invoke("history", "use", "https://example.com/no")
+            self.assertEqual(self.workspace_requests[-1], ("open", {"location": other_location}))
+            self.assertEqual(
+                json.loads((Path(self.directory.name) / "workspace.json").read_text())["http://localhost:8000"],
+                other_location,
+            )
+
+            self.workspace_response = FakeSdkResponse(403, {"detail": "forbidden"})
+            result = self.invoke("workspace", "open", location)
             self.assertNotEqual(result.exit_code, 0)
-            self.assertIn("s3://bucket/prefix", result.output)
+            self.assertEqual(
+                json.loads((Path(self.directory.name) / "workspace.json").read_text())["http://localhost:8000"],
+                other_location,
+            )
+
+    def test_workspace_preference_override_forget_and_history_is_ignored(self):
+        location = "s3://resource/123/data/contents/"
+        with patch.object(click, "get_app_dir", return_value=self.directory.name):
+            (Path(self.directory.name) / "history.json").write_text(
+                json.dumps({"http://localhost:8000": "s3://resource/old/data/contents/"}),
+            )
+            (Path(self.directory.name) / "workspace.json").write_text(
+                json.dumps({"http://localhost:8000": location}),
+            )
+            result = self.invoke("workspace", "show", env={"FIMBOX_WORKSPACE": ""})
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertIn(location, result.output)
+            result = self.invoke("--workspace", "s3://resource/456/data/contents/x", "workspace", "show")
+            self.assertIn("s3://resource/456/data/contents/x", result.output)
+            result = self.invoke("workspace", "forget")
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertEqual(json.loads((Path(self.directory.name) / "workspace.json").read_text()), {})
+            self.assertTrue((Path(self.directory.name) / "history.json").exists())
+
+    def test_workspace_location_validation_and_missing_workspace_guidance(self):
+        for location in (
+            "https://example.test/workspace", "s3://bucket/",
+            "s3://resource/../data/contents/x", "s3://resource/123/data/contents/../x",
+        ):
+            result = self.invoke("--workspace", location, "jobs")
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("Workspace", result.output)
+        result = self.invoke("jobs", env={"FIMBOX_WORKSPACE": ""})
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("workspace create", result.output)
+        self.assertIn("workspace open", result.output)
+        self.assertEqual(self.requests, [])
 
     def setUp(self):
         self.runner = CliRunner()
@@ -112,6 +140,28 @@ class SdkCliTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.body = Path(self.directory.name) / "scenario.json"
         self.body.write_text(json.dumps(PAYLOAD))
+        self.workspace_requests = []
+        self.workspace_response = FakeSdkResponse(201, {
+            "workspace_id": "91ebf4cc-f901-4445-a59e-f45dac551f36", "name": "Flood study", "bucket": "resource",
+            "prefix": "123/data/contents/", "created_by": "alice", "created_at": "2026-01-01T00:00:00Z",
+            "format": "fimbox-workspace", "version": 1,
+        })
+
+        def create_workspace(client, body):
+            self.workspace_requests.append(("create", body.to_dict()))
+            return self.workspace_response
+
+        def open_workspace(client, body):
+            self.workspace_requests.append(("open", body.to_dict()))
+            return self.workspace_response
+
+        for module, operation in (
+            (fimbox_cli.create_workspace_workspaces_post, create_workspace),
+            (fimbox_cli.load_workspace_workspaces_open_post, open_workspace),
+        ):
+            patcher = patch.object(module, "sync_detailed", side_effect=operation)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.job_id = str(uuid4())
         self.requests = []
         self.login_responses = {}
@@ -135,9 +185,15 @@ class SdkCliTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def invoke(self, *arguments, token="test-session", **kwargs):
+        env = {
+            "FIMBOX_API_URL": "http://localhost:8000",
+            "FIMBOX_SESSION_TOKEN": token,
+            "FIMBOX_WORKSPACE": "s3://resource/test/data/contents/",
+        }
+        env.update(kwargs.pop("env", {}))
         return self.runner.invoke(
             fimbox_cli.app, list(arguments),
-            env={"FIMBOX_API_URL": "http://localhost:8000", "FIMBOX_SESSION_TOKEN": token},
+            env=env,
             **kwargs,
         )
 
@@ -151,15 +207,15 @@ class SdkCliTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 2)
         self.assertIn("No such command", result.output)
         result = self.invoke("submit", "--help")
-        self.assertIn("--output-bucket", result.output)
-        self.assertIn("--overwrite", result.output)
         self.assertIn("--body", result.output)
+        self.assertNotIn("--output-bucket", result.output)
+        self.assertNotIn("--output-prefix", result.output)
+        self.assertNotIn("--overwrite", result.output)
         self.assertEqual(self.requests, [])
 
     def test_cli_uses_generated_endpoint_and_models(self):
         result = self.invoke(
-            "submit", "--body", str(self.body),
-            "--output-bucket", "bucket", "--output-prefix", "data/output", "--overwrite",
+            "submit", "--body", str(self.body), "--max-procs", "4",
         )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(json.loads(result.output)["job_id"], self.job_id)
@@ -168,13 +224,9 @@ class SdkCliTests(unittest.TestCase):
         self.assertEqual(request.url.path, "/jobs/hand-fim")
         self.assertEqual(request.method, "POST")
         self.assertEqual(dict(request.url.params), {})
-        self.assertEqual(json.loads(request.content), {
-            "scenarios": PAYLOAD,
-            "output_bucket": "bucket",
-            "output_prefix": "data/output",
-            "max_procs": None,
-            "overwrite": True,
-        })
+        self.assertEqual(request.headers["X-FIMBox-Workspace"], "s3://resource/test/data/contents/")
+        self.assertEqual(json.loads(request.content)["scenarios"], PAYLOAD)
+        self.assertEqual(json.loads(request.content)["max_procs"], 4)
         self.assertEqual(request.headers["Authorization"], "Bearer test-session")
 
     def test_generated_sdk_returns_typed_results(self):
@@ -201,7 +253,6 @@ class SdkCliTests(unittest.TestCase):
     def test_updatedstreaming_mode_is_sent_through_sdk(self):
         result = self.invoke(
             "submit", "--body", str(self.body), "--execution-mode", "streaming-2026",
-            "--output-bucket", "bucket", "--output-prefix", "runs",
         )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(json.loads(self.requests[0].content)["execution_mode"], "streaming-2026")
@@ -210,12 +261,12 @@ class SdkCliTests(unittest.TestCase):
         for payload in ([], {}, [{**PAYLOAD[0], "extra": "not allowed"}], [{"ScenarioID": "missing"}]):
             self.body.write_text(json.dumps(payload))
             result = self.invoke(
-                "submit", "--body", str(self.body), "--output-bucket", "bucket", "--output-prefix", "",
+                "submit", "--body", str(self.body),
             )
             self.assertEqual(result.exit_code, 1, result.output)
         self.body.write_text("invalid json")
         result = self.invoke(
-            "submit", "--body", str(self.body), "--output-bucket", "bucket", "--output-prefix", "",
+            "submit", "--body", str(self.body),
         )
         self.assertEqual(result.exit_code, 1)
         result = self.invoke("submit")
@@ -223,19 +274,16 @@ class SdkCliTests(unittest.TestCase):
         self.assertIn("Input method", result.output)
         self.assertEqual(self.requests, [])
 
-    def test_submit_defaults_to_local_output(self):
+    def test_submit_omits_independent_output_destinations(self):
         result = self.invoke("submit", "--body", str(self.body))
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(dict(self.requests[-1].url.params), {})
-        self.assertEqual(json.loads(self.requests[-1].content), {
-            "scenarios": PAYLOAD,
-            "output_bucket": None,
-            "output_prefix": "",
-            "max_procs": None,
-            "overwrite": False,
-        })
+        body = json.loads(self.requests[-1].content)
+        self.assertEqual(body["scenarios"], PAYLOAD)
+        self.assertNotIn("output_bucket", body)
+        self.assertNotIn("output_prefix", body)
         result = self.invoke("submit", "--body", str(self.body), "--output-prefix", "orphan")
-        self.assertEqual(result.exit_code, 1)
+        self.assertEqual(result.exit_code, 2)
 
     def test_submit_interactive_manual_inputs_build_a_scenario(self):
         result = self.invoke(
@@ -260,91 +308,81 @@ class SdkCliTests(unittest.TestCase):
         self.assertEqual(request["scenarios"], PAYLOAD)
         self.assertEqual(request["max_procs"], 1)
 
-    def test_interactive_required_output_prompts_and_discovers_config_once(self):
+    def test_interactive_workspace_submission_discovers_config_once(self):
         self.login_responses["/auth/config"] = [httpx.Response(200, json={
-            "authentication_enabled": True, "require_hydroshare_output": True,
+            "authentication_enabled": True, "require_hydroshare_output": True, "workspace_required": True,
         })]
         with patch.object(fimbox_cli, "__api_config", wraps=self.real_api_config), patch.object(
             fimbox_cli, "__authentication_enabled", wraps=self.real_auth_mode,
         ):
             result = self.invoke(
-                "submit", input="\nasdf\n\n\n\n\nbucket\nruns/test\ny\n",
+                "submit", input="\nasdf\n\n\n\n\n",
             )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("HydroShare output bucket (required by the API)", result.output)
+        self.assertNotIn("output bucket", result.output)
         self.assertEqual([request.url.path for request in self.requests], [
             "/auth/config", "/jobs/hand-fim",
         ])
         request = json.loads(self.requests[-1].content)
-        self.assertEqual(request["output_bucket"], "bucket")
-        self.assertEqual(request["output_prefix"], "runs/test")
-        self.assertTrue(request["overwrite"])
+        self.assertNotIn("output_bucket", request)
+        self.assertNotIn("output_prefix", request)
+        self.assertEqual(self.requests[-1].headers["X-FIMBox-Workspace"], "s3://resource/test/data/contents/")
 
-    def test_interactive_output_flags_skip_prompts(self):
-        self.api_config.return_value.require_hydroshare_output = True
-        for flag, expected in (("--overwrite", True), ("--no-overwrite", False)):
+    def test_removed_output_flags_are_rejected(self):
+        for flag in ("--overwrite", "--no-overwrite", "--output-bucket", "--output-prefix"):
             with self.subTest(flag=flag):
                 result = self.invoke(
-                    "submit", "--output-bucket", "bucket", "--output-prefix", "",
-                    "--max-procs", "4", flag, input=f"json\n{self.body}\n",
+                    "submit", flag, input=f"json\n{self.body}\n",
                 )
-                self.assertEqual(result.exit_code, 0, result.output)
-                self.assertNotIn("HydroShare output bucket", result.output)
-                self.assertNotIn("Output prefix", result.output)
-                self.assertNotIn("Replace existing", result.output)
-                self.assertNotIn("Max concurrent", result.output)
-                request = json.loads(self.requests[-1].content)
-                self.assertEqual(request["output_bucket"], "bucket")
-                self.assertEqual(request["output_prefix"], "")
-                self.assertEqual(request["max_procs"], 4)
-                self.assertEqual(request["overwrite"], expected)
+                self.assertEqual(result.exit_code, 2, result.output)
+                self.assertIn("No such option", result.output)
+        self.assertEqual(self.requests, [])
 
-    def test_interactive_optional_bucket_prompts_for_remaining_output_options(self):
+    def test_interactive_max_procs_flag_skips_concurrency_prompt(self):
         result = self.invoke(
-            "submit", "--output-bucket", "bucket",
-            input=f"json\n{self.body}\n1\n\nn\n",
+            "submit", "--max-procs", "4", input=f"json\n{self.body}\n",
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("Output prefix", result.output)
-        self.assertIn("Replace existing", result.output)
-        request = json.loads(self.requests[-1].content)
-        self.assertEqual(request["output_prefix"], "")
-        self.assertFalse(request["overwrite"])
+        self.assertNotIn("Max concurrent", result.output)
+        self.assertEqual(json.loads(self.requests[-1].content)["max_procs"], 4)
 
-    def test_interactive_local_output_does_not_prompt_for_storage(self):
+    def test_interactive_anonymous_mode_is_rejected(self):
         self.api_config.return_value = AuthenticationConfig(
             authentication_enabled=False, require_hydroshare_output=False,
         )
         self.auth_mode.side_effect = self.real_auth_mode
         result = self.invoke("submit", input=f"json\n{self.body}\n1\n", token="")
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertNotIn("output bucket", result.output)
-        self.assertNotIn("Output prefix", result.output)
-        self.assertNotIn("Replace existing", result.output)
-        self.assertNotIn("authorization", self.requests[-1].headers)
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("Anonymous local mode is not supported", result.output)
+        self.assertEqual(self.requests, [])
         self.credential_store.get_password.assert_not_called()
 
-    def test_required_bucket_abort_does_not_submit(self):
-        self.api_config.return_value.require_hydroshare_output = True
-        result = self.invoke("submit", input=f"json\n{self.body}\n1\n")
+    def test_missing_workspace_does_not_submit(self):
+        result = self.invoke("submit", input=f"json\n{self.body}\n1\n", env={"FIMBOX_WORKSPACE": ""})
         self.assertEqual(result.exit_code, 1, result.output)
-        self.assertIn("HydroShare output bucket", result.output)
+        self.assertIn("No workspace is selected", result.output)
         self.assertEqual(self.requests, [])
 
-    def test_required_bucket_prompt_accepts_an_explicit_prefix(self):
-        self.api_config.return_value.require_hydroshare_output = True
+    def test_api_without_workspace_enforcement_is_rejected(self):
+        for required in (False, fimbox_cli.UNSET):
+            self.api_config.return_value.workspace_required = required
+            result = self.invoke("submit", "--body", str(self.body))
+            self.assertEqual(result.exit_code, 1, result.output)
+            self.assertIn("does not enforce workspaces", result.output)
+        self.assertEqual(self.requests, [])
+
+    def test_explicit_workspace_is_sent_on_submission(self):
         result = self.invoke(
-            "submit", "--output-prefix", "runs", "--no-overwrite",
-            input=f"json\n{self.body}\n1\nbucket\n",
+            "--workspace", "s3://resource/123/data/contents/study", "submit",
+            input=f"json\n{self.body}\n1\n",
         )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertNotIn("Output prefix", result.output)
-        request = json.loads(self.requests[-1].content)
-        self.assertEqual(request["output_bucket"], "bucket")
-        self.assertEqual(request["output_prefix"], "runs")
+        self.assertEqual(self.requests[-1].headers["X-FIMBox-Workspace"], "s3://resource/123/data/contents/study")
 
     def test_interactive_config_failure_does_not_submit(self):
         self.api_config.side_effect = click.ClickException("Cannot determine API configuration.")
+        self.auth_mode.side_effect = self.real_auth_mode
         result = self.invoke("submit", input=f"json\n{self.body}\n1\n")
         self.assertEqual(result.exit_code, 1, result.output)
         self.assertIn("Cannot determine API configuration", result.output)
@@ -500,29 +538,23 @@ class SdkCliTests(unittest.TestCase):
         self.assertNotIn("session token", result.output)
         self.credential_store.set_password.assert_not_called()
 
-    def test_local_mode_never_prompts_or_reads_keychain_even_with_override_token(self):
+    def test_anonymous_mode_is_rejected_without_keychain_even_with_override_token(self):
         self.auth_mode.return_value = False
         self.response = httpx.Response(200, json={"jobs": []})
         for token in ("", "unused-token"):
             result = self.invoke("jobs", token=token)
-            self.assertEqual(result.exit_code, 0, result.output)
-            self.assertNotIn("authorization", self.requests[-1].headers)
-            self.assertNotIn("session token", result.output)
+            self.assertEqual(result.exit_code, 1, result.output)
+            self.assertIn("Anonymous local mode is not supported", result.output)
+        self.assertEqual(self.requests, [])
         self.credential_store.get_password.assert_not_called()
         self.credential_store.set_password.assert_not_called()
 
-    def test_local_mode_submits_without_a_token(self):
+    def test_anonymous_submission_is_rejected(self):
         self.auth_mode.return_value = False
         result = self.invoke("submit", "--body", str(self.body), token="")
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertNotIn("authorization", self.requests[-1].headers)
-        self.assertEqual(json.loads(self.requests[-1].content), {
-            "scenarios": PAYLOAD,
-            "output_bucket": None,
-            "output_prefix": "",
-            "max_procs": None,
-            "overwrite": False,
-        })
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("Anonymous local mode is not supported", result.output)
+        self.assertEqual(self.requests, [])
         self.credential_store.get_password.assert_not_called()
 
     def test_auth_mode_is_discovered_from_generated_public_endpoint(self):
@@ -658,6 +690,12 @@ class SdkCliTests(unittest.TestCase):
 
 class SdkIntegrationTests(unittest.TestCase):
     def setUp(self):
+        self.storage_case = test_job_history.HistoryTests()
+        self.addCleanup(self.storage_case.doCleanups)
+        self.storage_case.setUp()
+        self.workspace = self.storage_case.workspace
+        self.http_client = self.storage_case.api
+        self.http_client.headers["X-FIMBox-Workspace"] = LOCATION
         for name, value in (
             ("hydroshare_client_id", "test-client"),
             ("hydroshare_client_secret", SecretStr("test-secret")),
@@ -665,16 +703,12 @@ class SdkIntegrationTests(unittest.TestCase):
             patcher = patch.object(main.settings, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
-        main.app.dependency_overrides[auth.get_authenticated_session] = lambda: auth.UserSession(
-            user_id="alice", access_token="provider", scope="read write", expires_at=time.time() + 60,
-        )
-        self.addCleanup(main.app.dependency_overrides.clear)
 
-    def test_interactive_cli_prompts_for_cloud_output_and_enqueues(self):
-        with TestClient(main.app) as http_client, patch.object(
-            Client, "get_httpx_client", return_value=http_client,
+    def test_interactive_cli_uses_workspace_output_and_enqueues(self):
+        with patch.object(
+            Client, "get_httpx_client", return_value=self.http_client,
         ), patch.object(
-            AuthenticatedClient, "get_httpx_client", return_value=http_client,
+            AuthenticatedClient, "get_httpx_client", return_value=self.http_client,
         ), patch.object(
             main.settings, "require_hydroshare_output", True,
         ), patch.object(main, "create_job_credentials"), patch.object(main, "track_user_job"), patch.object(
@@ -682,77 +716,88 @@ class SdkIntegrationTests(unittest.TestCase):
         ) as enqueue:
             result = CliRunner().invoke(
                 fimbox_cli.app, ["submit"],
-                env={"FIMBOX_API_URL": "http://testserver", "FIMBOX_SESSION_TOKEN": "session"},
-                input="\ncloud-test\n\n\n\n\nbucket\nruns/test\nn\n",
+                env={"FIMBOX_API_URL": "http://testserver", "FIMBOX_SESSION_TOKEN": "session",
+                     "FIMBOX_WORKSPACE": LOCATION},
+                input="\ncloud-test\n\n\n\n\n",
             )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn('"status": "queued"', result.output)
         self.assertEqual(enqueue.call_count, 1)
-        self.assertEqual(enqueue.call_args.kwargs["args"][2:], ["bucket", "runs/test", 1, False])
+        args = enqueue.call_args.kwargs["args"]
+        self.assertEqual(args[2:], [
+            self.workspace.bucket, f"{self.workspace.prefix}/jobs/{args[0]}/outputs", 1, False,
+        ])
 
-    def test_required_output_bucket_rejection_matches_sdk_contract(self):
-        with TestClient(main.app) as http_client, patch.object(
-            main.settings, "require_hydroshare_output", True,
-        ), patch.object(tasks.hand_fim, "apply_async") as enqueue:
+    def test_destination_override_rejection_matches_sdk_contract(self):
+        with patch.object(tasks.hand_fim, "apply_async") as enqueue:
             client = AuthenticatedClient(base_url="http://testserver", token="session")
-            client.set_httpx_client(http_client)
+            client.set_httpx_client(self.http_client)
             response = submit_hand_fim_jobs_hand_fim_post.sync_detailed(
                 client=client,
                 body=HandFimJobRequest(
                     scenarios=[Scenario.from_dict(PAYLOAD[0])],
-                    output_bucket=None, output_prefix="",
+                    output_bucket="other", output_prefix="elsewhere",
                 ),
             )
             self.assertEqual(response.status_code, 422)
             self.assertIsInstance(response.parsed, HTTPValidationError)
             self.assertEqual(json.loads(response.content)["detail"], [{
-                "loc": ["body", "output_bucket"],
-                "msg": "This deployment requires a HydroShare output_bucket",
+                "loc": ["body"],
+                "msg": "Output destination is assigned by the active workspace; omit output_bucket/output_prefix",
                 "type": "value_error",
             }])
             enqueue.assert_not_called()
 
     def test_generated_client_enqueues_through_fastapi(self):
-        with TestClient(main.app) as http_client, patch.object(main, "create_job_credentials"), patch.object(
+        with patch.object(main, "create_job_credentials"), patch.object(
             main, "track_user_job",
         ), patch.object(tasks.hand_fim, "apply_async") as enqueue:
             client = AuthenticatedClient(base_url="http://testserver", token="session")
-            client.set_httpx_client(http_client)
+            client.set_httpx_client(self.http_client)
             response = submit_hand_fim_jobs_hand_fim_post.sync_detailed(
                 client=client,
                 body=HandFimJobRequest(
                     scenarios=[Scenario.from_dict(PAYLOAD[0])],
-                    output_bucket="bucket", output_prefix="output",
                 ),
             )
             self.assertEqual(response.status_code, 202)
             self.assertIsInstance(response.parsed, JobSubmitted)
-            enqueue.assert_called_once_with(
-                args=[response.parsed.job_id, PAYLOAD, "bucket", "output", None, False],
-                task_id=response.parsed.job_id, retry=False,
-            )
+            enqueue.assert_called_once()
+            call = enqueue.call_args.kwargs
+            self.assertEqual(call["args"], [
+                response.parsed.job_id, PAYLOAD, self.workspace.bucket,
+                f"{self.workspace.prefix}/jobs/{response.parsed.job_id}/outputs", None, False,
+            ])
+            self.assertEqual(call["task_id"], response.parsed.job_id)
+            self.assertIn("history_archive", call["kwargs"])
 
     def test_cli_enqueues_via_generated_client(self):
         with tempfile.TemporaryDirectory() as directory:
             body = Path(directory) / "scenario.json"
             body.write_text(json.dumps(PAYLOAD))
-            with TestClient(main.app) as client, patch.object(
-                AuthenticatedClient, "get_httpx_client", return_value=client,
+            with patch.object(
+                AuthenticatedClient, "get_httpx_client", return_value=self.http_client,
             ), patch.object(
-                Client, "get_httpx_client", return_value=client,
+                Client, "get_httpx_client", return_value=self.http_client,
             ), patch.object(main, "create_job_credentials"), patch.object(main, "track_user_job"), patch.object(
                 tasks.hand_fim, "apply_async",
             ) as enqueue:
                 result = CliRunner().invoke(fimbox_cli.app, [
-                    "submit", "--body", str(body), "--output-bucket", "bucket", "--output-prefix", "output",
-                ], env={"FIMBOX_SESSION_TOKEN": "session"})
+                    "submit", "--body", str(body),
+                ], env={"FIMBOX_SESSION_TOKEN": "session", "FIMBOX_WORKSPACE": LOCATION})
             self.assertEqual(result.exit_code, 0, result.output)
             self.assertEqual(enqueue.call_args.kwargs["args"][1], PAYLOAD)
 
     def test_captured_spec_matches_source_and_covers_all_endpoints(self):
         root = Path(__file__).resolve().parents[1]
         spec = json.loads((root / "sdk" / "openapi.json").read_text())
-        live_schema = main.app.openapi()
+        live_schema = json.loads(json.dumps(main.app.openapi()))
+        for path_item in live_schema["paths"].values():
+            for operation in path_item.values():
+                for response in operation.get("responses", {}).values():
+                    content = response.get("content", {})
+                    if "image/png" in content:
+                        content["application/octet-stream"] = content.pop("image/png")
         self.assertEqual(live_schema["info"], spec["info"])
         self.assertEqual(
             live_schema["paths"],

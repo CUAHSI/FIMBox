@@ -1,5 +1,7 @@
 import io
 import json
+import shutil
+import subprocess
 import tempfile
 import time
 import unittest
@@ -62,16 +64,56 @@ class UiTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertNotEqual(response.headers.get("cache-control"), "no-store")
 
-    def test_page_has_saved_location_tab_and_pickers(self):
+    def test_page_remembers_workspaces_without_saved_location_tab_or_pickers(self):
         page = self.client.get("/ui").text
-        self.assertIn('data-tab="locations"', page)
-        self.assertIn('id="location-form"', page)
-        self.assertEqual(page.count('class="location-picker"'), 6)
+        self.assertNotIn('data-tab="locations"', page)
+        self.assertNotIn('id="location-form"', page)
+        self.assertIn('id="workspace-list"', page)
+        self.assertIn("Remembered workspaces", page)
+        self.assertIn("Forget only removes the browser shortcut", page)
+        self.assertIn('id="workspace-create"', page)
+        self.assertIn('id="workspace-open"', page)
+        self.assertIn("Workspace jobs", page)
+        self.assertNotIn("Your jobs", page)
+        self.assertIn('href="/ui/static/app.css?v=cam-1524-recent-workspaces"', page)
+        self.assertIn('src="/ui/static/app.js?v=cam-1524-recent-workspaces"', page)
+        css = self.client.get("/ui/static/app.css?v=cam-1524-recent-workspaces").text
+        self.assertIn("[hidden] { display: none !important; }", css)
+        self.assertIn("s3://resource/&lt;resource_id&gt;/data/contents/&lt;empty_subprefix&gt;", page)
+        self.assertIn("no existing files or folders", page)
+        self.assertIn("Do not choose the resource root", page)
+        self.assertNotIn('class="location-picker"', page)
+        self.assertNotIn('id="jobs-clear"', page)
+        self.assertNotIn('id="history-export"', page)
+        self.assertNotIn('name="output_bucket"', page)
+        self.assertNotIn('name="output_prefix"', page)
+        self.assertNotIn('name="overwrite"', page)
         script = self.client.get("/ui/static/app.js").text
-        self.assertIn("fimbox-locations:", script)
+        self.assertNotIn("fimbox-locations:", script)
+        self.assertIn("fimbox-workspace:v1:", script)
+        self.assertIn("fimbox-workspaces:v1:", script)
+        self.assertIn("X-FIMBox-Workspace", script)
+        self.assertIn('api("/workspaces/open"', script)
+        self.assertIn('api("/workspaces"', script)
+        self.assertNotIn("fimbox-history:", script)
+        self.assertNotIn("/jobs/history/", script)
+        self.assertIn("No work can be performed in anonymous mode.", script)
+        submit_job = script.split("async function submitJob", 1)[1].split("// ---------- Results", 1)[0]
+        compare_job = script.split("async function submitCompare", 1)[1].split("// ---------- Startup", 1)[0]
+        for field in ("output_bucket", "output_prefix", "overwrite"):
+            self.assertNotIn(field, submit_job)
+            self.assertNotIn(field, compare_job)
 
     def test_ui_routes_are_not_in_openapi(self):
         self.assertFalse([path for path in main.app.openapi()["paths"] if path.startswith("/ui")])
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for browser-state unit tests")
+    def test_remembered_workspace_browser_state(self):
+        script = Path(__file__).with_name("ui_workspaces.test.cjs")
+        completed = subprocess.run(
+            [shutil.which("node"), "--test", str(script)], capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
 
     def test_config_without_streaming(self):
         config = self.client.get("/ui/config").json()

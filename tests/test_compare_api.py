@@ -4,6 +4,7 @@ import shutil
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
@@ -25,6 +26,10 @@ REQUEST = {
     "base_bucket": "fim-output", "base_prefix": "runs/legacy",
     "candidate_bucket": "fim-output", "candidate_prefix": "runs/streaming",
     "output_bucket": "fim-output", "output_prefix": "runs/compare",
+}
+API_REQUEST = {
+    "base_bucket": "fim-output", "base_prefix": "runs/legacy",
+    "candidate_bucket": "fim-output", "candidate_prefix": "runs/streaming",
 }
 TILE_KEYS = ["runs/streaming/s1/03020201/0_0.cog", "runs/streaming/s1/03020201/0_1.cog"]
 
@@ -49,19 +54,17 @@ def write_raster(path: Path, values, col=0) -> Path:
 
 
 class CompareRequestTests(unittest.TestCase):
-    def test_requires_output_bucket_and_distinct_safe_locations(self):
-        CompareJobRequest(**REQUEST)
+    def test_output_is_workspace_assigned_and_sources_remain_distinct_and_safe(self):
+        request = CompareJobRequest(**API_REQUEST)
+        self.assertIsNone(request.output_bucket)
+        self.assertEqual(request.output_prefix, "")
         with self.assertRaisesRegex(ValidationError, "requires output_bucket"):
-            CompareJobRequest(**{**REQUEST, "output_bucket": None, "output_prefix": ""})
-        with self.assertRaisesRegex(ValidationError, "requires output_prefix"):
-            CompareJobRequest(**{**REQUEST, "output_prefix": "/"})
+            CompareJobRequest(**{**API_REQUEST, "output_prefix": "runs/compare"})
         with self.assertRaisesRegex(ValidationError, "different results"):
-            CompareJobRequest(**{**REQUEST, "candidate_prefix": "/runs/legacy/"})
-        with self.assertRaisesRegex(ValidationError, "must differ"):
-            CompareJobRequest(**{**REQUEST, "output_prefix": "runs/streaming/"})
+            CompareJobRequest(**{**API_REQUEST, "candidate_prefix": "runs/legacy"})
         with self.assertRaisesRegex(ValidationError, "'..'"):
-            CompareJobRequest(**{**REQUEST, "base_prefix": "runs/../other"})
-        CompareJobRequest(**{**REQUEST, "candidate_bucket": "other", "candidate_prefix": "runs/legacy"})
+            CompareJobRequest(**{**API_REQUEST, "base_prefix": "runs/../other"})
+        CompareJobRequest(**{**API_REQUEST, "candidate_bucket": "other", "candidate_prefix": "runs/legacy"})
 
 
 class MultiRasterBaseTests(unittest.TestCase):
@@ -201,7 +204,12 @@ class CompareApiTests(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(main.app)
         session = auth.UserSession(user_id="alice", access_token="token", scope="read", expires_at=time.time() + 60)
+        self.workspace = main.workspaces.Workspace(
+            bucket="fim-output", prefix="runs", workspace_id=uuid4(), name="Test workspace",
+            created_by="alice", created_at=datetime.now(timezone.utc),
+        )
         main.app.dependency_overrides[auth.get_authenticated_session] = lambda: session
+        main.app.dependency_overrides[main.workspaces.selected_workspace] = lambda: self.workspace
         self.addCleanup(main.app.dependency_overrides.clear)
         for name, value in (
             ("hydroshare_client_id", "test-client"),
@@ -214,10 +222,18 @@ class CompareApiTests(unittest.TestCase):
             patcher = patch.object(main, name)
             setattr(self, name, patcher.start())
             self.addCleanup(patcher.stop)
+        for target, name, value in (
+            (main.job_history, "prepare", {}),
+            (main.job_history, "enqueue_failed", None),
+            (main.workspaces, "bind_job", None),
+        ):
+            patcher = patch.object(target, name, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def submit(self, **options):
         with patch.object(tasks.hand_fim_compare, "apply_async") as enqueue:
-            response = self.client.post("/jobs/compare", json={**REQUEST, **options})
+            response = self.client.post("/jobs/compare", json={**API_REQUEST, **options})
         return response, enqueue
 
     def test_compare_job_is_queued_on_the_default_queue(self):
@@ -226,7 +242,7 @@ class CompareApiTests(unittest.TestCase):
         job_id = response.json()["job_id"]
         self.assertEqual(enqueue.call_args.kwargs["args"], [
             job_id, "fim-output", "runs/legacy", "fim-output", "runs/streaming",
-            "fim-output", "runs/compare", True,
+            "fim-output", f"runs/jobs/{job_id}/outputs", True,
         ])
         self.assertEqual(enqueue.call_args.kwargs["task_id"], job_id)
         self.assertNotIn("queue", enqueue.call_args.kwargs)
@@ -238,14 +254,24 @@ class CompareApiTests(unittest.TestCase):
             response, enqueue = self.submit()
         self.assertEqual(response.status_code, 409)
         enqueue.assert_not_called()
-        response, enqueue = self.submit(output_prefix="runs/legacy")
+        response, enqueue = self.submit(
+            output_bucket="fim-output", output_prefix="runs/legacy",
+        )
         self.assertEqual(response.status_code, 422)
+        enqueue.assert_not_called()
+        response, enqueue = self.submit(
+            output_bucket="elsewhere", output_prefix="other/jobs/output",
+        )
+        self.assertEqual(response.status_code, 422)
+        enqueue.assert_not_called()
+        response, enqueue = self.submit(base_prefix="outside/legacy")
+        self.assertEqual(response.status_code, 403)
         enqueue.assert_not_called()
 
     def test_queue_failure_releases_credentials_and_tracking(self):
         with patch.object(tasks.hand_fim_compare, "apply_async", side_effect=OSError("down")):
             with self.assertRaises(OSError):
-                self.client.post("/jobs/compare", json=REQUEST)
+                self.client.post("/jobs/compare", json=API_REQUEST)
         self.delete_job_credentials.assert_called_once()
         self.untrack_user_job.assert_called_once()
 

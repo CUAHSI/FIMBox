@@ -3,6 +3,13 @@
 This document summarizes the purpose of every Python file in the repository, to
 give future work quick orientation without re-reading all source files.
 
+Domain terminology is recorded in [`GLOSSARY.md`](../GLOSSARY.md).
+[`docs/workspaces-spec.md`](../docs/workspaces-spec.md) records CAM-1524's
+collaborative workspace contract. API/UI/CLI/SDK require authenticated workspace
+selection; creation requires an empty subprefix under a HydroShare resource's
+`<resource_id>/data/contents/`. There is no anonymous/local submission, legacy
+archive import, or shared deletion.
+
 ## Project overview
 
 FIMBox provides a FastAPI/Celery service, a generated Python SDK, and a local HTTP CLI
@@ -67,12 +74,12 @@ IPython/ipyleaflet are included for host notebook and map regression tests.
   prompt with a default of 1.
   `fimbox`/`pixi run fimbox` are the installed console entry points.
   Defaults to `http://localhost:8000`.
-  Discovers `/auth/config` via the SDK; local mode uses Client without a token,
-  prompt, or keychain access. Discovery errors fail explicitly.
-  Configuration includes required `require_hydroshare_output` and is cached
-  per CLI invocation. Interactive submissions prompt for a missing required
-  bucket and, when a bucket is selected, unspecified output prefix/overwrite.
-  Explicit flags skip their prompts; `--body` keeps job options noninteractive.
+  Discovers `/auth/config` via the SDK; missing OAuth configuration fails
+  protected calls explicitly instead of using an anonymous client.
+  Configuration includes `workspace_required`. `workspace create/open/show/forget`
+  manages a separate saved workspace preference per API; `--workspace`/
+  `FIMBOX_WORKSPACE` overrides it. No legacy history preference is auto-adopted.
+  Submissions omit destinations; the workspace assigns unique per-job outputs.
   Authenticated session precedence: option/environment, OS keychain scoped to API URL,
   browser login via fimbox_login.begin_login. Displays the authorization link,
   polls for up to 10 minutes, and retrieves the token without copy/paste.
@@ -83,9 +90,8 @@ IPython/ipyleaflet are included for host notebook and map regression tests.
   No plaintext credential files, Docker subprocesses, or API server imports.
   Help does not require a server. CLI rejects fields dropped by generated
   models and surfaces HTTP/transport/contract errors without retries.
-  Required-HydroShare-output HTTP 422 rejections use the documented
-  validation-error list shape so both the CLI and direct SDK callers can
-  parse and report the error.
+  Workspace HTTP 422 rejections use the documented validation-error list
+  shape so both the CLI and direct SDK callers can parse and report the error.
 - **`src/fimbox_sdk/`** — Locally generated and gitignored; do not hand-edit or
   commit. Local openapi-python-client 0.28.0 generates Client/AuthenticatedClient,
   attrs models, sync/async operation modules, errors and response types for every endpoint.
@@ -127,7 +133,8 @@ IPython/ipyleaflet are included for host notebook and map regression tests.
 
 - **`notebooks/cloud_hand_fim.ipynb`** — User-run generated SDK example: HTTPS API
   configuration, SDK auth discovery and browser-assisted polling via fimbox_login,
-  separate Connect cell, typed direct submission,
+  separate Connect cell that opens a workspace (or explicitly creates an empty
+  child subprefix), workspace header on the authenticated client, typed direct submission,
   separate inline and test-JSON scenario cells feeding the submission cell,
   using AuthenticatedClient (no CLI subprocess) and bounded polling/resume.
   Setup reprocesses the kernel's site-package .pth files after editable install
@@ -139,11 +146,14 @@ IPython/ipyleaflet are included for host notebook and map regression tests.
   `output_map(client, paths)` uses generated `/outputs` info/tile SDK operations
   for S3 COG/TIFF or scenario manifest paths, without job IDs/results.
   The API uses current HydroShare session credentials cached independently of
-  job credentials and authorizes via S3 permissions; retained manifest metadata
-  allows maps to reopen after the 24-hour job TTL. Existing job-scoped endpoints
-  retain ownership checks. `job_map` is a saved-result compatibility wrapper.
+  job credentials and authorizes within the active workspace via S3 permissions;
+  retained manifest metadata allows maps to reopen after the 24-hour job TTL.
+  Job-scoped endpoints permit workspace collaborators to read retained results.
+  `job_map` is a saved-result compatibility wrapper.
   The cloud notebook builds editable legacy COG or streaming manifest paths from
-  EXECUTION_MODE and destination/scenario names, without a saved job result.
+  EXECUTION_MODE, the workspace, a submitted/resumed job ID, and scenario names,
+  without a saved job result. Resume skips submission; parity inputs stay inside
+  the workspace and new destinations are server-assigned.
   All SDK requests run in the notebook kernel;
   credentials never enter browser tile URLs. Raster selector prefers COGs,
   viewport requests cap at 64 tiles (coarsening zoom for large views), and a
@@ -187,11 +197,12 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
   the secret is used by the server-side authorization-code exchange.
   The API Compose service loads root `.env` in raw mode to preserve literal
   credential characters; Compose 2.30+ is required.
-  Neither OAuth credential enables shared anonymous local mode; both enforce
-  authentication. Partial credentials fail startup, with input values hidden.
+  Missing OAuth credentials disable protected work; no anonymous local identity
+  is issued. Partial credentials fail startup, with input values hidden.
   REQUIRE_HYDROSHARE_OUTPUT defaults false locally; Terraform sets it true for
-  the API, which fails startup without OAuth credentials and rejects missing
-  output_bucket at the submission route before enqueueing.
+  the API, which fails startup without OAuth credentials. All submissions derive
+  their output bucket/prefix from the selected workspace regardless of this
+  older deployment setting.
 - **`src/fimbox_api/remote_json.py`** — SSRF-guarded `fetch_json(url)`:
   - accepts https only, with no URL credentials
   - every redirect hop must resolve to global IPs only, and the connection is
@@ -251,15 +262,17 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
       time-step scenarios" form (UTC range, 1–24 h step, ≤ 240): it replaces
       the row with per-timestep scenarios (`YYYYMMDDTHHMMZ` IDs), merging by
       ScenarioID so several reaches share timesteps.
-    - job submission and log polling
-    - an "S3 locations" tab storing named `{id,name,bucket,prefix}` entries in
-      `localStorage` under `fimbox-locations:<origin>:<user id or "local">`.
-      `.location-picker` placeholders in forms (`data-bucket`/`data-prefix`, or
-      `data-uri` for the history field) become a saved-location select plus a
-      relative subprefix. The subprefix makes the target fields read-only and
-      writes the joined bucket/prefix. `data-required` makes the subprefix
-      mandatory for outputs. Code that fills target fields first calls
-      `useCustomLocation`.
+    - mandatory create/open workspace gate, per-user/browser last-workspace
+      restoration through the API, job submission and log polling; workspace
+      switches clear results/maps and ignore stale in-flight responses
+    - remembered `{name,location}` workspace shortcuts in `localStorage` under
+      `fimbox-workspaces:v1:<origin>:<user id>`, ordered most recently opened
+      first and deduplicated by location. Switch workspace reveals the list
+      plus create/open forms; every open revalidates storage access. Forget
+      only removes the browser shortcut. The former S3 locations tab/pickers
+      are removed; unvalidated legacy locations are not imported. The previous
+      single active-workspace preference is retained and added to the list
+      after successful restoration.
     - result views: README (safe markdown subset), parameters, files, and a
       Leaflet map over `/outputs/tiles` that fetches tiles with the bearer
       token. `createResultMap` caches one overlay per key and its
@@ -270,7 +283,9 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
     - a "Compare two results" form (`POST /jobs/compare`, prefilled by
       "Compare as base/candidate" on any opened result); comparison jobs show
       base/candidate links, a parity table with "Map diff", and diff layers
-  - Tests are in `tests/test_ui.py`.
+  - Tests are in `tests/test_ui.py`; browser-state regressions in
+    `tests/ui_workspaces.test.cjs` run through Node's built-in test runner
+    (also invoked by the Python UI suite when Node is available).
 - **`src/fimbox_api/celery_app.py`** — JSON-only Celery configuration and
   task discovery, started-state tracking, late acknowledgement, and a
   single-process worker.
@@ -278,30 +293,33 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
   reusing `src/schemas/hand_fim_schema.py`. Adds API-specific unique
   scenario ID, HUC-8, finite streamflow validation, per-job output bucket/prefix,
   and stored destination metadata.
-  Bucket is optional (local default); prefix defaults empty and requires a
-  bucket when nonempty. Result includes local_output_dir; local file keys are null.
+  Submission destination fields default to null/empty so the API derives them
+  from the active workspace and new job UUID. Workers still receive and validate
+  explicit destinations; standalone worker tests can exercise temporary local
+  output, but API callers cannot submit local jobs.
   HandFimJobOptions extends output options with optional positive max_procs,
   and an overwrite flag defaulting false, included alongside scenarios in the
   submission JSON body. Worker revalidates options before execution.
 - **`src/fimbox_api/main.py`** — FastAPI app: `POST /jobs/hand-fim` accepts
   a JSON object containing scenarios and job options. All job routes
-  enforce ownership via a session when configured, or a reserved shared local
-  identity without credentials. OpenAPI documents both alternatives consistently
-  across modes. Also provides user job listing,
-  with JobList/JobSummary objects containing job_id/status (not plain ID
+  require authenticated workspace access. OpenAPI requires OAuth, without an
+  anonymous security alternative. Provides workspace job listing,
+  with JobList/JobSummary objects containing job ID/status, submitter, type,
+  submitted time, and execution_state_known (not plain ID
   strings), sharing status normalization with individual job polling,
   byte-offset worker-log polling, queued-job cancellation, public health, and
   explicit storage/queue errors.
-  Raster info/PNG routes select only successful owned job manifest entries,
+  Raster info/PNG routes select only successful workspace job manifest entries,
   require retained S3 keys, validate tile coordinates, and return no-store data.
   Login-response middleware prevents caching/referrer leakage for device routes
   and OAuth callbacks, including error and validation responses.
   `POST /jobs/parity` (ParityJobRequest: legacy bucket/prefix plus a distinct
-  output destination) queues `hand_fim_parity`; it requires streaming config
+  workspace-derived output destination) queues `hand_fim_parity`; it requires streaming config
   and authentication, uses STREAM_QUEUE, and releases credentials/tracking if
   enqueueing fails. `POST /jobs/compare` (CompareJobRequest: base and
-  candidate bucket/prefix plus a distinct output destination) queues
-  `hand_fim_compare` on the default queue; it needs authentication only.
+  candidate workspace-relative locations) queues `hand_fim_compare` on the
+  default queue. Both input prefixes must stay inside the active workspace.
+  Only submitters with trusted live ownership/workspace associations may cancel.
 - **`src/fimbox_api/parity.py`** — `compare_scenario_outputs`: windowed
   wet-cell diff of a legacy raster (or a list of base tiles, unioned; the
   first defines the grid) against the union of streaming tiles on
@@ -404,44 +422,45 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
 - **`src/fimbox_api/job_resources.py`** — Samples cgroup memory usage while a
   worker task runs; `HistoryTask` includes the sampled peak worker-container
   memory in successful job results when the metric is available.
-- **`src/fimbox_api/history.py`** — Opt-in persistent S3 job metadata selected by
-  `X-FIMBox-History-Location: s3://bucket/prefix`. Queued records are written
+- **`src/fimbox_api/workspaces.py`** — Authenticated create/open routes,
+  bounded versioned descriptor validation, required `X-FIMBox-Workspace`
+  selection, current-user S3 authorization, empty HydroShare contents subprefix
+  creation with conditional descriptor writes, output path confinement, and
+  Redis-backed trusted live-job/workspace associations. No FIMBox membership
+  registry; permissions come from HydroShare/S3.
+- **`src/fimbox_api/history.py`** — Mandatory workspace job metadata.
+  Queued records are written
   before enqueue; `HistoryTask` wraps all three worker tasks to retain started
   and terminal snapshots plus terminal logs. Non-secret `history_archive` task
   kwargs preserve existing positional arguments. Records contain original
   request, user/job/type, UTC timestamps, result/error; no tokens/credentials.
-  Per-user SHA256 namespaces and per-job JSON/log objects avoid shared index
-  races. Main job list/status/log/raster endpoints read archives after Redis
-  expiry; `/jobs/{id}/archive` exposes inputs. Reads verify user/job identity,
+  Per-job `jobs/<id>/record.json`, `worker.log`, and `outputs/` paths avoid
+  shared-index races. Version-2 records retain submitter/workspace identity.
+  Main job list/status/log/raster endpoints read archives after Redis
+  expiry; `/jobs/{id}/archive` exposes inputs. Reads verify workspace/job identity,
   paginate S3 listing, limit records to 32 MiB, and retain byte-offset UTF-8
-  log reads. `/jobs/history/export` (UI export button / CLI `history export`)
-  explicitly copies completed Redis jobs/logs, skipping active jobs and existing
-  archives with conditional S3 writes. Export provenance marks unavailable inputs,
-  job type, and submitted time; Redis is unchanged. Failures are explicit.
-  `/jobs/history/clear` (UI **Clear history** / CLI `history clear --yes`)
-  deletes finished jobs' S3 records/logs (when a location is selected) before
-  forgetting their Redis result/logs/timing/ownership; active jobs and outputs
-  are kept.
+  log reads. Legacy personal archives are untouched; export/import and shared
+  Clear history are not exposed. Failures are explicit.
   No automatic backfill or S3 TTL; lifecycle rules still
   apply. Abrupt worker loss may leave the last running snapshot.
-  UI remembers location per account/browser; CLI `history use/show/disable/job`
-  remembers location per API in the user config directory, with
-  `--history-location`/`FIMBOX_HISTORY_LOCATION` overrides. Server authorization
-  scopes either client's selected location to the authenticated user.
+  UI remembers and reopens the workspace per account/browser; CLI preferences
+  are separate. Collaborators use their own storage credentials for every
+  read, including rasters. `execution_state_known: false` marks nonterminal
+  snapshots when live execution cannot be confirmed.
   Tests: `tests/test_job_history.py`, related CLI cases.
 - **`src/fimbox_api/auth.py`** — HydroShare authorization-code exchange,
   verified user-info identity, Redis-backed opaque sessions with expiry,
   single-use browser-bound OAuth state, and per-user job ownership/tracking.
   Provider tokens stay in Redis. No prototype mock-token or client-supplied
   identity fallback when authentication is configured; bearer authentication
-  uses the real supplied token. Anonymous local mode uses a reserved identity
-  that cannot be issued by the provider or loaded from an authenticated session.
+  uses the real supplied token. Missing OAuth configuration returns 503 for
+  protected calls; the old anonymous local identity is never issued.
   OAuth failures report the token-exchange/user-info stage, HTTP status, and
   allowlisted OAuth error codes without exposing provider bodies or tokens.
 - **`src/fimbox_api/auth_routes.py`** — Browser login/callback, PKCE form-token
   exchange for Swagger, authenticated session info, and local session logout.
-  Public `/auth/config` advertises authentication_enabled; logout in anonymous
-  mode returns 409. Auth routes are excluded from the live FastAPI OpenAPI
+  Public `/auth/config` advertises authentication_enabled and workspace_required;
+  protected requests without OAuth configuration return 503. Auth routes are excluded from the live FastAPI OpenAPI
   schema and `/docs`; their captured `sdk/openapi.json` definitions remain for
   the generated CLI auth client. HydroShare S3 submissions require configured
   authentication.

@@ -52,8 +52,6 @@ def __write_output_readme(
         "fimbox", "submit", "--body", "scenarios.json",
         "--execution-mode", destination.execution_mode, "--max-procs", str(max_procs),
     ]
-    if destination.output_bucket is not None:
-        command.extend(["--output-bucket", destination.output_bucket, "--output-prefix", "NEW_OUTPUT_PREFIX"])
     layout = (
         "Each scenario has a `<ScenarioID>/manifest.json` listing its COG tile keys, geographic bounds, "
         "and grid metadata. Tiles live at `<ScenarioID>/<huc>/<row>_<col>.cog`. "
@@ -107,10 +105,10 @@ def __write_output_readme(
     )
     lines.extend([
         "\n## Rerun\n\n",
-        "Install FIMBox, configure its API URL, and authenticate with HydroShare as required by that API. "
+        "Install FIMBox, configure its API URL, authenticate with HydroShare, and create or open a workspace. "
         "Download `scenarios.json`, then run from its directory:\n\n",
         f"```sh\n{shlex.join(command)}\n```\n\n",
-        "Replace `NEW_OUTPUT_PREFIX` with a new destination prefix to avoid replacing these outputs. "
+        "The active workspace assigns a new per-job output prefix, preserving these outputs. "
         "Rerunning incurs computation costs. The receiving worker must support this execution mode; "
         "streaming also requires the prepared hydrofabric configuration above. "
         "Exact reproduction depends on using the same source data and software environment; "
@@ -120,7 +118,8 @@ def __write_output_readme(
     if destination.output_bucket is not None:
         paths = [f"s3://{destination.output_bucket}/{key}" for key in output_keys]
         lines.extend([
-            "With an authenticated, connected FIMBox SDK `api_client` and `fimbox[map]` installed:\n\n",
+            "With an authenticated FIMBox SDK `api_client` configured with the containing workspace's "
+            "`X-FIMBox-Workspace` header, and `fimbox[map]` installed:\n\n",
             "```python\nfrom fimbox_map import output_map\n\n",
             f"paths = {json.dumps(paths, indent=4)}\ndisplay(output_map(api_client, paths))\n```\n\n",
             "These paths do not require unexpired job metadata. Retained objects and current HydroShare "

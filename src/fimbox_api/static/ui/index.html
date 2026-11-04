@@ -6,10 +6,10 @@
   <title>FIMBox HAND-FIM</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
-  <link rel="stylesheet" href="/ui/static/app.css">
+  <link rel="stylesheet" href="/ui/static/app.css?v=cam-1524-recent-workspaces">
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
           integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="" defer></script>
-  <script src="/ui/static/app.js" defer></script>
+  <script src="/ui/static/app.js?v=cam-1524-recent-workspaces" defer></script>
 </head>
 <body>
   <header>
@@ -21,16 +21,43 @@
     </div>
   </header>
 
-  <nav class="tabs" data-tabs="main">
+  <section id="workspace-gate" aria-live="polite">
+    <h2>Workspace</h2>
+    <p id="workspace-auth-required" class="hint">Sign in with HydroShare to create or open a workspace.</p>
+    <div id="workspace-active" hidden>
+      <p id="workspace-summary"></p>
+      <button type="button" id="workspace-switch">Switch workspace</button>
+    </div>
+    <div id="workspace-choice" hidden>
+      <h3>Remembered workspaces</h3>
+      <p class="hint">Workspaces you create or open are remembered for your account in this browser. Opening checks your current access. Forget only removes the browser shortcut, not shared data.</p>
+      <ul id="workspace-list" class="workspace-list"></ul>
+      <form id="workspace-open" class="row">
+        <label class="grow">Open workspace location
+          <input id="workspace-open-location" name="location" placeholder="s3://resource/&lt;resource_id&gt;/data/contents/&lt;workspace_subprefix&gt;" required>
+        </label>
+        <button type="submit">Open workspace</button>
+      </form>
+      <form id="workspace-create" class="row">
+        <label class="grow">New workspace location
+          <input id="workspace-create-location" name="location" placeholder="s3://resource/&lt;resource_id&gt;/data/contents/&lt;empty_subprefix&gt;" required>
+        </label>
+        <label>Workspace name <input name="name" maxlength="200" required></label>
+        <button type="submit" class="primary">Create workspace</button>
+      </form>
+      <p class="hint">Create at <code>s3://resource/&lt;resource_id&gt;/data/contents/&lt;empty_subprefix&gt;</code>: the workspace subprefix must be a new, empty child beneath the resource’s <code>data/contents/</code> (no existing files or folders). Do not choose the resource root or <code>data/contents/</code> itself. Creating requires HydroShare write access. Read-only users can open workspaces and view existing results. Opening verifies the workspace with the server; job results are stored inside it.</p>
+    </div>
+  </section>
+
+  <nav id="main-tabs" class="tabs" data-tabs="main" hidden>
     <button type="button" data-tab="input" class="active">Input dataset</button>
     <button type="button" data-tab="submit">Submit job</button>
     <button type="button" data-tab="results">Results</button>
-    <button type="button" data-tab="locations">S3 locations</button>
   </nav>
 
   <p id="message" class="message" role="status" hidden></p>
 
-  <main>
+  <main id="main-content" hidden>
     <section data-panel="main" data-name="input">
       <p class="hint" id="input-description"></p>
       <div id="input-browser"></div>
@@ -77,11 +104,7 @@
         <h3>Job options</h3>
         <div class="grid">
           <label>Execution mode <select name="execution_mode"></select></label>
-          <div class="location-picker" data-bucket="output_bucket" data-prefix="output_prefix" data-label="Result subprefix" data-placeholder="run-1" data-required="true"></div>
-          <label>Output bucket <input name="output_bucket" placeholder="blank keeps output local"></label>
-          <label>Output prefix <input name="output_prefix" placeholder="&lt;resource id&gt;/data/contents/run-1"></label>
           <label>Max processes <input name="max_procs" type="number" min="1" placeholder="worker default"></label>
-          <label class="check"><input name="overwrite" type="checkbox"> Overwrite existing outputs</label>
         </div>
         <p class="hint" id="options-hint"></p>
         <button type="submit" class="primary">Submit job</button>
@@ -91,49 +114,24 @@
     <section data-panel="main" data-name="results" hidden>
       <div class="split">
         <aside>
-          <form id="history-location-form">
-            <h3>Persistent job history</h3>
-            <div class="location-picker" data-uri="history-location" data-label="Relative path" data-placeholder="history"></div>
-            <label>S3 location <input id="history-location" placeholder="s3://resource/&lt;resource id&gt;/data/contents/history"></label>
-            <p class="hint">Future jobs retain metadata and logs here. This location is remembered for your account in this browser. Outputs keep their separate location.</p>
-            <button type="submit" class="small">Use location</button>
-            <button type="button" id="history-disable" class="small">Disable</button>
-            <button type="button" id="history-export" class="small">Export Redis history</button>
-            <p class="hint">Export completed jobs and available logs; skip active jobs and existing archives. Older submission parameters and timestamps are not available in Redis.</p>
-            <p id="history-status" class="hint"></p>
-          </form>
-          <h3>Your jobs <button type="button" id="jobs-refresh" class="small">Refresh</button>
-            <button type="button" id="jobs-clear" class="small">Clear history</button></h3>
+          <h3>Workspace jobs <button type="button" id="jobs-refresh" class="small">Refresh</button></h3>
           <ul id="job-list" class="list"></ul>
           <form id="open-output">
-            <h3>Open retained output</h3>
-            <div class="location-picker" data-bucket="bucket" data-prefix="prefix" data-label="Relative path" data-placeholder="run-1"></div>
-            <label>Bucket <input name="bucket" value="resource" required></label>
-            <label>Prefix <input name="prefix" placeholder="&lt;resource id&gt;/data/contents/run-1"></label>
+            <h3>Open workspace output</h3>
+            <label>Workspace-relative prefix <input name="prefix" placeholder="jobs/&lt;job id&gt;/outputs" required></label>
             <button type="submit">Open</button>
           </form>
           <form id="compare-results">
             <h3>Compare two results</h3>
-            <p class="hint">Diff the flood extents of the scenarios both results share, without rerunning HAND-FIM.</p>
+            <p class="hint">Compare two outputs inside this workspace. Creating a comparison writes a new job and requires write access.</p>
             <fieldset>
               <legend>Base</legend>
-              <div class="location-picker" data-bucket="base_bucket" data-prefix="base_prefix" data-label="Relative path" data-placeholder="run-1"></div>
-              <label>Bucket <input name="base_bucket" value="resource" required></label>
-              <label>Prefix <input name="base_prefix" placeholder="&lt;resource id&gt;/data/contents/run-1"></label>
+              <label>Workspace-relative prefix <input name="base_prefix" placeholder="jobs/&lt;job id&gt;/outputs" required></label>
             </fieldset>
             <fieldset>
               <legend>Candidate</legend>
-              <div class="location-picker" data-bucket="candidate_bucket" data-prefix="candidate_prefix" data-label="Relative path" data-placeholder="run-2"></div>
-              <label>Bucket <input name="candidate_bucket" value="resource" required></label>
-              <label>Prefix <input name="candidate_prefix" placeholder="&lt;resource id&gt;/data/contents/run-2"></label>
+              <label>Workspace-relative prefix <input name="candidate_prefix" placeholder="jobs/&lt;job id&gt;/outputs" required></label>
             </fieldset>
-            <fieldset>
-              <legend>Write comparison to</legend>
-              <div class="location-picker" data-bucket="output_bucket" data-prefix="output_prefix" data-label="Result subprefix" data-placeholder="compare-1" data-required="true"></div>
-              <label>Bucket <input name="output_bucket" value="resource" required></label>
-              <label>Prefix <input name="output_prefix" placeholder="&lt;resource id&gt;/data/contents/compare-1" required></label>
-            </fieldset>
-            <label class="check"><input name="overwrite" type="checkbox"> Overwrite existing comparison</label>
             <button type="submit">Compare</button>
           </form>
         </aside>
@@ -143,27 +141,6 @@
       </div>
     </section>
 
-    <section data-panel="main" data-name="locations" hidden>
-      <p class="hint">Save S3 bucket/prefix locations once, then pick them when submitting jobs, comparing or opening
-        results, and choosing a history location; add a relative subprefix there for each submission. Locations are
-        remembered for your account in this browser only.</p>
-      <p id="locations-signin" class="hint" hidden>Sign in with HydroShare to manage saved S3 locations.</p>
-      <form id="location-form">
-        <h3 id="location-form-title">Add location</h3>
-        <input type="hidden" name="id">
-        <div class="grid">
-          <label>Name <input name="name" maxlength="80" required placeholder="My resource runs"></label>
-          <label>Bucket <input name="bucket" value="resource" required></label>
-          <label>Prefix <input name="prefix" placeholder="&lt;resource id&gt;/data/contents"></label>
-        </div>
-        <div class="row">
-          <button type="submit" class="primary">Save location</button>
-          <button type="button" id="location-cancel" hidden>Cancel edit</button>
-        </div>
-      </form>
-      <h3>Saved locations</h3>
-      <table class="locations"><thead><tr><th>Name</th><th>Location</th><th></th></tr></thead><tbody id="location-list"></tbody></table>
-    </section>
   </main>
 
   <template id="result-template">

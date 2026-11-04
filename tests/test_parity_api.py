@@ -4,6 +4,7 @@ import shutil
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
@@ -23,6 +24,7 @@ REQUEST = {
     "legacy_bucket": "fim-output", "legacy_prefix": "runs/legacy",
     "output_bucket": "fim-output", "output_prefix": "runs/streaming",
 }
+API_REQUEST = {"legacy_bucket": "fim-output", "legacy_prefix": "runs/legacy"}
 TILE_KEY = "runs/streaming/s1/03020201/0_0.cog"
 
 
@@ -31,15 +33,14 @@ def missing(operation: str) -> ClientError:
 
 
 class ParityRequestTests(unittest.TestCase):
-    def test_requires_bucket_and_distinct_safe_prefix(self):
-        ParityJobRequest(**REQUEST)
+    def test_output_is_workspace_assigned_and_source_prefix_is_safe(self):
+        request = ParityJobRequest(**API_REQUEST)
+        self.assertIsNone(request.output_bucket)
+        self.assertEqual(request.output_prefix, "")
         with self.assertRaisesRegex(ValidationError, "requires output_bucket"):
-            ParityJobRequest(**{**REQUEST, "output_bucket": None, "output_prefix": ""})
-        with self.assertRaisesRegex(ValidationError, "must differ"):
-            ParityJobRequest(**{**REQUEST, "output_prefix": "/runs/legacy/"})
+            ParityJobRequest(**{**API_REQUEST, "output_prefix": "runs/streaming"})
         with self.assertRaisesRegex(ValidationError, "'..'"):
-            ParityJobRequest(**{**REQUEST, "legacy_prefix": "runs/../other"})
-        ParityJobRequest(**{**REQUEST, "output_bucket": "other", "output_prefix": "runs/legacy"})
+            ParityJobRequest(**{**API_REQUEST, "legacy_prefix": "runs/../other"})
 
 
 class ParityWorkerTests(unittest.TestCase):
@@ -179,7 +180,12 @@ class ParityApiTests(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(main.app)
         session = auth.UserSession(user_id="alice", access_token="token", scope="read", expires_at=time.time() + 60)
+        self.workspace = main.workspaces.Workspace(
+            bucket="fim-output", prefix="runs", workspace_id=uuid4(), name="Test workspace",
+            created_by="alice", created_at=datetime.now(timezone.utc),
+        )
         main.app.dependency_overrides[auth.get_authenticated_session] = lambda: session
+        main.app.dependency_overrides[main.workspaces.selected_workspace] = lambda: self.workspace
         self.addCleanup(main.app.dependency_overrides.clear)
         for name, value in (
             ("hydroshare_client_id", "test-client"),
@@ -193,18 +199,26 @@ class ParityApiTests(unittest.TestCase):
             patcher = patch.object(main, name)
             setattr(self, name, patcher.start())
             self.addCleanup(patcher.stop)
+        for target, name, value in (
+            (main.job_history, "prepare", {}),
+            (main.job_history, "enqueue_failed", None),
+            (main.workspaces, "bind_job", None),
+        ):
+            patcher = patch.object(target, name, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def submit(self, **options):
         with patch.object(tasks.hand_fim_parity, "apply_async") as enqueue:
-            response = self.client.post("/jobs/parity", json={**REQUEST, **options})
+            response = self.client.post("/jobs/parity", json={**API_REQUEST, **options})
         return response, enqueue
 
     def test_parity_job_is_queued_with_legacy_and_output_locations(self):
         response, enqueue = self.submit(overwrite=True)
-        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.status_code, 202, response.text)
         job_id = response.json()["job_id"]
         self.assertEqual(enqueue.call_args.kwargs["args"], [
-            job_id, "fim-output", "runs/legacy", "fim-output", "runs/streaming", True,
+            job_id, "fim-output", "runs/legacy", "fim-output", f"runs/jobs/{job_id}/outputs", True,
         ])
         self.assertEqual(enqueue.call_args.kwargs["task_id"], job_id)
         self.assertNotIn("queue", enqueue.call_args.kwargs)
@@ -234,10 +248,18 @@ class ParityApiTests(unittest.TestCase):
         response, enqueue = self.submit(output_prefix="runs/legacy")
         self.assertEqual(response.status_code, 422)
         enqueue.assert_not_called()
+        response, enqueue = self.submit(
+            output_bucket="elsewhere", output_prefix="other/jobs/output",
+        )
+        self.assertEqual(response.status_code, 422)
+        enqueue.assert_not_called()
+        response, enqueue = self.submit(legacy_prefix="outside/legacy")
+        self.assertEqual(response.status_code, 403)
+        enqueue.assert_not_called()
 
     def test_queue_failure_releases_credentials_and_tracking(self):
         with patch.object(tasks.hand_fim_parity, "apply_async", side_effect=OSError("down")):
             with self.assertRaises(OSError):
-                self.client.post("/jobs/parity", json=REQUEST)
+                self.client.post("/jobs/parity", json=API_REQUEST)
         self.delete_job_credentials.assert_called_once()
         self.untrack_user_job.assert_called_once()

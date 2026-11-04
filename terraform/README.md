@@ -3,8 +3,8 @@
 The Terraform configuration deploys separate API and HAND-FIM worker images,
 Cloud Run services, a worker pool, Memorystore Redis, networking, Artifact
 Registry, IAM, and Secret Manager resources. Cloud deployment **requires**
-HydroShare authentication and an S3 output bucket; it does not use the shared
-anonymous local mode or a shared output mount.
+HydroShare authentication and an S3 workspace, as do local API deployments.
+There is no shared anonymous workflow or shared durable output mount.
 
 Provisioning creates billable resources. Use a billed GCP project and verify
 Cloud Run worker-pool availability and quota in the selected region.
@@ -76,12 +76,15 @@ authentication and submit a job:
 ```bash
 export FIMBOX_API_URL="$(terraform -chdir=terraform output -raw api_url)"
 curl --fail "$FIMBOX_API_URL/auth/config"
-pixi run fimbox submit --body test-data/single_reach.json \
-  --output-bucket YOUR_HYDROSHARE_BUCKET --output-prefix fimbox
+pixi run fimbox workspace create \
+  s3://resource/RESOURCE_ID/data/contents/workspaces/study-a --name "Study A"
+pixi run fimbox submit --body test-data/single_reach.json
 ```
 
-The output bucket/resource must already exist and be writable by the
-submitting user. Artifacts are uploaded to S3; the API returns metadata and
+The resource must already exist and be writable by the submitting user;
+creation requires an empty workspace subprefix. Alternatively open an existing
+workspace with `fimbox workspace open LOCATION`. Artifacts are uploaded to
+workspace-assigned job paths in S3; the API returns metadata and
 does not provide artifact downloads.
 
 ## Operations and validation

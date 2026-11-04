@@ -29,9 +29,9 @@ class HandFimParameters(ScenarioList):
 
 class OutputDestination(BaseModel):
     output_bucket: str | None = Field(
-        default="resource", min_length=1, max_length=255, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+        default=None, min_length=1, max_length=255, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
     )
-    output_prefix: str = Field(max_length=900)
+    output_prefix: str = Field(default="", max_length=900)
 
     model_config = {"extra": "forbid"}
 
@@ -81,8 +81,6 @@ class HandFimJobOptions(OutputDestination):
     @model_validator(mode="after")
     def validate_execution_mode(self) -> "HandFimJobOptions":
         if self.streamed:
-            if self.output_bucket is None:
-                raise ValueError(f"{self.execution_mode} execution_mode requires output_bucket")
             if self.max_procs not in (None, 1):
                 raise ValueError(f"{self.execution_mode} execution_mode runs one process; omit max_procs or use 1")
         return self
@@ -101,6 +99,7 @@ class JobSubmitted(BaseModel):
 class AuthenticationConfig(BaseModel):
     authentication_enabled: bool
     require_hydroshare_output: bool
+    workspace_required: bool = True
 
 
 class OutputFile(BaseModel):
@@ -139,8 +138,6 @@ class ParityJobRequest(OutputDestination):
 
     @model_validator(mode="after")
     def validate_parity_destination(self) -> "ParityJobRequest":
-        if self.output_bucket is None:
-            raise ValueError("parity comparison requires output_bucket")
         if any(part in {".", ".."} for part in self.legacy_prefix.split("/")):
             raise ValueError("legacy_prefix must not contain '.' or '..' segments")
         if (self.legacy_bucket, self.legacy_prefix.strip("/")) == (self.output_bucket, self.output_prefix.strip("/")):
@@ -168,10 +165,6 @@ class CompareJobRequest(OutputDestination):
 
     @model_validator(mode="after")
     def validate_compare_locations(self) -> "CompareJobRequest":
-        if self.output_bucket is None:
-            raise ValueError("result comparison requires output_bucket")
-        if not self.output_prefix.strip("/"):
-            raise ValueError("result comparison requires output_prefix, e.g. <resource id>/data/contents/compare-1")
         sources = []
         for name in ("base", "candidate"):
             prefix = getattr(self, f"{name}_prefix")
@@ -253,6 +246,10 @@ class StoredHandFimResult(HandFimResult, OutputDestination):
 class JobSummary(BaseModel):
     job_id: str
     status: str
+    user_id: str | None = None
+    job_type: str | None = None
+    submitted_at: datetime | None = None
+    execution_state_known: bool = True
 
 
 class JobList(BaseModel):

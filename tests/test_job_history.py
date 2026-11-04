@@ -2,41 +2,85 @@ import io
 import json
 import time
 import unittest
-from datetime import datetime, timezone
-from unittest.mock import MagicMock, Mock, patch
+from datetime import datetime, timedelta, timezone
+from unittest.mock import Mock, patch
 from uuid import uuid4
 
 from botocore.exceptions import ClientError
 from celery import Task
 from fastapi.testclient import TestClient
-from pydantic import SecretStr
+from kombu.exceptions import OperationalError
 
-from fimbox_api import auth, history, main, tasks
+from fimbox_api import auth, history, main, tasks, workspaces
+from fimbox_api.models import StoredHandFimResult
 
-STARTED = datetime(2026, 1, 1, tzinfo=timezone.utc)
+NOW = datetime.now(timezone.utc)
+LOCATION = "s3://resource/resource-id/data/contents/workspaces/study-a"
+SCENARIOS = [{"ScenarioID": "s1", "Reaches": [
+    {"HUC": "03020201", "ReachID": "8780625", "Streamflow": 1},
+]}]
 
 
 class HistoryTests(unittest.TestCase):
     def setUp(self):
-        for target, value in ((main, "read_job_times"), (history, "mark_job_time")):
-            patcher = patch.object(target, value, return_value={} if value == "read_job_times" else STARTED)
-            patcher.start()
-            self.addCleanup(patcher.stop)
         self.session = auth.UserSession(
-            user_id="alice", access_token="never-archive-this-token",
-            scope="read", expires_at=time.time() + 60,
+            user_id="alice", access_token="private-provider-token", scope="read write",
+            expires_at=time.time() + 60,
         )
-        self.location = history.parse_location("s3://resource/some-resource/data/contents/history")
-        self.job_id = str(uuid4())
         self.objects = {}
-        self.client = Mock()
+        self.redis_values = {}
+        self.owners = {}
+        self.read_users = {"alice", "bob"}
+        self.write_users = {"alice", "bob"}
+        self.clients = {}
+        self.redis = Mock()
+        self.redis.get.side_effect = lambda key: self.redis_values.get(key)
+        self.redis.set.side_effect = lambda key, value, **kw: self.redis_values.__setitem__(key, value)
+        for module in (auth, history, workspaces):
+            self.patch(module, "get_redis_client", return_value=self.redis)
+        for module in (history, workspaces, main):
+            self.patch(module, "output_s3_client", side_effect=lambda session: self.storage(session.user_id))
+        self.patch(history, "s3_client", side_effect=lambda job_id: self.storage("alice"))
+        self.patch(history, "mark_job_time", return_value=NOW)
+        self.patch(main, "read_job_times", return_value={})
+        self.patch(main, "create_job_credentials")
+        self.patch(main, "delete_job_credentials")
+        self.patch(main, "track_user_job", side_effect=lambda user, job: self.owners.__setitem__(job, user))
+        self.patch(main, "untrack_user_job", side_effect=lambda user, job: self.owners.pop(job, None))
+        self.patch(main, "user_has_job", side_effect=lambda user, job: self.owners.get(job) == user)
+        main.app.dependency_overrides[auth.get_authenticated_session] = lambda: self.session
+        self.addCleanup(main.app.dependency_overrides.clear)
+        self.api = TestClient(main.app)
+        self.headers = {"X-FIMBox-Workspace": LOCATION}
+        response = self.api.post("/workspaces", json={"location": LOCATION, "name": "Study A"})
+        self.assertEqual(response.status_code, 201, response.text)
+        self.workspace = workspaces.Workspace.model_validate(response.json())
+        self.job_id = str(uuid4())
+
+    def patch(self, module, name, **kwargs):
+        patcher = patch.object(module, name, **kwargs)
+        result = patcher.start()
+        self.addCleanup(patcher.stop)
+        return result
+
+    def storage(self, user):
+        if user in self.clients:
+            return self.clients[user]
+        client = Mock()
+
+        def check(write=False):
+            if user not in (self.write_users if write else self.read_users):
+                raise ClientError({"Error": {"Code": "AccessDenied"}}, "PutObject" if write else "GetObject")
 
         def put(**kwargs):
-            if kwargs.get("IfNoneMatch") == "*" and (kwargs["Bucket"], kwargs["Key"]) in self.objects:
+            check(write=True)
+            key = (kwargs["Bucket"], kwargs["Key"])
+            if kwargs.get("IfNoneMatch") == "*" and key in self.objects:
                 raise ClientError({"Error": {"Code": "PreconditionFailed"}}, "PutObject")
-            self.objects[(kwargs["Bucket"], kwargs["Key"])] = kwargs["Body"]
+            self.objects[key] = kwargs["Body"]
 
         def get(**kwargs):
+            check()
             value = self.objects.get((kwargs["Bucket"], kwargs["Key"]))
             if value is None:
                 raise ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
@@ -47,346 +91,332 @@ class HistoryTests(unittest.TestCase):
                 value = value[start:end + 1]
             return {"Body": io.BytesIO(value)}
 
-        self.client.put_object.side_effect = put
-        self.client.get_object.side_effect = get
-        for name in ("s3_client", "output_s3_client"):
-            patcher = patch.object(history, name, return_value=self.client)
-            patcher.start()
-            self.addCleanup(patcher.stop)
-        for name, value in (("hydroshare_client_id", "test"), ("hydroshare_client_secret", SecretStr("test"))):
-            patcher = patch.object(main.settings, name, value)
-            patcher.start()
-            self.addCleanup(patcher.stop)
-        main.app.dependency_overrides[auth.get_authenticated_session] = lambda: self.session
-        self.addCleanup(main.app.dependency_overrides.clear)
-        self.api = TestClient(main.app)
-        self.headers = {"X-FIMBox-History-Location": "s3://resource/some-resource/data/contents/history"}
-        self.request = {"scenarios": [{"ScenarioID": "s1", "Reaches": [
-            {"HUC": "03020201", "ReachID": "8780625", "Streamflow": 1},
-        ]}], "output_bucket": "resource", "output_prefix": "outputs"}
-        self.result = {"outputs": [{"ScenarioID": "s1"}], "output_bucket": "resource", "output_prefix": "outputs"}
+        def listing(**kwargs):
+            check()
+            values = [{"Key": key} for bucket, key in self.objects
+                      if bucket == kwargs["Bucket"] and key.startswith(kwargs["Prefix"])]
+            return {"Contents": values[:kwargs.get("MaxKeys", len(values))]}
 
-    def prepare(self):
-        return history.prepare(self.job_id, self.session, self.location, "hand-fim", self.request)
+        client.put_object.side_effect = put
+        client.get_object.side_effect = get
+        client.list_objects_v2.side_effect = listing
+        client.get_paginator.return_value.paginate.side_effect = lambda **kw: [listing(**kw)]
+        self.clients[user] = client
+        return client
 
-    def test_disabled_history_has_no_storage_access(self):
-        self.assertEqual(history.prepare(self.job_id, self.session, None, "hand-fim", self.request), {})
-        self.client.put_object.assert_not_called()
+    def prepare(self, job_id=None):
+        return history.prepare(job_id or self.job_id, self.session, self.workspace, "hand-fim", {"scenarios": SCENARIOS})
 
-    def test_export_completed_redis_jobs_and_logs_then_retry(self):
-        jobs = [self.job_id, str(uuid4()), str(uuid4()), str(uuid4())]
-        results = [
-            Mock(state="SUCCESS", result=self.result), Mock(state="FAILURE", result=RuntimeError("failed")),
-            Mock(state="REVOKED"), Mock(state="STARTED"),
-        ]
-        redis = Mock()
-        redis.get.return_value = b"retained log\n"
-        with patch.object(main, "list_user_jobs", return_value=jobs), \
-                patch.object(main, "user_has_job", return_value=True), \
-                patch.object(main.celery_app, "AsyncResult", side_effect=lambda job: results[jobs.index(job)]), \
-                patch.object(history, "get_redis_client", return_value=redis):
-            response = self.api.post("/jobs/history/export", headers=self.headers)
-            self.assertEqual(response.status_code, 200, response.text)
-            self.assertEqual(response.json(), {"exported": 3, "skipped_existing": 0, "skipped_active": 1})
-            before = dict(self.objects)
-            response = self.api.post("/jobs/history/export", headers=self.headers)
-            self.assertEqual(response.json(), {"exported": 0, "skipped_existing": 3, "skipped_active": 1})
-            self.assertEqual(self.objects, before)
-        for job_id, status in zip(jobs, ["success", "failure", "revoked"]):
-            record = history.read(self.session, self.location, job_id)
-            self.assertEqual(record.status, status)
-            self.assertEqual(record.source, "redis-export")
-            self.assertIsNone(record.submitted_at)
-            self.assertEqual(record.request, {})
-            self.assertEqual(history.read_logs(self.session, self.location, job_id, 0, 100)[0], "retained log\n")
-        self.assertEqual(history.read(self.session, self.location, self.job_id).result.output_prefix, "outputs")
-        self.assertEqual(history.read(self.session, self.location, jobs[1]).error, "failed")
-        self.assertIsNone(history.read(self.session, self.location, jobs[3]))
-        with patch.object(main, "user_has_job", return_value=False):
-            response = self.api.get(f"/jobs/{self.job_id}", headers=self.headers)
-            self.assertEqual(response.json()["status"], "success")
-        self.prepare()
-        keys = [{"Key": key} for _, key in self.objects]
-        self.client.get_paginator.return_value.paginate.return_value = [{"Contents": keys}]
-        records = history.list_records(self.session, self.location)
-        self.assertEqual(len(records), 3)
-        self.assertTrue(any(record.source == "submission" for record in records))
-        self.assertTrue(any(record.submitted_at is None for record in records))
+    def finish(self, status="success"):
+        archive = self.prepare()
+        record = history.ArchivedJob.model_validate(archive["history_archive"]["record"])
+        record.status = status
+        record.submitted_at = NOW - timedelta(days=2)
+        if status == "success":
+            prefix = f"{self.workspace.prefix}/jobs/{self.job_id}/outputs"
+            record.result = StoredHandFimResult(
+                output_bucket="resource", output_prefix=prefix, outputs=[{"ScenarioID": "s1"}],
+                files=[{"path": "s1.cog", "key": prefix + "/s1.cog", "size_bytes": 100}],
+            )
+        else:
+            record.error = "computation failed"
+        history.persist(self.storage("alice"), self.workspace, record, b"complete\n")
+        return record
 
-    def test_export_preserves_richer_existing_record_and_log(self):
-        self.prepare()
+    def as_bob(self):
+        self.session = self.session.model_copy(update={"user_id": "bob", "access_token": auth.SecretStr("bob-token")})
+
+    def test_create_requires_empty_subprefix_and_preserves_resource_contents(self):
+        self.objects[("resource", "resource-id/data/contents/existing.txt")] = b"unrelated"
+        for location, status in (
+            (LOCATION, 409),
+            ("s3://resource/resource-id/data/contents", 422),
+            ("s3://resource/resource-id/data/contents/new-study", 201),
+        ):
+            response = self.api.post("/workspaces", json={"location": location, "name": "Other"})
+            self.assertEqual(response.status_code, status, response.text)
+            if status == 422:
+                self.assertEqual(response.json()["detail"][0]["loc"], ["body", "location"])
+        self.assertEqual(self.objects[("resource", "resource-id/data/contents/existing.txt")], b"unrelated")
+        occupied = "resource-id/data/contents/occupied"
+        self.objects[("resource", occupied + "/file.txt")] = b"x"
+        self.assertEqual(self.api.post("/workspaces", json={
+            "location": "s3://resource/" + occupied, "name": "Other",
+        }).status_code, 409)
+
+    def test_conditional_creation_protects_concurrent_creator(self):
+        client = self.storage("alice")
+        client.list_objects_v2.return_value = {}
+        client.list_objects_v2.side_effect = lambda **kw: {}
         before = dict(self.objects)
-        with patch.object(main, "list_user_jobs", return_value=[self.job_id]), \
-                patch.object(main, "user_has_job", return_value=True), \
-                patch.object(main.celery_app, "AsyncResult", return_value=Mock(state="SUCCESS", result=self.result)):
-            response = self.api.post("/jobs/history/export", headers=self.headers)
-        self.assertEqual(response.json()["skipped_existing"], 1)
+        response = self.api.post("/workspaces", json={"location": LOCATION, "name": "Replacement"})
+        self.assertEqual(response.status_code, 409)
         self.assertEqual(self.objects, before)
-        redis = Mock()
-        redis.get.return_value = b"first log"
-        job = history.JobStatus(job_id=self.job_id, status="success", result=self.result)
-        with patch.object(history, "get_redis_client", return_value=redis):
-            self.assertFalse(history.export_snapshot(self.session, self.location, job))
-            before = dict(self.objects)
-            redis.get.return_value = b"replacement log"
-            self.assertFalse(history.export_snapshot(self.session, self.location, job))
-            self.assertEqual(self.objects, before)
 
-    def test_export_requires_location_and_ownership(self):
-        response = self.api.post("/jobs/history/export")
-        self.assertEqual(response.status_code, 400)
-        with patch.object(main, "list_user_jobs", return_value=[self.job_id]), \
-                patch.object(main, "user_has_job", return_value=False):
-            response = self.api.post("/jobs/history/export", headers=self.headers)
-        self.assertEqual(response.status_code, 403)
-        self.client.put_object.assert_not_called()
-
-    def test_export_storage_failure_is_explicit_and_retryable(self):
-        redis = Mock()
-        redis.get.return_value = b"log"
-        original_put = self.client.put_object.side_effect
-
-        def deny_metadata(**kwargs):
-            if kwargs["Key"].endswith(".json"):
-                raise ClientError({"Error": {"Code": "AccessDenied"}}, "PutObject")
-            original_put(**kwargs)
-
-        self.client.put_object.side_effect = deny_metadata
-        with patch.object(main, "list_user_jobs", return_value=[self.job_id]), \
-                patch.object(main, "user_has_job", return_value=True), \
-                patch.object(main.celery_app, "AsyncResult", return_value=Mock(state="SUCCESS", result=self.result)), \
-                patch.object(history, "get_redis_client", return_value=redis):
-            response = self.api.post("/jobs/history/export", headers=self.headers)
-            self.assertEqual(response.status_code, 503)
-            self.assertIsNone(history.read(self.session, self.location, self.job_id))
-            self.client.put_object.side_effect = original_put
-            response = self.api.post("/jobs/history/export", headers=self.headers)
-            self.assertEqual(response.json()["exported"], 1)
-
-    def __clear(self, live, states, headers=None):
-        results = {job_id: Mock(state=state) for job_id, state in zip(live, states)}
-        cleanup = {name: Mock() for name in ("clear_job_logs", "clear_job_times", "untrack_user_job")}
-        with patch.object(main, "list_user_jobs", return_value=live), \
-                patch.object(main.celery_app, "AsyncResult", side_effect=lambda job: results[job]), \
-                patch.multiple(main, **cleanup):
-            response = self.api.post("/jobs/history/clear", headers=headers or {})
-        return response, results, cleanup
-
-    def test_clear_removes_finished_jobs_from_redis_and_s3_but_keeps_active(self):
-        finished, active, archived_only = self.job_id, str(uuid4()), str(uuid4())
-        for job_id, status in ((finished, "success"), (active, "started"), (archived_only, "failure")):
-            self.job_id = job_id
-            self.prepare()
-            record = history.read(self.session, self.location, job_id)
-            record.status = status
-            history.persist(self.client, self.location, record, b"log")
-        output = ("resource", "outputs/scenario.tif")
-        self.objects[output] = b"raster"
-        self.client.delete_object.side_effect = lambda **kwargs: self.objects.pop((kwargs["Bucket"], kwargs["Key"]), None)
-        self.client.get_paginator.return_value.paginate.side_effect = lambda **kwargs: [{"Contents": [
-            {"Key": key} for bucket, key in self.objects if key.startswith(kwargs["Prefix"])
-        ]}]
-        response, results, cleanup = self.__clear([finished, active], ["SUCCESS", "STARTED"], self.headers)
+    def test_open_is_read_only_and_missing_does_not_create(self):
+        self.as_bob()
+        self.write_users.remove("bob")
+        before = dict(self.objects)
+        response = self.api.post("/workspaces/open", json={"location": LOCATION})
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.json(), {"cleared": 2, "skipped_active": 1})
-        for job_id in (finished, archived_only):
-            self.assertIsNone(history.read(self.session, self.location, job_id))
-            self.assertEqual(history.read_logs(self.session, self.location, job_id, 0, 10)[0], "")
-        self.assertEqual(history.read(self.session, self.location, active).status, "started")
-        self.assertIn(output, self.objects)
-        results[finished].forget.assert_called_once()
-        results[active].forget.assert_not_called()
-        cleanup["clear_job_logs"].assert_called_once_with(finished)
-        cleanup["clear_job_times"].assert_called_once_with(finished)
-        cleanup["untrack_user_job"].assert_called_once_with("alice", finished)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertEqual(response.json()["workspace_id"], str(self.workspace.workspace_id))
+        self.assertEqual(self.api.post("/workspaces/open", json={"location": LOCATION + "-missing"}).status_code, 404)
+        self.assertEqual(self.objects, before)
 
-    def test_clear_without_location_only_touches_redis(self):
-        response, _, cleanup = self.__clear([self.job_id, str(uuid4())], ["REVOKED", "PENDING"])
-        self.assertEqual(response.json(), {"cleared": 1, "skipped_active": 1})
-        cleanup["untrack_user_job"].assert_called_once_with("alice", self.job_id)
-        self.client.delete_object.assert_not_called()
+    def test_authentication_and_workspace_are_mandatory(self):
+        self.assertEqual(self.api.get("/jobs").status_code, 400)
+        self.assertEqual(self.api.post("/jobs/hand-fim", json={"scenarios": SCENARIOS}).status_code, 400)
+        self.assertEqual(self.api.get("/jobs", headers={"X-FIMBox-History-Location": LOCATION}).status_code, 400)
+        main.app.dependency_overrides.clear()
+        with patch.object(main.settings, "hydroshare_client_id", ""), \
+                patch.object(main.settings, "hydroshare_client_secret", auth.SecretStr("")):
+            self.assertEqual(self.api.get("/jobs", headers=self.headers).status_code, 503)
+        self.assertEqual(self.api.get("/jobs", headers=self.headers).status_code, 401)
 
-    def test_clear_storage_failure_keeps_redis_entries_for_retry(self):
-        self.prepare()
-        record = history.read(self.session, self.location, self.job_id)
-        record.status = "success"
-        history.persist(self.client, self.location, record)
-        self.client.get_paginator.return_value.paginate.return_value = [{"Contents": [{"Key": key} for _, key in self.objects]}]
-        self.client.delete_object.side_effect = ClientError({"Error": {"Code": "AccessDenied"}}, "DeleteObject")
-        response, results, cleanup = self.__clear([self.job_id], ["SUCCESS"], self.headers)
-        self.assertEqual(response.status_code, 503)
-        cleanup["untrack_user_job"].assert_not_called()
-        results[self.job_id].forget.assert_not_called()
-
-    def test_success_archives_inputs_result_and_logs_without_tokens(self):
-        archive = self.prepare()
-        redis = Mock()
-        redis.get.return_value = "a flood ☃\n".encode()
-        memory = MagicMock()
-        memory.__enter__.return_value.peak_bytes = 4096
-        with patch.object(history, "get_redis_client", return_value=redis), \
-                patch.object(history, "PeakMemorySampler", return_value=memory), \
-                patch.object(Task, "__call__", return_value=self.result):
-            returned = history.HistoryTask()("payload", **archive)
-        self.assertEqual(returned, {**self.result, "peak_memory_bytes": 4096})
-        record = history.read(self.session, self.location, self.job_id)
-        self.assertEqual(record.status, "success")
-        self.assertEqual(record.request, self.request)
-        self.assertEqual(record.result.output_prefix, "outputs")
-        self.assertEqual(record.result.peak_memory_bytes, 4096)
-        self.assertEqual((record.started_at, record.finished_at), (STARTED, STARTED))
-        content = b"".join(self.objects.values())
-        self.assertNotIn(b"never-archive-this-token", content)
-        logs, offset = history.read_logs(self.session, self.location, self.job_id, 0, 9)
-        self.assertEqual(logs, "a flood ")
-        rest, next_offset = history.read_logs(self.session, self.location, self.job_id, offset, 100)
-        self.assertEqual(rest, "☃\n")
-        self.assertEqual(next_offset, len("a flood ☃\n".encode()))
-
-    def test_failure_is_archived_and_original_exception_is_raised(self):
-        archive = self.prepare()
-        redis = Mock()
-        redis.get.return_value = b"computation failed\n"
-        with patch.object(history, "get_redis_client", return_value=redis), \
-                patch.object(Task, "__call__", side_effect=RuntimeError("bad source")):
-            with self.assertRaisesRegex(RuntimeError, "bad source"):
-                history.HistoryTask()(**archive)
-        record = history.read(self.session, self.location, self.job_id)
-        self.assertEqual((record.status, record.error), ("failure", "bad source"))
-
-    def test_celery_trace_executes_archive_wrapper(self):
-        from fimbox_api.celery_app import celery_app
-
-        expected = self.result
-
-        @celery_app.task(name="tests.history_trace", base=history.HistoryTask)
-        def operation(job_id, *, history_archive=None):
-            return expected
-
-        self.addCleanup(lambda: celery_app.tasks.pop("tests.history_trace", None))
-        redis = Mock()
-        redis.get.return_value = b"real task trace\n"
-        with patch.object(history, "get_redis_client", return_value=redis):
-            result = operation.apply(args=[self.job_id], kwargs=self.prepare(), throw=True)
-        self.assertTrue(result.successful())
-        self.assertEqual(history.read(self.session, self.location, self.job_id).status, "success")
-
-    def test_status_archive_and_logs_remain_after_redis_expiry(self):
-        archive = self.prepare()
-        redis = Mock()
-        redis.get.return_value = b"complete\n"
-        with patch.object(history, "get_redis_client", return_value=redis), \
-                patch.object(Task, "__call__", return_value=self.result):
-            history.HistoryTask()(**archive)
-        with patch.object(main, "user_has_job", return_value=False), \
-                patch.object(main.celery_app, "AsyncResult") as celery:
-            response = self.api.get(f"/jobs/{self.job_id}", headers=self.headers)
-            self.assertEqual(response.status_code, 200)
-            self.assertEqual(response.json()["status"], "success")
-            celery.assert_not_called()
-            response = self.api.get(f"/jobs/{self.job_id}/archive", headers=self.headers)
-            self.assertEqual(response.json()["request"], self.request)
-            response = self.api.get(f"/jobs/{self.job_id}/logs", headers=self.headers)
-            self.assertEqual(response.json()["logs"], "complete\n")
-
-    def test_archived_raster_and_manifest_info_do_not_require_redis_ownership(self):
-        archive = self.prepare()
-        result = {
-            **self.result,
-            "files": [{"path": "s1.cog", "key": "outputs/s1.cog", "size_bytes": 100}],
-            "scenario_manifests": [{
-                "ScenarioID": "s1", "key": "outputs/s1/manifest.json", "tile_count": 1,
-                "bounds": [-79, 35, -78, 36], "resolution": 10, "tile_size": 2048,
-            }],
-        }
-        redis = Mock()
-        redis.get.return_value = None
-        with patch.object(history, "get_redis_client", return_value=redis), \
-                patch.object(Task, "__call__", return_value=result):
-            history.HistoryTask()(**archive)
-        info = {"bounds": [-79, 35, -78, 36], "minzoom": 8, "maxzoom": 14}
-        with patch.object(main, "user_has_job", return_value=False), \
-                patch.object(main, "raster_source") as source, \
-                patch.object(main, "raster_info", return_value=info), \
-                patch.object(main, "scenario_info", return_value=info):
-            response = self.api.get(f"/jobs/{self.job_id}/rasters/0/info", headers=self.headers)
-            self.assertEqual(response.status_code, 200, response.text)
-            self.assertEqual(source.call_args.args[2:], ("resource", "outputs/s1.cog"))
-            response = self.api.get(f"/jobs/{self.job_id}/scenarios/0/info", headers=self.headers)
-            self.assertEqual(response.status_code, 200, response.text)
-
-    def test_user_namespaces_are_separate_and_records_are_checked(self):
-        self.prepare()
-        bob = self.session.model_copy(update={"user_id": "bob"})
-        self.assertIsNone(history.read(bob, self.location, self.job_id))
-        key = next(iter(self.objects))
+    def test_invalid_descriptors_and_locations_are_explicit(self):
+        response = self.api.post("/workspaces", json={"location": LOCATION, "name": "Other", "typo": True})
+        self.assertEqual(response.status_code, 422)
+        for value in ("https://example.com", "s3://resource/", "s3://resource/a/../b", LOCATION + "?token=x"):
+            response = self.api.get("/jobs", headers={"X-FIMBox-Workspace": value})
+            self.assertEqual(response.status_code, 422)
+            self.assertEqual(response.json()["detail"][0]["loc"], ["header", "X-FIMBox-Workspace"])
+        key = ("resource", self.workspace.prefix + "/workspace.json")
         data = json.loads(self.objects[key])
-        data["user_id"] = "bob"
+        data["version"] = 9
         self.objects[key] = json.dumps(data).encode()
-        response = self.api.get(f"/jobs/{self.job_id}", headers=self.headers)
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.api.get("/jobs", headers=self.headers).status_code, 409)
+        self.objects[key] = b"not-json"
+        self.assertEqual(self.api.get("/jobs", headers=self.headers).status_code, 502)
+        self.objects[key] = b"x" * (workspaces.MAX_DESCRIPTOR_BYTES + 1)
+        response = self.api.get("/jobs", headers=self.headers)
+        self.assertEqual(response.status_code, 502)
+        self.assertIn("16 KiB", response.json()["detail"])
 
-    def test_pagination_and_live_jobs_are_merged_without_duplicates(self):
-        self.prepare()
-        keys = [{"Key": key} for bucket, key in self.objects]
-        self.client.get_paginator.return_value.paginate.return_value = [{"Contents": []}, {"Contents": keys}]
-        with patch.object(main, "list_user_jobs", return_value=[self.job_id]), \
-                patch.object(main.celery_app, "AsyncResult", return_value=Mock(state="STARTED")):
-            response = self.api.get("/jobs", headers=self.headers)
-        self.assertEqual(response.json()["jobs"], [{"job_id": self.job_id, "status": "started"}])
-        with patch.object(main, "list_user_jobs", return_value=[]):
-            response = self.api.get("/jobs", headers=self.headers)
-        self.assertEqual(response.json()["jobs"], [{"job_id": self.job_id, "status": "queued"}])
-
-    def test_submission_passes_nonsecret_archive_kwargs_and_preserves_arguments(self):
-        with patch.object(main, "create_job_credentials"), patch.object(main, "track_user_job"), \
-                patch.object(tasks.hand_fim, "apply_async") as enqueue:
-            response = self.api.post("/jobs/hand-fim", json=self.request, headers=self.headers)
+    def test_submit_assigns_outputs_and_persists_before_enqueue(self):
+        def enqueue(**kwargs):
+            record = history.read(self.session, self.workspace, kwargs["task_id"])
+            self.assertEqual(record.status, "queued")
+            self.assertEqual(record.user_id, "alice")
+        with patch.object(tasks.hand_fim, "apply_async", side_effect=enqueue) as operation:
+            response = self.api.post("/jobs/hand-fim", headers=self.headers, json={"scenarios": SCENARIOS})
         self.assertEqual(response.status_code, 202, response.text)
-        call = enqueue.call_args.kwargs
-        self.assertIn("history_archive", call["kwargs"])
-        self.assertEqual(call["args"][1], self.request["scenarios"])
+        call = operation.call_args.kwargs
+        prefix = f"{self.workspace.prefix}/jobs/{response.json()['job_id']}/outputs"
+        self.assertEqual(call["args"][2:4], ["resource", prefix])
+        self.assertNotIn("private-provider-token", json.dumps(call))
+        self.assertTrue(workspaces.job_is_bound(self.workspace, response.json()["job_id"]))
         tasks.hand_fim.__header__(*call["args"], **call["kwargs"])
 
-    def test_storage_failure_prevents_enqueue(self):
-        self.client.put_object.side_effect = ClientError({"Error": {"Code": "AccessDenied"}}, "PutObject")
-        with patch.object(main, "create_job_credentials"), patch.object(main, "delete_job_credentials"), \
-                patch.object(main, "untrack_user_job"), patch.object(tasks.hand_fim, "apply_async") as enqueue:
-            response = self.api.post("/jobs/hand-fim", json=self.request, headers=self.headers)
-        self.assertEqual(response.status_code, 503)
+    def test_destinations_and_comparison_inputs_cannot_escape_workspace(self):
+        with patch.object(tasks.hand_fim, "apply_async") as enqueue:
+            response = self.api.post("/jobs/hand-fim", headers=self.headers, json={
+                "scenarios": SCENARIOS, "output_bucket": "other", "output_prefix": "elsewhere",
+            })
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["detail"][0]["loc"], ["body"])
+        enqueue.assert_not_called()
+        with patch.object(tasks.hand_fim_compare, "apply_async") as enqueue:
+            response = self.api.post("/jobs/compare", headers=self.headers, json={
+                "base_bucket": "resource", "base_prefix": self.workspace.prefix + "-other/run",
+                "candidate_bucket": "resource", "candidate_prefix": self.workspace.prefix + "/run",
+            })
+        self.assertEqual(response.status_code, 403)
         enqueue.assert_not_called()
 
-    def test_invalid_locations_and_missing_archives_are_explicit(self):
-        for value in ("https://example.com/history", "s3://resource/", "s3://resource/a/../b", "s3://resource/a?token=x"):
-            with self.subTest(value=value):
-                response = self.api.get("/jobs", headers={"X-FIMBox-History-Location": value})
-                self.assertEqual(response.status_code, 422)
-        response = self.api.get(f"/jobs/{self.job_id}/archive", headers=self.headers)
-        self.assertEqual(response.status_code, 404)
-
-    def test_enqueue_failure_and_cancellation_are_retained(self):
-        archive = self.prepare()
-        history.enqueue_failed(archive)
-        self.assertEqual(history.read(self.session, self.location, self.job_id).status, "failure")
-        history.mark_cancelled(self.session, self.location, self.job_id)
-        self.assertEqual(history.read(self.session, self.location, self.job_id).status, "revoked")
-
-    def test_worker_archives_revocation_without_history_header(self):
-        archive = self.prepare()
-        history.archive_revoked_task(Mock(kwargs=archive))
-        self.assertEqual(history.read(self.session, self.location, self.job_id).status, "revoked")
-
-    def test_archive_write_failure_is_not_reported_as_task_success(self):
-        archive = self.prepare()
-        redis = Mock()
-        redis.get.return_value = b"complete\n"
-        self.client.put_object.side_effect = [
-            None, ClientError({"Error": {"Code": "AccessDenied"}}, "PutObject"),
+    def test_comparison_and_parity_jobs_retain_workspace_records(self):
+        requests = [
+            ("/jobs/compare", tasks.hand_fim_compare, {
+                "base_bucket": "resource", "base_prefix": self.workspace.prefix + "/jobs/base/outputs",
+                "candidate_bucket": "resource", "candidate_prefix": self.workspace.prefix + "/jobs/candidate/outputs",
+            }),
+            ("/jobs/parity", tasks.hand_fim_parity, {
+                "legacy_bucket": "resource", "legacy_prefix": self.workspace.prefix + "/jobs/base/outputs",
+            }),
         ]
-        with patch.object(history, "get_redis_client", return_value=redis), \
-                patch.object(Task, "__call__", return_value=self.result):
-            with self.assertRaises(ClientError):
+        with patch.object(main.settings, "stream_input_bucket", "hydrofabric"):
+            for path, task, body in requests:
+                with self.subTest(path=path), patch.object(task, "apply_async") as enqueue:
+                    response = self.api.post(path, headers=self.headers, json=body)
+                    self.assertEqual(response.status_code, 202, response.text)
+                    job_id = response.json()["job_id"]
+                    record = history.read(self.session, self.workspace, job_id)
+                    self.assertEqual(record.workspace_id, self.workspace.workspace_id)
+                    self.assertEqual(record.user_id, "alice")
+                    self.assertEqual(record.request["output_prefix"], f"{self.workspace.prefix}/jobs/{job_id}/outputs")
+                    self.assertIn("history_archive", enqueue.call_args.kwargs["kwargs"])
+                    task.__header__(*enqueue.call_args.kwargs["args"], **enqueue.call_args.kwargs["kwargs"])
+
+    def test_collaborators_can_read_complete_and_failed_history_after_expiry(self):
+        record = self.finish()
+        self.as_bob()
+        self.redis_values.clear()
+        with patch.object(main.celery_app, "AsyncResult") as celery:
+            for path in (f"/jobs/{self.job_id}", f"/jobs/{self.job_id}/archive", f"/jobs/{self.job_id}/logs", "/jobs"):
+                response = self.api.get(path, headers=self.headers)
+                self.assertEqual(response.status_code, 200, response.text)
+            celery.assert_not_called()
+        jobs = response.json()["jobs"]
+        self.assertEqual([(j["job_id"], j["user_id"]) for j in jobs], [(self.job_id, "alice")])
+        self.assertLess(datetime.fromisoformat(jobs[0]["submitted_at"]), NOW - timedelta(hours=24))
+        record.status = "failure"
+        record.result = None
+        record.error = "failed"
+        history.persist(self.storage("alice"), self.workspace, record)
+        self.assertEqual(self.api.get(f"/jobs/{self.job_id}", headers=self.headers).json()["error"], "failed")
+
+    def test_read_only_storage_denies_submission_without_enqueue(self):
+        self.as_bob()
+        self.write_users.remove("bob")
+        with patch.object(history, "s3_client", return_value=self.storage("bob")), \
+                patch.object(tasks.hand_fim, "apply_async") as enqueue:
+            response = self.api.post("/jobs/hand-fim", headers=self.headers, json={"scenarios": SCENARIOS})
+        self.assertEqual(response.status_code, 403, response.text)
+        enqueue.assert_not_called()
+
+    def test_no_storage_access_denies_workspace_and_jobs(self):
+        self.finish()
+        self.as_bob()
+        self.read_users.remove("bob")
+        for path in ("/jobs", f"/jobs/{self.job_id}", f"/jobs/{self.job_id}/logs"):
+            self.assertEqual(self.api.get(path, headers=self.headers).status_code, 403)
+
+    def test_live_reads_require_trusted_workspace_binding_not_submitter(self):
+        self.prepare()
+        workspaces.bind_job(self.workspace, self.job_id)
+        self.as_bob()
+        with patch.object(main.celery_app, "AsyncResult", return_value=Mock(state="STARTED")), \
+                patch.object(main, "read_job_logs", return_value=("live\n", 5)):
+            self.assertEqual(self.api.get(f"/jobs/{self.job_id}", headers=self.headers).json()["status"], "started")
+            self.assertEqual(self.api.get(f"/jobs/{self.job_id}/logs", headers=self.headers).json()["logs"], "live\n")
+
+    def test_lost_redis_keeps_last_known_snapshot_explicit(self):
+        archive = self.prepare()
+        record = history.ArchivedJob.model_validate(archive["history_archive"]["record"])
+        record.status = "started"
+        history.persist(self.storage("alice"), self.workspace, record)
+        for bound in (False, True):
+            if bound:
+                workspaces.bind_job(self.workspace, self.job_id)
+            with patch.object(main.celery_app, "AsyncResult", return_value=Mock(state="PENDING")):
+                body = self.api.get(f"/jobs/{self.job_id}", headers=self.headers).json()
+            self.assertEqual(body["status"], "started")
+            self.assertFalse(body["execution_state_known"])
+
+    def test_cancel_is_submitter_only_even_if_archive_is_modified(self):
+        archive = self.prepare()
+        workspaces.bind_job(self.workspace, self.job_id)
+        self.owners[self.job_id] = "alice"
+        record = history.ArchivedJob.model_validate(archive["history_archive"]["record"])
+        record.user_id = "bob"
+        history.persist(self.storage("alice"), self.workspace, record)
+        self.as_bob()
+        with patch.object(main.celery_app.control, "revoke") as revoke:
+            self.assertEqual(self.api.delete(f"/jobs/{self.job_id}", headers=self.headers).status_code, 403)
+            revoke.assert_not_called()
+        self.session = self.session.model_copy(update={"user_id": "alice"})
+        with patch.object(main.celery_app, "AsyncResult", return_value=Mock(state="PENDING")), \
+                patch.object(main.celery_app.control, "revoke") as revoke:
+            self.assertEqual(self.api.delete(f"/jobs/{self.job_id}", headers=self.headers).status_code, 204)
+            revoke.assert_called_once_with(self.job_id, terminate=False)
+        self.assertEqual(history.read(self.session, self.workspace, self.job_id).status, "revoked")
+
+    def test_other_workspace_cannot_expose_job_or_cancel_it(self):
+        self.finish()
+        other = LOCATION + "-other"
+        self.api.post("/workspaces", json={"location": other, "name": "Other"})
+        headers = {"X-FIMBox-Workspace": other}
+        self.assertEqual(self.api.get("/jobs", headers=headers).json(), {"jobs": []})
+        self.assertEqual(self.api.get(f"/jobs/{self.job_id}", headers=headers).status_code, 404)
+        self.owners[self.job_id] = "alice"
+        self.assertEqual(self.api.delete(f"/jobs/{self.job_id}", headers=headers).status_code, 403)
+
+    def test_forged_record_cannot_grant_access_to_another_workspaces_live_state(self):
+        archive = self.prepare()
+        workspaces.bind_job(self.workspace, self.job_id)
+        other_location = LOCATION + "-other"
+        response = self.api.post("/workspaces", json={"location": other_location, "name": "Other"})
+        other = workspaces.Workspace.model_validate(response.json())
+        forged = history.ArchivedJob.model_validate(archive["history_archive"]["record"])
+        forged.workspace_id = other.workspace_id
+        history.persist(self.storage("alice"), other, forged)
+        headers = {"X-FIMBox-Workspace": other_location}
+        with patch.object(main.celery_app, "AsyncResult") as celery, \
+                patch.object(main, "read_job_logs") as live_logs:
+            response = self.api.get(f"/jobs/{self.job_id}", headers=headers)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertFalse(response.json()["execution_state_known"])
+            response = self.api.get(f"/jobs/{self.job_id}/logs", headers=headers)
+            self.assertEqual(response.json()["logs"], "")
+            celery.assert_not_called()
+            live_logs.assert_not_called()
+
+    def test_worker_binding_survives_client_workspace_switch(self):
+        archive = self.prepare()
+        other = self.api.post("/workspaces", json={"location": LOCATION + "-other", "name": "Other"}).json()
+        self.redis_values[history.JOB_LOG_PREFIX + self.job_id] = b"finished\n"
+        prefix = f"{self.workspace.prefix}/jobs/{self.job_id}/outputs"
+        result = {"outputs": [{"ScenarioID": "s1"}], "output_bucket": "resource", "output_prefix": prefix}
+        with patch.object(Task, "__call__", return_value=result):
+            history.HistoryTask()(**archive)
+        record = history.read(self.session, self.workspace, self.job_id)
+        self.assertEqual(record.status, "success")
+        self.assertEqual(record.workspace_id, self.workspace.workspace_id)
+        self.assertIsNone(history.read(self.session, workspaces.Workspace.model_validate(other), self.job_id))
+
+    def test_worker_failure_and_archive_failure_are_not_silenced(self):
+        archive = self.prepare()
+        with patch.object(Task, "__call__", side_effect=RuntimeError("science failed")):
+            with self.assertRaisesRegex(RuntimeError, "science failed"):
                 history.HistoryTask()(**archive)
+        self.assertEqual(history.read(self.session, self.workspace, self.job_id).status, "failure")
+        self.write_users.remove("alice")
+        with self.assertRaises(ClientError):
+            history.enqueue_failed(archive)
+
+    def test_enqueue_failure_is_retained_and_credentials_cleaned(self):
+        with patch.object(tasks.hand_fim, "apply_async", side_effect=OperationalError("down")):
+            response = self.api.post("/jobs/hand-fim", headers=self.headers, json={"scenarios": SCENARIOS})
+        self.assertEqual(response.status_code, 503)
+        records = history.list_records(self.session, self.workspace)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].status, "failure")
+        main.delete_job_credentials.assert_called_once()
+
+    def test_missing_outputs_do_not_remove_history_or_borrow_submitter_credentials(self):
+        record = self.finish()
+        self.as_bob()
+        with patch.object(main, "output_raster_source") as source, \
+                patch.object(main, "raster_info", side_effect=main.RasterReadError("Output file unavailable")):
+            response = self.api.get(f"/jobs/{self.job_id}/rasters/0/info", headers=self.headers)
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(source.call_args.args[0].user_id, "bob")
+        self.assertEqual(source.call_args.args[1:], ("resource", record.result.files[0].key))
+        self.assertEqual(self.api.get(f"/jobs/{self.job_id}", headers=self.headers).json()["status"], "success")
+
+    def test_legacy_clear_and_export_are_not_available(self):
+        before = dict(self.objects)
+        for path in ("/jobs/history/export", "/jobs/history/clear"):
+            self.assertIn(self.api.post(path, headers=self.headers).status_code, (404, 405))
+        self.assertEqual(self.objects, before)
+
+    def test_workspace_record_identity_is_validated(self):
+        self.prepare()
+        key = ("resource", self.workspace.prefix + f"/jobs/{self.job_id}/record.json")
+        data = json.loads(self.objects[key])
+        data["workspace_id"] = str(uuid4())
+        self.objects[key] = json.dumps(data).encode()
+        self.assertEqual(self.api.get(f"/jobs/{self.job_id}", headers=self.headers).status_code, 403)
+
+    def test_history_listing_paginates_and_ignores_outputs(self):
+        self.finish()
+        keys = [{"Key": key} for bucket, key in self.objects if "/jobs/" in key]
+        client = self.storage("alice")
+        client.get_paginator.return_value.paginate.side_effect = None
+        client.get_paginator.return_value.paginate.return_value = [
+            {"Contents": []}, {"Contents": keys + [{"Key": self.workspace.prefix + f"/jobs/{self.job_id}/outputs/data.json"}]},
+        ]
+        self.assertEqual(len(history.list_records(self.session, self.workspace)), 1)
 
 
 if __name__ == "__main__":

@@ -40,19 +40,20 @@ class CloudNotebookTests(unittest.TestCase):
             (HandFimJobRequestExecutionMode.STREAMING_2024, "/manifest.json"),
             (HandFimJobRequestExecutionMode.STREAMING_2026, "/manifest.json"),
         ):
-            for prefix in ("demo/", ""):
+            for prefix in ("rid/data/contents/study-a", "rid/data/contents/study-b"):
                 with self.subTest(mode=mode, prefix=prefix):
                     helper = Mock()
                     namespace = {
                         "EXECUTION_MODE": mode,
                         "HandFimJobRequestExecutionMode": HandFimJobRequestExecutionMode,
-                        "OUTPUT_BUCKET": "bucket", "OUTPUT_PREFIX": prefix,
+                        "active_workspace": SimpleNamespace(bucket="resource", prefix=prefix),
+                        "RESUME_JOB_ID": "4ec24445-d50f-434b-bce6-c1364762bfac",
                         "scenarios": [SimpleNamespace(scenario_id="single-reach-scenario")],
                         "api_client": Mock(), "display": Mock(),
                     }
                     with patch("importlib.reload", return_value=helper):
                         exec(self.sources["map"], namespace)
-                    root = "s3://bucket/demo" if prefix else "s3://bucket"
+                    root = f"s3://resource/{prefix}/jobs/{namespace['RESUME_JOB_ID']}/outputs"
                     helper.output_map.assert_called_once_with(
                         namespace["api_client"], [f"{root}/single-reach-scenario{suffix}"],
                     )
@@ -100,7 +101,7 @@ class CloudNotebookTests(unittest.TestCase):
             if path == "/auth/config":
                 self.assertNotIn("authorization", request.headers)
                 return httpx.Response(200, json={
-                    "authentication_enabled": True, "require_hydroshare_output": True,
+                    "authentication_enabled": True, "require_hydroshare_output": True, "workspace_required": True,
                 })
             if path == "/auth/device/start":
                 return httpx.Response(200, json={
@@ -118,10 +119,21 @@ class CloudNotebookTests(unittest.TestCase):
             self.assertEqual(request.headers["authorization"], "Bearer notebook-test-token")
             if path == "/auth/session":
                 return httpx.Response(200, json={"user_id": "test", "expires_at": 9999999999})
+            if path == "/workspaces/open":
+                self.assertEqual(json.loads(request.content), {"location": namespace["WORKSPACE_LOCATION"]})
+                return httpx.Response(200, json={
+                    "workspace_id": "91ebf4cc-f901-4445-a59e-f45dac551f36",
+                    "name": "Study", "bucket": "resource", "prefix": "rid/data/contents/study",
+                    "created_by": "alice", "created_at": "2026-01-01T00:00:00Z",
+                })
+            self.assertEqual(request.headers["X-FIMBox-Workspace"], namespace["WORKSPACE_LOCATION"])
             if path == "/jobs/hand-fim":
                 body = json.loads(request.content)
                 self.assertEqual(body["scenarios"][0]["Reaches"][0]["HUC"], "03020201")
                 self.assertEqual(body["max_procs"], 1)
+                self.assertNotIn("output_bucket", body)
+                self.assertNotIn("output_prefix", body)
+                self.assertNotIn("overwrite", body)
                 return httpx.Response(202, json={"job_id": job_id, "status": "queued", "status_url": f"/jobs/{job_id}"})
             if path == f"/jobs/{job_id}/logs":
                 return httpx.Response(200, json={
@@ -140,9 +152,10 @@ class CloudNotebookTests(unittest.TestCase):
 
         namespace = {
             "API_URL": "https://api.example.org", "os": os,
-            "Path": Path, "RESUME_JOB_ID": "", "OUTPUT_BUCKET": "bucket",
-            "OUTPUT_PREFIX": "demo", "MAX_PROCS": 1, "WAIT_SECONDS": 60, "POLL_SECONDS": 0,
-            "OVERWRITE": False, "EXECUTION_MODE": HandFimJobRequestExecutionMode.FIMSERV_2024,
+            "Path": Path, "RESUME_JOB_ID": "", "WORKSPACE_LOCATION": "s3://resource/rid/data/contents/study",
+            "CREATE_WORKSPACE": False, "WORKSPACE_NAME": "Study",
+            "MAX_PROCS": 1, "WAIT_SECONDS": 60, "POLL_SECONDS": 0,
+            "EXECUTION_MODE": HandFimJobRequestExecutionMode.FIMSERV_2024,
         }
         imports = self.sources["dependencies"].split("from fimbox_sdk import", 1)[1]
         exec("from fimbox_sdk import" + imports, namespace)
@@ -155,7 +168,10 @@ class CloudNotebookTests(unittest.TestCase):
         ) as authenticated_http, patch.object(
             Client, "get_httpx_client", return_value=public_http,
         ), patch.object(
-            AuthenticatedClient, "get_httpx_client", return_value=authenticated_http,
+            AuthenticatedClient, "get_httpx_client", autospec=True,
+            side_effect=lambda client: (
+                authenticated_http.headers.update(client._headers) or authenticated_http
+            ),
         ), patch.dict("os.environ", {"FIMBOX_SESSION_TOKEN": ""}), patch("IPython.display.display"):
             exec(self.sources["authentication"], namespace)
             self.assertEqual(namespace["session_token"], "notebook-test-token")
@@ -175,6 +191,40 @@ class CloudNotebookTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "HTTP 401"):
                 namespace["call_api"](operation, client=namespace["api_client"])
             self.assertTrue(all("notebook-test-token" not in str(request.url) for request in requests))
+            namespace["RESUME_JOB_ID"] = job_id
+            with redirect_stdout(output):
+                exec(self.sources["submission"], namespace)
+            self.assertEqual(sum(request.url.path == "/jobs/hand-fim" for request in requests), 1)
+
+    def test_connect_creates_only_when_explicit_and_never_falls_back(self):
+        from fimbox_sdk.models import Workspace
+        for create in (False, True):
+            with self.subTest(create=create):
+                namespace = {
+                    "API_URL": "https://api.example.org", "session_token": "private",
+                    "CREATE_WORKSPACE": create, "WORKSPACE_NAME": "Study",
+                    "WORKSPACE_LOCATION": "s3://resource/rid/data/contents/study",
+                    "RESUME_JOB_ID": "", "httpx": httpx, "call_api": Mock(),
+                }
+                imports = self.sources["dependencies"].split("from fimbox_sdk import", 1)[1]
+                exec("from fimbox_sdk import" + imports, namespace)
+                namespace["call_api"].return_value = Mock(spec=Workspace, name="Study")
+                with redirect_stdout(io.StringIO()):
+                    exec(self.sources["connect"], namespace)
+                call = namespace["call_api"].call_args
+                self.assertEqual(call.args[0], namespace[
+                    "create_workspace_workspaces_post" if create else "load_workspace_workspaces_open_post"
+                ])
+                self.assertEqual(call.kwargs["body"].location, namespace["WORKSPACE_LOCATION"])
+                self.assertEqual(
+                    namespace["api_client"].get_httpx_client().headers["X-FIMBox-Workspace"],
+                    namespace["WORKSPACE_LOCATION"],
+                )
+                namespace["call_api"].side_effect = [None, RuntimeError("Workspace unavailable")]
+                with self.assertRaisesRegex(RuntimeError, "Workspace unavailable"):
+                    exec(self.sources["connect"], namespace)
+                self.assertNotIn("X-FIMBox-Workspace", namespace["api_client"].get_httpx_client().headers)
+                namespace["api_client"].get_httpx_client().close()
 
     def test_no_saved_outputs_or_credential_widgets(self):
         for cell in self.notebook["cells"]:
@@ -189,7 +239,7 @@ class CloudNotebookTests(unittest.TestCase):
         imports = self.sources["dependencies"].split("from fimbox_sdk import", 1)[1]
         exec("from fimbox_sdk import" + imports, namespace)
         transport = httpx.MockTransport(lambda request: httpx.Response(200, json={
-            "authentication_enabled": True, "require_hydroshare_output": True,
+            "authentication_enabled": True, "require_hydroshare_output": True, "workspace_required": True,
         }))
         http = httpx.Client(transport=transport, base_url=namespace["API_URL"])
         self.addCleanup(http.close)
@@ -201,6 +251,23 @@ class CloudNotebookTests(unittest.TestCase):
             exec(self.sources["authentication"], namespace)
         begin.assert_not_called()
         self.assertEqual(namespace["session_token"], "saved-session")
+
+    def test_old_api_is_rejected_before_login_or_submission(self):
+        from fimbox_sdk import Client
+        namespace = {"API_URL": "https://api.example.org", "os": os}
+        imports = self.sources["dependencies"].split("from fimbox_sdk import", 1)[1]
+        exec("from fimbox_sdk import" + imports, namespace)
+        transport = httpx.MockTransport(lambda request: httpx.Response(200, json={
+            "authentication_enabled": True, "require_hydroshare_output": True,
+        }))
+        http = httpx.Client(transport=transport, base_url=namespace["API_URL"])
+        self.addCleanup(http.close)
+        with patch.object(
+            Client, "get_httpx_client", return_value=http,
+        ), patch("fimbox_login.begin_login") as begin:
+            with self.assertRaisesRegex(RuntimeError, "does not enforce workspaces"):
+                exec(self.sources["authentication"], namespace)
+        begin.assert_not_called()
 
 if __name__ == "__main__":
     unittest.main()

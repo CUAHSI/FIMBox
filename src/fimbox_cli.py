@@ -23,15 +23,17 @@ from fimbox_sdk.api.authentication import (
 )
 from fimbox_sdk.api.default import (
     cancel_job_jobs_job_id_delete,
+    create_workspace_workspaces_post,
     get_job_status_jobs_job_id_get,
     health_health_get,
     list_jobs_jobs_get,
-    get_job_archive_jobs_job_id_archive_get,
-    export_job_history_jobs_history_export_post,
-    clear_job_history_jobs_history_clear_post,
+    load_workspace_workspaces_open_post,
     submit_hand_fim_jobs_hand_fim_post,
 )
-from fimbox_sdk.models import AuthenticationConfig, HandFimJobRequest, HandFimJobRequestExecutionMode, Scenario
+from fimbox_sdk.models import (
+    AuthenticationConfig, HandFimJobRequest, HandFimJobRequestExecutionMode, Scenario,
+    Workspace, WorkspaceCreate, WorkspaceOpen,
+)
 from fimbox_sdk.types import UNSET, Response
 
 
@@ -41,30 +43,51 @@ class Settings:
     session_token: str | None
     timeout: float
     api_config: AuthenticationConfig | None = None
-    history_location: str | None = None
+    workspace_location: str | None = None
 
 
-def __history_preferences() -> tuple[Path, dict[str, str]]:
-    path = Path(click.get_app_dir("fimbox")) / "history.json"
+def __workspace_preferences() -> tuple[Path, dict[str, str]]:
+    path = Path(click.get_app_dir("fimbox")) / "workspace.json"
     try:
         preferences = json.loads(path.read_text()) if path.exists() else {}
     except (OSError, ValueError):
-        raise click.ClickException("Cannot read saved FIMBox history locations.") from None
+        raise click.ClickException("Cannot read the saved FIMBox workspace location.") from None
     if not isinstance(preferences, dict) or any(
         not isinstance(key, str) or not isinstance(value, str) for key, value in preferences.items()
     ):
-        raise click.ClickException("Saved FIMBox history locations are invalid.")
+        raise click.ClickException("The saved FIMBox workspace preferences are invalid.")
     return path, preferences
 
 
-def __history_location(settings: Settings) -> str | None:
-    if settings.history_location is not None:
-        return settings.history_location
-    return __history_preferences()[1].get(settings.api_url)
+def __valid_workspace_location(location: str) -> bool:
+    try:
+        parts = urlsplit(location)
+    except ValueError:
+        return False
+    segments = parts.path.strip("/").split("/")
+    return (
+        parts.scheme == "s3"
+        and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,254}", parts.netloc) is not None
+        and not parts.query
+        and not parts.fragment
+        and not parts.username
+        and not parts.password
+        and len(parts.path.strip("/").encode("utf-8")) <= 700
+        and all(segment not in ("", ".", "..") for segment in segments)
+    )
 
 
-def __save_history(settings: Settings, location: str | None) -> None:
-    path, preferences = __history_preferences()
+def __workspace_location(settings: Settings) -> str | None:
+    location = settings.workspace_location
+    if location is None:
+        location = __workspace_preferences()[1].get(settings.api_url)
+    if location is not None and not __valid_workspace_location(location):
+        raise click.ClickException("The selected workspace location is invalid.")
+    return location
+
+
+def __save_workspace(settings: Settings, location: str | None) -> None:
+    path, preferences = __workspace_preferences()
     if location is None:
         preferences.pop(settings.api_url, None)
     else:
@@ -73,7 +96,9 @@ def __save_history(settings: Settings, location: str | None) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(preferences, indent=2) + "\n")
     except OSError:
-        raise click.ClickException("Cannot save the FIMBox history location.") from None
+        raise click.ClickException(
+            "The workspace request succeeded, but its location could not be saved."
+        ) from None
 
 
 def __credential_store() -> KeyringBackend:
@@ -167,17 +192,30 @@ def __browser_token(settings: Settings) -> str:
 
 def __call(
     ctx: click.Context, operation: Callable[..., Response[Any]],
-    authenticated: bool = True, **kwargs: Any,
-) -> None:
+    authenticated: bool = True, workspace_required: bool = False,
+    expected_status: int | None = None, expected_type: type[Any] | None = None,
+    **kwargs: Any,
+) -> Response[Any]:
     settings: Settings = ctx.obj
     client: Client | AuthenticatedClient
     browser_login = False
     saved = False
-    history = __history_location(settings) if authenticated else None
+    workspace = __workspace_location(settings) if workspace_required else None
+    if workspace_required and not workspace:
+        raise click.ClickException(
+            "No workspace is selected. Create one with 'fimbox workspace create' or open one with "
+            "'fimbox workspace open', then retry."
+        )
+    if workspace_required and __api_config(settings).workspace_required is not True:
+        raise click.ClickException(
+            "This API does not enforce workspaces. Upgrade the API before submitting or reading workspace jobs."
+        )
     if authenticated:
         authenticated = __authentication_enabled(settings)
-    if history and not authenticated:
-        raise click.ClickException("Persistent S3 history requires an authenticated API.")
+        if not authenticated:
+            raise click.ClickException(
+                "This command requires an authenticated API. Anonymous local mode is not supported."
+            )
     if authenticated:
         token = settings.session_token
         if not token:
@@ -197,8 +235,8 @@ def __call(
             base_url=settings.api_url, timeout=httpx.Timeout(settings.timeout),
             follow_redirects=False,
         )
-    if history:
-        client = client.with_headers({"X-FIMBox-History-Location": history})
+    if workspace:
+        client = client.with_headers({"X-FIMBox-Workspace": workspace})
     try:
         with client:
             response = operation(client=client, **kwargs)
@@ -221,6 +259,12 @@ def __call(
         if 300 <= response.status_code < 400:
             detail = "API redirects are not followed; check --api-url."
         raise click.ClickException(f"API returned HTTP {response.status_code}: {detail}")
+    if expected_status is not None and response.status_code != expected_status:
+        raise click.ClickException(
+            f"API returned HTTP {response.status_code}; expected HTTP {expected_status}."
+        )
+    if expected_type is not None and not isinstance(response.parsed, expected_type):
+        raise click.ClickException("API response does not match the generated SDK contract.")
     if response.content:
         try:
             click.echo(json.dumps(json.loads(response.content), indent=2, ensure_ascii=True))
@@ -230,6 +274,7 @@ def __call(
         __delete_token(settings.api_url)
     elif browser_login:
         __save_token(settings.api_url, token.strip())
+    return response
 
 
 def __body(path: Path) -> Any:
@@ -305,129 +350,125 @@ def __interactive_scenarios() -> list[Scenario]:
 @click.option("--session-token", envvar="FIMBOX_SESSION_TOKEN",
               help="Prefer FIMBOX_SESSION_TOKEN or omit to use a saved session or browser login.")
 @click.option("--timeout", type=click.FloatRange(min=0, min_open=True), default=30.0, show_default=True)
-@click.option("--history-location", envvar="FIMBOX_HISTORY_LOCATION",
-              help="Persistent history at s3://bucket/prefix; overrides the saved location.")
+@click.option("--workspace", "workspace_location", envvar="FIMBOX_WORKSPACE",
+              help="Workspace location; overrides the saved workspace for this API.")
 @click.pass_context
 def app(
-    ctx: click.Context, api_url: str, session_token: str | None, timeout: float, history_location: str | None,
+    ctx: click.Context, api_url: str, session_token: str | None, timeout: float,
+    workspace_location: str | None,
 ) -> None:
-    """Submit and manage HAND-FIM jobs with the generated Python SDK."""
+    """Submit and manage HAND-FIM jobs in an authenticated workspace."""
     origin = urlsplit(api_url)
     if (
         origin.scheme not in ("http", "https") or not origin.netloc or origin.username or origin.password
         or origin.query or origin.fragment
     ):
         raise click.ClickException("API URL must be HTTP(S), without credentials, query, or fragment.")
+    if workspace_location is not None and not __valid_workspace_location(workspace_location):
+        raise click.ClickException(
+            "Workspace must be an S3 location: s3://bucket/prefix."
+        )
     ctx.obj = Settings(api_url.rstrip("/"), session_token, timeout)
-    ctx.obj.history_location = history_location
+    ctx.obj.workspace_location = workspace_location
 
 
 @app.group()
-def history() -> None:
-    """Select persistent S3 job history (outputs retain their separate location)."""
+def workspace() -> None:
+    """Create, open, and inspect an authenticated workspace."""
 
 
-@history.command("use")
+@workspace.command("create")
+@click.argument("location")
+@click.option("--name", required=True, help="Human-readable workspace name.")
+@click.pass_context
+def workspace_create(ctx: click.Context, location: str, name: str) -> None:
+    """Create a workspace at an empty subprefix under resource data/contents/."""
+    if not __valid_workspace_location(location):
+        raise click.ClickException(
+            "Workspace must be an S3 location: s3://bucket/prefix."
+        )
+    if not name.strip():
+        raise click.ClickException("Workspace name must not be empty.")
+    __call(
+        ctx, create_workspace_workspaces_post.sync_detailed, body=WorkspaceCreate(location=location, name=name.strip()),
+        expected_status=201, expected_type=Workspace,
+    )
+    __save_workspace(ctx.obj, location)
+    ctx.obj.workspace_location = location
+    click.echo(f"Workspace created and selected: {location}")
+
+
+@workspace.command("open")
 @click.argument("location")
 @click.pass_context
-def history_use(ctx: click.Context, location: str) -> None:
-    """Check read access and remember an S3 location for this API."""
-    parts = urlsplit(location)
-    if parts.scheme != "s3" or not parts.netloc or not parts.path.strip("/") \
-            or parts.query or parts.fragment or parts.username or parts.password:
-        raise click.ClickException("History location must be s3://bucket/prefix without credentials.")
-    ctx.obj.history_location = location
-    __call(ctx, list_jobs_jobs_get.sync_detailed)
-    __save_history(ctx.obj, location)
-    click.echo(f"Future submissions retain history at {location}, scoped to the signed-in user.")
+def workspace_open(ctx: click.Context, location: str) -> None:
+    """Open an existing workspace and select it for this API."""
+    if not __valid_workspace_location(location):
+        raise click.ClickException(
+            "Workspace must be an S3 location: s3://bucket/prefix."
+        )
+    __call(
+        ctx, load_workspace_workspaces_open_post.sync_detailed, body=WorkspaceOpen(location=location),
+        expected_status=200, expected_type=Workspace,
+    )
+    __save_workspace(ctx.obj, location)
+    ctx.obj.workspace_location = location
+    click.echo(f"Workspace opened and selected: {location}")
 
 
-@history.command("show")
+@workspace.command("show")
 @click.pass_context
-def history_show(ctx: click.Context) -> None:
-    click.echo(__history_location(ctx.obj) or "Persistent history is disabled.")
+def workspace_show(ctx: click.Context) -> None:
+    """Show the selected workspace location."""
+    click.echo(__workspace_location(ctx.obj) or "No workspace is selected.")
 
 
-@history.command("export")
+@workspace.command("forget")
 @click.pass_context
-def history_export(ctx: click.Context) -> None:
-    """Copy completed Redis jobs and logs to the selected S3 location."""
-    if not __history_location(ctx.obj):
-        raise click.ClickException("Select a history location with 'fimbox history use s3://bucket/prefix'.")
-    __call(ctx, export_job_history_jobs_history_export_post.sync_detailed)
+def workspace_forget(ctx: click.Context) -> None:
+    """Forget the saved workspace location without deleting shared data."""
+    __save_workspace(ctx.obj, None)
+    click.echo("Saved workspace location forgotten. Workspace data and outputs are unchanged.")
 
 
-@history.command("clear")
-@click.confirmation_option(prompt="Remove all finished jobs and logs from the job list and selected S3 history?")
-@click.pass_context
-def history_clear(ctx: click.Context) -> None:
-    """Remove finished jobs from Redis and the selected S3 location; keep active jobs and outputs."""
-    __call(ctx, clear_job_history_jobs_history_clear_post.sync_detailed)
-
-
-@history.command("disable")
-@click.pass_context
-def history_disable(ctx: click.Context) -> None:
-    __save_history(ctx.obj, None)
-    click.echo("Saved history location removed. Existing S3 records are unchanged.")
-
-
-@history.command("job")
+@workspace.command("job")
 @click.argument("job_id", type=click.UUID)
 @click.pass_context
-def history_job(ctx: click.Context, job_id: UUID) -> None:
-    """Show an archived job's inputs, timestamps, and outcome."""
-    if not __history_location(ctx.obj):
-        raise click.ClickException("Select a history location with 'fimbox history use s3://bucket/prefix'.")
-    __call(ctx, get_job_archive_jobs_job_id_archive_get.sync_detailed, job_id=str(job_id))
+def workspace_job(ctx: click.Context, job_id: UUID) -> None:
+    """Show a live or retained job record from the selected workspace."""
+    __call(
+        ctx, get_job_status_jobs_job_id_get.sync_detailed,
+        workspace_required=True, job_id=job_id,
+    )
 
 
 @app.command()
 @click.option("--body", type=click.Path(exists=True, dir_okay=False, path_type=Path),
               help="Scenario JSON array. Omit to enter HAND-FIM inputs interactively.")
-@click.option("--output-bucket", default=None,
-              help="S3 output bucket; prompted interactively when required by the API.")
-@click.option("--output-prefix", default="", help="S3 key prefix; requires --output-bucket.")
 @click.option("--max-procs", type=click.IntRange(min=1), default=None,
               help="Max concurrent HAND-FIM processes; JSON submissions default to worker configuration, interactive default is 1.")
-@click.option("--overwrite/--no-overwrite", default=False, show_default=True,
-              help="Replace existing S3 objects with matching output keys.")
 @click.option("--execution-mode", type=click.Choice(["fimserv-2024", "fimserv-2026", "streaming-2024", "streaming-2026"]),
               default="fimserv-2024", show_default=True,
-              help="streaming-* range-reads a prepared cloud-optimized hydrofabric and writes tiled COGs; requires "
-                   "--output-bucket. *-2026 modes use NOAA inundation-mapping v4.8.14.0.")
+              help="streaming-* range-reads a prepared cloud-optimized hydrofabric and writes tiled COGs. "
+                   "*-2026 modes use NOAA inundation-mapping v4.8.14.0.")
 @click.pass_context
 def submit(
-    ctx: click.Context, body: Path | None, output_bucket: str | None,
-    output_prefix: str, max_procs: int | None, overwrite: bool, execution_mode: str,
+    ctx: click.Context, body: Path | None, max_procs: int | None, execution_mode: str,
 ) -> None:
     """Submit HAND-FIM scenarios from JSON or interactive inputs."""
-    if body is not None and output_bucket is None and output_prefix:
-        raise click.ClickException("--output-prefix requires --output-bucket.")
     scenarios = __scenarios(__body(body)) if body is not None else __interactive_scenarios()
     if body is None and max_procs is None and execution_mode not in ("streaming-2024", "streaming-2026"):
         max_procs = click.prompt(
             "Max concurrent processes", default=1, type=click.IntRange(min=1),
         )
-    if body is None:
-        config = __api_config(ctx.obj)
-        if config.require_hydroshare_output and output_bucket is None:
-            output_bucket = click.prompt("HydroShare output bucket (required by the API)")
-        if output_bucket is not None:
-            if ctx.get_parameter_source("output_prefix") == click.core.ParameterSource.DEFAULT:
-                output_prefix = click.prompt("Output prefix (blank for none)", default="")
-            if ctx.get_parameter_source("overwrite") == click.core.ParameterSource.DEFAULT:
-                overwrite = click.confirm("Replace existing output objects?", default=False)
-    if output_bucket is None and output_prefix:
-        raise click.ClickException("--output-prefix requires --output-bucket.")
     __call(
         ctx, submit_hand_fim_jobs_hand_fim_post.sync_detailed,
+        workspace_required=True,
         body=HandFimJobRequest(
             scenarios=scenarios,
-            output_bucket=output_bucket,
-            output_prefix=output_prefix,
-            max_procs=max_procs,
-            overwrite=overwrite,
+            output_prefix=UNSET,
+            overwrite=UNSET,
+            max_procs=max_procs if max_procs is not None else UNSET,
             # The default mode is omitted from the request.
             execution_mode=(
                 HandFimJobRequestExecutionMode(execution_mode) if execution_mode != "fimserv-2024" else UNSET
@@ -439,8 +480,8 @@ def submit(
 @app.command()
 @click.pass_context
 def jobs(ctx: click.Context) -> None:
-    """List the authenticated user's job IDs and current statuses."""
-    __call(ctx, list_jobs_jobs_get.sync_detailed)
+    """List the active workspace's jobs and their submitters."""
+    __call(ctx, list_jobs_jobs_get.sync_detailed, workspace_required=True)
 
 
 @app.command()
@@ -448,15 +489,15 @@ def jobs(ctx: click.Context) -> None:
 @click.pass_context
 def status(ctx: click.Context, job_id: UUID) -> None:
     """Get a job's status and output manifest."""
-    __call(ctx, get_job_status_jobs_job_id_get.sync_detailed, job_id=job_id)
+    __call(ctx, get_job_status_jobs_job_id_get.sync_detailed, workspace_required=True, job_id=job_id)
 
 
 @app.command()
 @click.option("--job-id", required=True, type=click.UUID)
 @click.pass_context
 def cancel(ctx: click.Context, job_id: UUID) -> None:
-    """Request cancellation of a queued job."""
-    __call(ctx, cancel_job_jobs_job_id_delete.sync_detailed, job_id=job_id)
+    """Cancel one of your queued jobs in the selected workspace."""
+    __call(ctx, cancel_job_jobs_job_id_delete.sync_detailed, workspace_required=True, job_id=job_id)
 
 
 @app.command()

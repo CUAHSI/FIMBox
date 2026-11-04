@@ -4,12 +4,11 @@
 const TOKEN_KEY = "fimbox_session_token";
 const PREVIEW_SUFFIXES = [".json", ".md", ".txt", ".csv", ".log", ".xml", ".yaml", ".yml", ".geojson"];
 const RASTER_SUFFIXES = [".cog", ".tif", ".tiff"];
-const state = { config: null, token: sessionStorage.getItem(TOKEN_KEY), scenarios: [], examples: [], jobPoll: null };
-state.historyLocation = null;
-state.userId = null;
-state.locations = [];
-const locationPickers = [];
-const BUCKET_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/;
+const state = {
+  config: null, token: sessionStorage.getItem(TOKEN_KEY), scenarios: [], examples: [], jobPoll: null,
+  workspace: null, workspaceVersion: 0, workspaceAction: 0, workspaceLocation: null, userId: null, scope: "",
+};
+state.workspaces = [];
 
 function $(selector, root = document) { return root.querySelector(selector); }
 
@@ -62,12 +61,20 @@ function errorDetail(body, status) {
 }
 
 class ApiError extends Error {
-  constructor(message, status, headers) { super(message); this.status = status; this.headers = headers; }
+  constructor(message, status, headers, stale = false) {
+    super(message); this.status = status; this.headers = headers; this.stale = stale;
+  }
 }
 
 async function api(path, options = {}) {
   const headers = new Headers(options.headers || {});
-  if (state.historyLocation && path.startsWith("/jobs")) headers.set("X-FIMBox-History-Location", state.historyLocation);
+  const workspaceRequest = path.startsWith("/jobs") || path.startsWith("/outputs");
+  const workspace = workspaceRequest ? state.workspace : null;
+  const workspaceVersion = state.workspaceVersion;
+  if (workspaceRequest && !workspace) {
+    throw new ApiError("Create or open a workspace before using jobs or outputs.", 400);
+  }
+  if (workspace) headers.set("X-FIMBox-Workspace", `s3://${workspace.bucket}/${workspace.prefix}`);
   if (state.token) headers.set("Authorization", `Bearer ${state.token}`);
   if (options.json !== undefined) {
     headers.set("Content-Type", "application/json");
@@ -76,7 +83,11 @@ async function api(path, options = {}) {
   const response = await fetch(path, { ...options, headers });
   if (response.status === 401 && state.token) {
     setToken(null);
-    renderAuth();
+    showSignedOut();
+  }
+  if (workspaceRequest && (workspaceVersion !== state.workspaceVersion
+      || !state.workspace || state.workspace.workspace_id !== workspace.workspace_id)) {
+    throw new ApiError("The active workspace changed while this request was running.", 409, response.headers, true);
   }
   if (options.raw) {
     if (!response.ok) throw new ApiError(`HTTP ${response.status}`, response.status, response.headers);
@@ -121,133 +132,260 @@ function bindTabs(group, root = document) {
 
 function setToken(token) {
   state.token = token;
-  state.historyLocation = null;
   state.userId = null;
+  state.scope = "";
   if (token) sessionStorage.setItem(TOKEN_KEY, token);
   else sessionStorage.removeItem(TOKEN_KEY);
+  clearActiveWorkspace();
 }
 
-function authReady() { return !state.config.authentication_enabled || Boolean(state.token); }
+function authReady() {
+  return Boolean(state.config && state.config.authentication_enabled && state.token && state.userId);
+}
 
-async function renderAuth() {
-  const status = $("#auth-status");
-  const signIn = $("#sign-in");
-  const signOut = $("#sign-out");
-  if (!state.config.authentication_enabled) {
-    status.textContent = "Local mode (no sign-in required)";
-    signIn.hidden = signOut.hidden = true;
-    renderHistoryLocation();
-    loadLocations();
-    return;
-  }
-  if (!state.token) {
-    status.textContent = "Not signed in";
-    signIn.hidden = false;
-    signOut.hidden = true;
-    renderHistoryLocation();
-    loadLocations();
-    return;
-  }
+function workspacePreferenceKey() { return `fimbox-workspace:v1:${location.origin}:${state.userId}`; }
+
+function rememberedWorkspacesKey() { return `fimbox-workspaces:v1:${location.origin}:${state.userId}`; }
+
+function loadRememberedWorkspaces() {
+  state.workspaces = [];
   try {
-    const session = await api("/auth/session");
-    state.userId = session.user_id;
-    try { state.historyLocation = localStorage.getItem(historyPreferenceKey()); }
-    catch (error) { showMessage(`Could not restore history preference: ${error.message}`, true); }
-    renderHistoryLocation();
-    loadLocations();
-    status.textContent = `Signed in as HydroShare user ${session.user_id}`;
-    signIn.hidden = true;
-    signOut.hidden = false;
-  } catch {
-    status.textContent = "Not signed in";
-    signIn.hidden = false;
-    signOut.hidden = true;
-    loadLocations();
-  }
-}
-
-function historyPreferenceKey() { return `fimbox-history:${location.origin}:${state.userId}`; }
-
-function renderHistoryLocation() {
-  const input = $("#history-location");
-  useCustomLocation(input);
-  input.value = state.historyLocation || "";
-  $("#history-location-form").hidden = !state.userId;
-  $("#history-export").disabled = !state.historyLocation;
-  $("#history-status").textContent = state.historyLocation
-    ? `History: ${state.historyLocation} (scoped to your user).`
-    : "Not enabled; live Redis job history still expires.";
-}
-
-async function useHistoryLocation(event) {
-  event.preventDefault();
-  const previous = state.historyLocation;
-  const value = $("#history-location").value.trim();
-  if (!/^s3:\/\/[^/]+\/.+/.test(value)) { showMessage("Enter s3://bucket/prefix for job history.", true); return; }
-  state.historyLocation = value;
-  try {
-    await api("/jobs");
-    localStorage.setItem(historyPreferenceKey(), value);
-    renderHistoryLocation();
-    loadJobs();
-    showMessage("Persistent history enabled for future jobs. Existing archived jobs are available here.");
+    const saved = JSON.parse(localStorage.getItem(rememberedWorkspacesKey()) || "[]");
+    if (!Array.isArray(saved) || saved.some((item) =>
+      !item || typeof item.location !== "string" || !item.location.startsWith("s3://")
+      || typeof item.name !== "string" || !item.name.trim())) {
+      throw new Error("Invalid remembered workspace list");
+    }
+    state.workspaces = saved;
   } catch (error) {
-    state.historyLocation = previous;
-    renderHistoryLocation();
-    showMessage(`Could not enable S3 history: ${error.message}`, true);
+    showMessage(`Could not restore remembered workspaces: ${error.message}`, true);
+  }
+  renderRememberedWorkspaces();
+}
+
+function renderRememberedWorkspaces() {
+  const list = $("#workspace-list");
+  list.replaceChildren();
+  if (!state.workspaces.length) {
+    list.append(el("li", { className: "hint", text: "No remembered workspaces yet. Open or create one below." }));
+  }
+  for (const item of state.workspaces) {
+    const open = el("button", { type: "button", text: "Open", onclick: () => openWorkspaceLocation(item.location, open) });
+    list.append(el("li", {},
+      el("div", { className: "workspace-details" }, el("strong", { text: item.name }), el("code", { text: item.location })),
+      open,
+      el("button", { type: "button", text: "Forget", onclick: () => forgetWorkspace(item) })));
   }
 }
 
-function disableHistoryLocation() {
-  try { localStorage.removeItem(historyPreferenceKey()); }
-  catch (error) { showMessage(`Could not clear history preference: ${error.message}`, true); return; }
-  state.historyLocation = null;
-  renderHistoryLocation();
+function rememberWorkspace(workspace) {
+  const item = { name: workspace.name, location: `s3://${workspace.bucket}/${workspace.prefix}` };
+  const workspaces = [item, ...state.workspaces.filter((other) => other.location !== item.location)];
+  localStorage.setItem(rememberedWorkspacesKey(), JSON.stringify(workspaces));
+  state.workspaces = workspaces;
+  renderRememberedWorkspaces();
+}
+
+function forgetWorkspace(item) {
+  try {
+    const workspaces = state.workspaces.filter((other) => other.location !== item.location);
+    localStorage.setItem(rememberedWorkspacesKey(), JSON.stringify(workspaces));
+    if (localStorage.getItem(workspacePreferenceKey()) === item.location) {
+      localStorage.removeItem(workspacePreferenceKey());
+    }
+    state.workspaces = workspaces;
+    renderRememberedWorkspaces();
+    showMessage(`Forgot ${item.name} in this browser. Shared workspace data is unchanged.`);
+  } catch (error) { showMessage(`Could not forget workspace: ${error.message}`, true); }
+}
+
+function canWriteWorkspace() { return state.scope.split(/\s+/).includes("write"); }
+
+function syncWorkspaceGate() {
+  const signedIn = authReady();
+  const active = signedIn && Boolean(state.workspace);
+  $("#workspace-gate").hidden = !state.config || !state.config.authentication_enabled;
+  $("#workspace-auth-required").hidden = signedIn;
+  $("#workspace-active").hidden = !active;
+  $("#workspace-choice").hidden = !signedIn || active;
+  $("#main-tabs").hidden = !active;
+  $("#main-content").hidden = !active;
+  if (active) {
+    $("#workspace-summary").textContent =
+      `${state.workspace.name} — s3://${state.workspace.bucket}/${state.workspace.prefix}`;
+  }
+  $("#workspace-create button[type=submit]").disabled = !canWriteWorkspace();
+  $("#job-options button[type=submit]").disabled = !active || !canWriteWorkspace();
+  $("#compare-results button[type=submit]").disabled = !active || !canWriteWorkspace();
+  if (!signedIn) {
+    $("#workspace-auth-required").textContent = "Sign in with HydroShare to create or open a workspace.";
+  } else if (active && !canWriteWorkspace()) {
+    $("#options-hint").textContent = "Read-only HydroShare access: you can inspect this workspace and existing results, but cannot create jobs.";
+  }
+}
+
+function clearActiveWorkspace({ removePreference = false } = {}) {
+  if (removePreference && state.userId) {
+    try { localStorage.removeItem(workspacePreferenceKey()); }
+    catch (error) { showMessage(`Could not clear saved workspace preference: ${error.message}`, true); }
+  }
+  state.workspaceVersion += 1;
+  state.workspaceAction += 1;
+  state.workspace = null;
+  state.workspaceLocation = null;
+  state.currentJob = null;
+  state.scenarios = [];
+  if ($("#scenario-editor")) renderScenarioEditor();
+  if ($("#json-text")) $("#json-text").value = "";
+  if ($("#input-description")) {
+    $("#input-description").textContent = "Sign in and open a workspace before browsing the input dataset or using the reach map.";
+    $("#input-browser").replaceChildren();
+  }
+  if ($("#open-output")) $("#open-output").reset();
+  if ($("#compare-results")) $("#compare-results").reset();
+  if ($("#reach-picker")) closeReachPicker();
+  if (picker.map) {
+    picker.map.remove();
+    picker.map = null;
+    picker.highlight = null;
+  }
+  if (state.jobPoll) { clearTimeout(state.jobPoll); state.jobPoll = null; }
+  state.viewId = (state.viewId || 0) + 1;
+  const list = $("#job-list");
+  if (list) list.replaceChildren(el("li", { className: "hint", text: "Open a workspace to list jobs." }));
+  const view = $("#result-view");
+  if (view) {
+    const blank = view.cloneNode(false);
+    view.replaceWith(blank);
+    blank.replaceChildren(el("p", { className: "hint", text: "Select a job or open a workspace output." }));
+  }
+  syncWorkspaceGate();
+}
+
+function activateWorkspace(workspace) {
+  clearActiveWorkspace();
+  state.workspace = workspace;
+  state.workspaceLocation = `s3://${workspace.bucket}/${workspace.prefix}`;
+  try {
+    rememberWorkspace(workspace);
+    localStorage.setItem(workspacePreferenceKey(), state.workspaceLocation);
+  }
+  catch (error) { showMessage(`Workspace opened, but could not save browser preferences: ${error.message}`, true); }
+  syncWorkspaceGate();
+  loadInputDataset();
   loadJobs();
-  showMessage("Persistent history disabled for future submissions. Existing S3 archives are unchanged.");
 }
 
-async function exportRedisHistory() {
-  const button = $("#history-export");
-  button.disabled = true;
+async function restoreWorkspace() {
+  let saved;
+  try { saved = localStorage.getItem(workspacePreferenceKey()); }
+  catch (error) { showMessage(`Could not restore workspace preference: ${error.message}`, true); return; }
+  if (!saved) { syncWorkspaceGate(); return; }
+  const userId = state.userId;
+  const action = ++state.workspaceAction;
   try {
-    const result = await api("/jobs/history/export", { method: "POST" });
-    showMessage(`Exported ${result.exported} jobs; skipped ${result.skipped_existing} existing archives and ${result.skipped_active} active jobs.`);
-    await loadJobs();
+    const workspace = await api("/workspaces/open", { method: "POST", json: { location: saved } });
+    if (state.userId !== userId || !state.token || state.workspaceAction !== action) return;
+    activateWorkspace(workspace);
   } catch (error) {
-    showMessage(`History export failed: ${error.message}. Any completed exports remain in S3; retry to export the remaining jobs.`, true);
-  } finally {
-    button.disabled = !state.historyLocation;
-  }
-}
-
-async function clearJobHistory() {
-  if (!authReady()) { showMessage("Sign in to clear job history.", true); return; }
-  const scope = state.historyLocation ? `the live job list and ${state.historyLocation}` : "the live job list";
-  if (!confirm(`Remove all finished jobs and their logs from ${scope}? Queued and running jobs are kept, and output files are not deleted.`)) return;
-  const button = $("#jobs-clear");
-  button.disabled = true;
-  try {
-    const result = await api("/jobs/history/clear", { method: "POST" });
-    showMessage(`Cleared ${result.cleared} finished jobs; kept ${result.skipped_active} active jobs.`);
-  } catch (error) {
-    showMessage(`Clearing history failed: ${error.message}. Retry to remove the remaining jobs.`, true);
-  } finally {
-    button.disabled = false;
-    await loadJobs();
-    if (state.currentJob && !$(`#job-list li[data-job="${state.currentJob}"]`)) {
-      state.currentJob = null;
-      newResultView("").replaceChildren(el("p", { className: "hint", text: "Select a job or open a retained output location." }));
+    if (state.userId === userId && state.token && state.workspaceAction === action) {
+      if (!error.stale) showMessage(`Could not reopen saved workspace: ${error.message}. Open or create a workspace to continue.`, true);
+      syncWorkspaceGate();
     }
   }
 }
 
-// ---------- Saved S3 locations (per account, this browser) ----------
-
-function locationsKey() {
-  if (state.config.authentication_enabled && !state.userId) return null;
-  return `fimbox-locations:${location.origin}:${state.userId || "local"}`;
+async function renderAuth() {
+  const status = $("#auth-status");
+  if (!state.config.authentication_enabled) {
+    status.textContent = "Authentication is not configured";
+    $("#sign-in").hidden = $("#sign-out").hidden = true;
+    $("#workspace-gate").hidden = true;
+    $("#main-tabs").hidden = $("#main-content").hidden = true;
+    showMessage("Configuration error: browser access requires HydroShare authentication. No work can be performed in anonymous mode.", true);
+    return;
+  }
+  if (!state.token) { showSignedOut(); return; }
+  const token = state.token;
+  try {
+    const session = await api("/auth/session");
+    if (state.token !== token) return;
+    state.userId = session.user_id;
+    state.scope = session.scope || "";
+    status.textContent = `Signed in as HydroShare user ${session.user_id}`;
+    $("#sign-in").hidden = true;
+    $("#sign-out").hidden = false;
+    loadRememberedWorkspaces();
+    await restoreWorkspace();
+  } catch {
+    if (state.token === token) setToken(null);
+    showSignedOut();
+  }
 }
+
+function showSignedOut() {
+  $("#auth-status").textContent = "Not signed in";
+  $("#sign-in").hidden = false;
+  $("#sign-out").hidden = true;
+  state.userId = null;
+  state.scope = "";
+  state.workspaces = [];
+  state.scenarios = [];
+  if ($("#scenario-editor")) renderScenarioEditor();
+  if ($("#json-text")) $("#json-text").value = "";
+  renderRememberedWorkspaces();
+  syncWorkspaceGate();
+}
+
+function switchWorkspace() {
+  clearActiveWorkspace({ removePreference: true });
+  syncWorkspaceGate();
+  showMessage("Open or create a workspace to continue.");
+}
+
+async function openWorkspace(event) {
+  event.preventDefault();
+  await openWorkspaceLocation(event.target.elements.location.value.trim(), $("button[type=submit]", event.target));
+}
+
+async function openWorkspaceLocation(locationValue, button) {
+  if (!authReady()) { showMessage("Sign in before opening a workspace.", true); return; }
+  const userId = state.userId;
+  const action = ++state.workspaceAction;
+  button.disabled = true;
+  try {
+    const workspace = await api("/workspaces/open", { method: "POST", json: { location: locationValue } });
+    if (state.workspaceAction !== action || state.userId !== userId) return;
+    showMessage(`Opened workspace ${workspace.name}.`);
+    activateWorkspace(workspace);
+  } catch (error) {
+    if (state.workspaceAction === action && state.userId === userId) showMessage(`Could not open workspace: ${error.message}`, true);
+  } finally { button.disabled = false; }
+}
+
+async function createWorkspace(event) {
+  event.preventDefault();
+  if (!authReady()) { showMessage("Sign in before creating a workspace.", true); return; }
+  if (!canWriteWorkspace()) { showMessage("Creating a workspace requires HydroShare write access.", true); return; }
+  const form = event.target;
+  const locationValue = form.elements.location.value.trim();
+  const name = form.elements.name.value.trim();
+  const button = $("button[type=submit]", form);
+  const userId = state.userId;
+  const action = ++state.workspaceAction;
+  button.disabled = true;
+  try {
+    const workspace = await api("/workspaces", { method: "POST", json: { location: locationValue, name } });
+    if (state.workspaceAction !== action || state.userId !== userId) return;
+    showMessage(`Created workspace ${workspace.name}.`);
+    activateWorkspace(workspace);
+    form.reset();
+  } catch (error) {
+    if (state.workspaceAction === action && state.userId === userId) showMessage(`Could not create workspace: ${error.message}`, true);
+  } finally { button.disabled = !canWriteWorkspace(); }
+}
+
+// ---------- Workspace-relative paths and previews ----------
 
 function relativeKeyError(value, label) {
   if (value.startsWith("/")) return `${label} must be relative (no leading /).`;
@@ -255,159 +393,22 @@ function relativeKeyError(value, label) {
   return null;
 }
 
-function savedLocationError(item) {
-  if (!item || typeof item.name !== "string" || !item.name.trim()) return "Name is required.";
-  if (typeof item.bucket !== "string" || !BUCKET_PATTERN.test(item.bucket)) return "Enter a valid bucket name.";
-  if (typeof item.prefix !== "string") return "Prefix must be text.";
-  return relativeKeyError(item.prefix.replace(/^\/+/, ""), "Prefix");
+const previewRequests = new WeakMap();
+
+function beginPreview(container) {
+  const request = (previewRequests.get(container) || 0) + 1;
+  const workspaceVersion = state.workspaceVersion;
+  previewRequests.set(container, request);
+  return () => container.isConnected
+    && request === previewRequests.get(container)
+    && workspaceVersion === state.workspaceVersion;
 }
 
-function loadLocations() {
-  const key = locationsKey();
-  state.locations = [];
-  if (key) {
-    try {
-      const saved = JSON.parse(localStorage.getItem(key) || "[]");
-      if (Array.isArray(saved)) state.locations = saved.filter((item) => !savedLocationError(item) && item.id);
-    } catch (error) {
-      showMessage(`Could not restore saved S3 locations: ${error.message}`, true);
-    }
-  }
-  resetLocationForm();
-  renderLocations();
-}
-
-function storeLocations(locations) {
-  localStorage.setItem(locationsKey(), JSON.stringify(locations));
-  state.locations = locations;
-  renderLocations();
-}
-
-function renderLocations() {
-  const signedOut = !locationsKey();
-  $("#locations-signin").hidden = !signedOut;
-  $("#location-form").hidden = signedOut;
-  const list = $("#location-list");
-  list.replaceChildren();
-  if (!state.locations.length) {
-    list.append(el("tr", {}, el("td", { colSpan: 3, className: "hint", text: signedOut ? "" : "No saved locations yet." })));
-  }
-  for (const item of state.locations) {
-    list.append(el("tr", {},
-      el("td", { text: item.name }),
-      el("td", {}, el("code", { text: `s3://${item.bucket}/${item.prefix}` })),
-      el("td", {},
-        el("button", { type: "button", className: "small", text: "Browse", onclick: () => {
-          activateTab("main", "results");
-          openLocation(item.bucket, item.prefix);
-        } }),
-        el("button", { type: "button", className: "small", text: "Edit", onclick: () => editLocation(item) }),
-        el("button", { type: "button", className: "small", text: "Delete", onclick: () => deleteLocation(item) }))));
-  }
-  for (const picker of locationPickers) renderPickerOptions(picker);
-}
-
-function resetLocationForm() {
-  const form = $("#location-form");
-  form.reset();
-  form.elements.id.value = "";
-  $("#location-form-title").textContent = "Add location";
-  $("#location-cancel").hidden = true;
-}
-
-function editLocation(item) {
-  const form = $("#location-form");
-  for (const name of ["id", "name", "bucket", "prefix"]) form.elements[name].value = item[name];
-  $("#location-form-title").textContent = `Edit ${item.name}`;
-  $("#location-cancel").hidden = false;
-  form.elements.name.focus();
-}
-
-function deleteLocation(item) {
-  if (!confirm(`Delete saved location "${item.name}"? Stored S3 objects are not affected.`)) return;
-  try { storeLocations(state.locations.filter((other) => other.id !== item.id)); }
-  catch (error) { showMessage(`Could not delete location: ${error.message}`, true); return; }
-  if ($("#location-form").elements.id.value === item.id) resetLocationForm();
-  showMessage(`Deleted saved location ${item.name}.`);
-}
-
-function saveLocation(event) {
-  event.preventDefault();
-  const form = event.target;
-  const id = form.elements.id.value;
-  const item = {
-    id: id || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
-    name: form.elements.name.value.trim(),
-    bucket: form.elements.bucket.value.trim(),
-    prefix: form.elements.prefix.value.trim(),
-  };
-  const error = savedLocationError(item);
-  if (error) { showMessage(error, true); return; }
-  item.prefix = joinKey(item.prefix);
-  if (state.locations.some((other) => other.id !== item.id && other.name.toLowerCase() === item.name.toLowerCase())) {
-    showMessage(`A location named ${item.name} already exists.`, true);
-    return;
-  }
-  const locations = id ? state.locations.map((other) => (other.id === id ? item : other)) : [...state.locations, item];
-  try { storeLocations(locations); }
-  catch (failure) { showMessage(`Could not save location: ${failure.message}`, true); return; }
-  resetLocationForm();
-  showMessage(`Saved location ${item.name}.`);
-}
-
-// A picker fills its form's bucket/prefix fields (or a single s3:// field) from a saved location plus a relative path.
-function attachLocationPicker(container) {
-  const form = container.closest("form");
-  const uriField = container.dataset.uri ? $(`#${container.dataset.uri}`) : null;
-  const fields = uriField ? [uriField] : [form.elements[container.dataset.bucket], form.elements[container.dataset.prefix]];
-  const select = el("select", { "aria-label": "Saved location" });
-  const relative = el("input", { placeholder: container.dataset.placeholder || "" });
-  const relativeLabel = el("label", { hidden: true }, `${container.dataset.label} `, relative);
-  const preview = el("span", { className: "hint" });
-  const picker = {
-    container, fields, select, relative, relativeLabel, preview,
-    required: container.dataset.required === "true",
-    write: (bucket, prefix) => {
-      if (uriField) uriField.value = `s3://${bucket}/${prefix}`;
-      else { fields[0].value = bucket; fields[1].value = prefix; }
-    },
-  };
-  container.append(el("label", {}, "Saved location ", select), relativeLabel, preview);
-  select.addEventListener("change", () => updatePicker(picker));
-  relative.addEventListener("input", () => updatePicker(picker));
-  locationPickers.push(picker);
-  renderPickerOptions(picker);
-}
-
-function renderPickerOptions(picker) {
-  const selected = picker.select.value;
-  picker.select.replaceChildren(el("option", { value: "", text: "Custom (enter below)" }),
-    ...state.locations.map((item) => el("option", { value: item.id, text: item.name })));
-  picker.select.value = state.locations.some((item) => item.id === selected) ? selected : "";
-  picker.container.hidden = !state.locations.length;
-  updatePicker(picker);
-}
-
-function updatePicker(picker) {
-  const saved = state.locations.find((item) => item.id === picker.select.value);
-  picker.relativeLabel.hidden = !saved;
-  picker.relative.required = Boolean(saved) && picker.required;
-  for (const field of picker.fields) field.readOnly = Boolean(saved);
-  picker.relative.setCustomValidity("");
-  picker.preview.textContent = "";
-  if (!saved) return;
-  const relative = picker.relative.value.trim();
-  const error = relativeKeyError(relative, picker.relativeLabel.firstChild.textContent.trim());
-  picker.relative.setCustomValidity(error || "");
-  const prefix = joinKey(saved.prefix, relative);
-  picker.write(saved.bucket, prefix);
-  picker.preview.textContent = error || `→ s3://${saved.bucket}/${prefix}`;
-}
-
-// Switch the picker owning `field` back to custom entry before code sets the field directly.
-function useCustomLocation(field) {
-  const picker = locationPickers.find((item) => item.fields.includes(field));
-  if (picker && picker.select.value) { picker.select.value = ""; updatePicker(picker); }
+function workspaceRelativeError(value, label) {
+  const error = relativeKeyError(value, label);
+  if (error) return error;
+  if (!value || value.split("/").some((part) => !part)) return `${label} must contain nonempty relative path segments.`;
+  return null;
 }
 
 async function signIn() {
@@ -459,8 +460,10 @@ async function signOut() {
 
 async function refreshAfterAuth() {
   await renderAuth();
-  loadInputDataset();
-  loadJobs();
+  if (authReady() && state.workspace) {
+    loadInputDataset();
+    loadJobs();
+  }
 }
 
 // ---------- Markdown (subset used by generated output READMEs) ----------
@@ -541,9 +544,11 @@ async function downloadObject(bucket, key) {
 }
 
 async function previewObject(container, bucket, key, linkHandler) {
+  const current = beginPreview(container);
   container.replaceChildren(el("p", { className: "hint", text: `Loading ${key}…` }));
   try {
     const preview = await api(`/ui/objects/preview?${query({ bucket, key })}`);
+    if (!current()) return;
     let body;
     if (key.toLowerCase().endsWith(".md")) {
       body = renderMarkdown(preview.text, linkHandler);
@@ -563,14 +568,17 @@ async function previewObject(container, bucket, key, linkHandler) {
       body,
     );
   } catch (error) {
+    if (!current()) return;
     container.replaceChildren(el("p", { className: "message error", text: `Preview failed: ${error.message}` }));
   }
 }
 
 async function previewParquet(container, bucket, key) {
+  const current = beginPreview(container);
   container.replaceChildren(el("p", { className: "hint", text: `Loading ${key}…` }));
   try {
     const preview = await api(`/ui/objects/parquet?${query({ bucket, key, limit: 100 })}`);
+    if (!current()) return;
     const summary = `${preview.num_rows.toLocaleString()} rows · ${preview.columns.length} columns · `
       + `${preview.num_row_groups} row group${preview.num_row_groups === 1 ? "" : "s"} · ${formatBytes(preview.size_bytes)}`;
     const schema = el("details", {},
@@ -589,17 +597,19 @@ async function previewParquet(container, bucket, key) {
       el("div", { className: "parquet" }, el("p", { className: "hint", text: summary }), schema, el("div", { className: "table-scroll" }, rows)),
     );
   } catch (error) {
+    if (!current()) return;
     container.replaceChildren(el("p", { className: "message error", text: `Preview failed: ${error.message}` }));
   }
 }
 
 async function previewRaster(container, bucket, key) {
+  const current = beginPreview(container);
   const loading = el("p", { className: "hint", text: `Loading ${key}…` });
   container.replaceChildren(loading);
   try {
     const response = await api(`/ui/objects/raster?${query({ bucket, key })}`, { raw: true });
     const blob = await response.blob();
-    if (!container.contains(loading)) return;
+    if (!current() || !container.contains(loading)) return;
     const url = URL.createObjectURL(blob);
     const image = el("img", { src: url, alt: `First-band preview of ${key}`,
       onload: () => URL.revokeObjectURL(url),
@@ -615,11 +625,15 @@ async function previewRaster(container, bucket, key) {
       image,
     );
   } catch (error) {
-    if (container.contains(loading)) container.replaceChildren(el("p", { className: "message error", text: `Preview failed: ${error.message}` }));
+    if (current() && container.contains(loading)) {
+      container.replaceChildren(el("p", { className: "message error", text: `Preview failed: ${error.message}` }));
+    }
   }
 }
 
 function createBrowser(container, { bucket, root, onRaster, linkHandler }) {
+  const workspaceVersion = state.workspaceVersion;
+  let listingRequest = 0;
   const crumbs = el("div", { className: "breadcrumb" });
   const table = el("table");
   const more = el("div", { className: "row" });
@@ -669,6 +683,7 @@ function createBrowser(container, { bucket, root, onRaster, linkHandler }) {
   }
 
   async function open(prefix, token = null) {
+    const request = ++listingRequest;
     if (!token) {
       renderCrumbs(prefix);
       table.replaceChildren(el("tr", {}, el("td", { className: "hint", text: "Loading…" })));
@@ -676,6 +691,7 @@ function createBrowser(container, { bucket, root, onRaster, linkHandler }) {
     more.replaceChildren();
     try {
       const listing = await api(`/ui/objects?${query({ bucket, prefix, token })}`);
+      if (workspaceVersion !== state.workspaceVersion || request !== listingRequest || !container.isConnected) return;
       if (!token) {
         table.replaceChildren(el("tr", {}, el("th", { text: "Name" }), el("th", { text: "Size" }),
           el("th", { text: "Modified" }), el("th", { text: "" })));
@@ -697,6 +713,7 @@ function createBrowser(container, { bucket, root, onRaster, linkHandler }) {
         more.append(el("button", { type: "button", text: "Load more", onclick: () => open(prefix, listing.next_token) }));
       }
     } catch (error) {
+      if (workspaceVersion !== state.workspaceVersion || request !== listingRequest || !container.isConnected) return;
       table.replaceChildren(el("tr", {}, el("td", { className: "message error", text: `Listing failed: ${error.message}` })));
     }
   }
@@ -710,6 +727,11 @@ function createBrowser(container, { bucket, root, onRaster, linkHandler }) {
 function loadInputDataset() {
   const description = $("#input-description");
   const container = $("#input-browser");
+  if (!authReady() || !state.workspace) {
+    description.textContent = "Sign in and open a workspace before browsing the input dataset or using the reach map.";
+    container.replaceChildren();
+    return;
+  }
   const dataset = state.config.input_dataset;
   if (!dataset) {
     description.textContent = "This server has no prepared streaming hydrofabric configured. Legacy jobs download "
@@ -1166,6 +1188,10 @@ async function showCurrentReach(reachId) {
 }
 
 function openReachPicker(scenario, reach, reachIndex) {
+  if (!authReady() || !state.workspace) {
+    showMessage("Sign in and open a workspace before using the reach map.", true);
+    return;
+  }
   if (!window.L) { showMessage("The map library could not be loaded.", true); return; }
   picker.target = reach;
   $("#picker-title").textContent = `Pick a reach for ${scenario.ScenarioID || "this scenario"}, row ${reachIndex + 1}`;
@@ -1245,14 +1271,11 @@ function setupJobOptions() {
   const form = $("#job-options");
   const modes = form.elements.execution_mode;
   for (const mode of state.config.execution_modes) modes.append(el("option", { value: mode, text: mode }));
-  if (state.config.require_hydroshare_output || state.config.authentication_enabled) form.elements.output_bucket.value = "resource";
   const updateHint = () => {
     const streamed = modes.value.startsWith("streaming-");
     const notes = [];
-    if (streamed) notes.push("Streaming modes require an output bucket and run one process.");
-    if (state.config.require_hydroshare_output) notes.push("This deployment requires a HydroShare output bucket.");
-    if (!state.config.authentication_enabled) notes.push("Local mode: S3 output is unavailable and output files are removed after the run.");
-    notes.push("Use a new prefix per run to avoid overwriting retained outputs.");
+    if (streamed) notes.push("Streaming modes run one process.");
+    notes.push("Outputs are assigned under this workspace; existing objects are never overwritten.");
     $("#options-hint").textContent = notes.join(" ");
     form.elements.max_procs.disabled = streamed;
   };
@@ -1262,33 +1285,32 @@ function setupJobOptions() {
 
 async function submitJob(event) {
   event.preventDefault();
-  if (!authReady()) { showMessage("Sign in with HydroShare before submitting jobs.", true); return; }
+  if (!authReady() || !state.workspace) { showMessage("Sign in and open a workspace before submitting jobs.", true); return; }
+  if (!canWriteWorkspace()) { showMessage("Submitting a job requires HydroShare write access.", true); return; }
   if (!$("#json-editor").hidden) {
     try { setScenarios(JSON.parse($("#json-text").value)); } catch (error) { showMessage(`Invalid JSON: ${error.message}`, true); return; }
   }
   const form = event.target;
-  const bucket = form.elements.output_bucket.value.trim();
   const maxProcs = form.elements.max_procs.value;
   const body = {
     scenarios: state.scenarios,
     execution_mode: form.elements.execution_mode.value,
-    output_bucket: bucket || null,
-    output_prefix: bucket ? form.elements.output_prefix.value.trim() : "",
-    overwrite: form.elements.overwrite.checked,
   };
   if (maxProcs && !form.elements.max_procs.disabled) body.max_procs = Number(maxProcs);
   const button = $("button[type=submit]", form);
+  const workspaceVersion = state.workspaceVersion;
   button.disabled = true;
   try {
     const submitted = await api("/jobs/hand-fim", { method: "POST", json: body });
+    if (workspaceVersion !== state.workspaceVersion) return;
     showMessage(`Job ${submitted.job_id} submitted (${submitted.status}).`);
     activateTab("main", "results");
     await loadJobs();
     openJob(submitted.job_id);
   } catch (error) {
-    showMessage(`Submission failed:\n${error.message}`, true);
+    if (!error.stale && workspaceVersion === state.workspaceVersion) showMessage(`Submission failed:\n${error.message}`, true);
   } finally {
-    button.disabled = false;
+    if (workspaceVersion === state.workspaceVersion) button.disabled = false;
   }
 }
 
@@ -1296,19 +1318,27 @@ async function submitJob(event) {
 
 async function loadJobs() {
   const list = $("#job-list");
-  if (!authReady()) { list.replaceChildren(el("li", { className: "hint", text: "Sign in to list jobs." })); return; }
+  if (!authReady() || !state.workspace) {
+    list.replaceChildren(el("li", { className: "hint", text: "Open a workspace to list jobs." }));
+    return;
+  }
+  const workspaceVersion = state.workspaceVersion;
   try {
     const { jobs } = await api("/jobs");
+    if (workspaceVersion !== state.workspaceVersion) return;
     list.replaceChildren(...jobs.slice().reverse().map((job) => {
+      const stateLabel = job.execution_state_known === false ? `${job.status} · stale` : job.status;
       const item = el("li", { onclick: () => openJob(job.job_id) },
         el("span", { text: job.job_id.slice(0, 8) + "…", title: job.job_id }),
-        el("span", { className: `status ${job.status}`, text: job.status }));
+        el("span", { text: job.user_id || "Unknown submitter" }),
+        el("span", { className: `status ${job.execution_state_known === false ? "stale" : job.status}`, text: stateLabel }));
       item.dataset.job = job.job_id;
       item.classList.toggle("active", job.job_id === state.currentJob);
       return item;
     }));
-    if (!jobs.length) list.append(el("li", { className: "hint", text: state.historyLocation ? "No jobs in this history location." : "No jobs in the last 24 hours." }));
+    if (!jobs.length) list.append(el("li", { className: "hint", text: "No jobs in this workspace." }));
   } catch (error) {
+    if (workspaceVersion !== state.workspaceVersion || error.stale) return;
     list.replaceChildren(el("li", { className: "hint", text: `Could not list jobs: ${error.message}` }));
   }
 }
@@ -1684,11 +1714,12 @@ async function loadOutputDetails(view, bucket, prefix, result) {
 function startLogPolling(view, jobId, status) {
   const pre = $(".logs", view);
   const viewId = state.viewId;
+  const workspaceVersion = state.workspaceVersion;
   let offset = 0;
   const poll = async () => {
     try {
       const logs = await api(`/jobs/${jobId}/logs?${query({ offset })}`);
-      if (viewId !== state.viewId) return;
+      if (viewId !== state.viewId || workspaceVersion !== state.workspaceVersion) return;
       if (logs.logs) {
         pre.append(logs.logs);
         pre.scrollTop = pre.scrollHeight;
@@ -1699,6 +1730,7 @@ function startLogPolling(view, jobId, status) {
       else if (logs.logs) state.jobPoll = setTimeout(poll, 0);
       else if (!pre.textContent) pre.textContent = "No worker output retained.";
     } catch (error) {
+      if (error.stale || workspaceVersion !== state.workspaceVersion || viewId !== state.viewId) return;
       pre.append(`\n[log polling stopped: ${error.message}]`);
     }
   };
@@ -1706,15 +1738,18 @@ function startLogPolling(view, jobId, status) {
 }
 
 async function openJob(jobId) {
+  if (!state.workspace) { showMessage("Open a workspace before viewing jobs.", true); return; }
   state.currentJob = jobId;
   for (const item of document.querySelectorAll("#job-list li")) item.classList.toggle("active", item.dataset.job === jobId);
   const view = newResultView(`Job ${jobId}`);
   const viewId = state.viewId;
+  const workspaceVersion = state.workspaceVersion;
   let job;
   try {
     job = await api(`/jobs/${jobId}`);
-    if (viewId !== state.viewId) return;
+    if (viewId !== state.viewId || workspaceVersion !== state.workspaceVersion) return;
   } catch (error) {
+    if (error.stale || viewId !== state.viewId || workspaceVersion !== state.workspaceVersion) return;
     view.append(el("p", { className: "message error", text: `Could not load job: ${error.message}` }));
     return;
   }
@@ -1728,7 +1763,10 @@ async function openJob(jobId) {
     ["Started", formatTime(job.started_at)],
     ["Finished", formatTime(job.finished_at)],
     [job.finished_at ? "Execution time" : "Elapsed", durationEntry(job)],
-    ["Job type", compared ? "Result comparison" : null],
+    ["Submitted by", job.user_id],
+    ["Submitted", formatTime(job.submitted_at)],
+    ["Job type", job.job_type || (compared ? "compare" : null)],
+    ["Execution state", job.execution_state_known === false ? "Stale — worker state is no longer available" : "Current"],
     ["Base", compared ? locationLink(compared.base_bucket, compared.base_prefix) : null],
     ["Candidate", compared ? locationLink(compared.candidate_bucket, compared.candidate_prefix) : null],
     ["Skipped scenarios", compared && compared.skipped_scenarios.join(", ")],
@@ -1739,53 +1777,37 @@ async function openJob(jobId) {
     ["Output location", location],
     ["Output files", result && (result.files || []).length],
   ]);
-  if (job.status === "queued") {
+  if (job.status === "queued" && job.execution_state_known !== false && job.user_id === state.userId) {
     $("dl.summary", view).after(el("div", { className: "row" }, el("button", { type: "button", text: "Cancel job", onclick: async () => {
-      try { await api(`/jobs/${jobId}`, { method: "DELETE" }); showMessage(`Cancellation requested for ${jobId}.`); openJob(jobId); loadJobs(); }
-      catch (error) { showMessage(`Cancel failed: ${error.message}`, true); }
+      try {
+        await api(`/jobs/${jobId}`, { method: "DELETE" });
+        if (workspaceVersion !== state.workspaceVersion) return;
+        showMessage(`Cancellation requested for ${jobId}.`); openJob(jobId); loadJobs();
+      } catch (error) {
+        if (!error.stale && workspaceVersion === state.workspaceVersion) showMessage(`Cancel failed: ${error.message}`, true);
+      }
     } })));
   }
-  startLogPolling(view, jobId, job.status);
-  if (result && result.output_bucket && !compared) $("dl.summary", view).after(compareButtons(result.output_bucket, result.output_prefix));
+  if (job.execution_state_known !== false) startLogPolling(view, jobId, job.status);
+  if (result && result.output_bucket && !compared
+      && workspaceRelativePrefix(result.output_bucket, result.output_prefix) !== null) {
+    $("dl.summary", view).after(compareButtons(result.output_bucket, result.output_prefix));
+  }
   if (result && result.output_bucket) {
     loadOutputDetails(view, result.output_bucket, result.output_prefix, result);
   } else {
     const note = job.status === "success"
-      ? "This job kept its output local; local files are removed after the run. Submit with an output bucket to retain and view files."
+      ? "This job has no retained output in the workspace."
       : "Results appear here when the job succeeds. Worker output is streamed in the Logs tab.";
     $(".readme", view).replaceChildren(el("p", { className: "hint", text: note }));
     for (const selector of [".parameters", ".files"]) $(selector, view).replaceChildren(el("p", { className: "hint", text: note }));
     $(".map-status", view).textContent = note;
   }
   if (["queued", "started", "failure"].includes(job.status)) activateTab("result", "logs", view);
-  if (state.historyLocation) {
-    try {
-      const archive = await api(`/jobs/${jobId}/archive`);
-      if (viewId !== state.viewId) return;
-      addSummary(view, [["Submitted (UTC)", archive.submitted_at], ["Updated (UTC)", archive.updated_at],
-        ["History location", state.historyLocation]]);
-      if (archive.source === "redis-export") view.append(el("p", { className: "hint",
-        text: "Exported from Redis. Original submission parameters and timestamps were not retained. Retained output may still include scenarios.json." }));
-      $("dl.summary", view).after(el("details", {},
-        el("summary", { text: "Archived submission parameters" }),
-        el("pre", { text: JSON.stringify(archive.request, null, 2) })));
-      if (archive.request.scenarios && !(result && result.output_bucket)) {
-        const parameters = $(".parameters", view);
-        parameters.replaceChildren(el("pre", { text: JSON.stringify(archive.request, null, 2) }),
-          el("button", { type: "button", text: "Edit archived scenarios", onclick: () => {
-            setScenarios(archive.request.scenarios); activateTab("main", "submit");
-          } }));
-      }
-    } catch (error) {
-      if (viewId === state.viewId) view.append(el("p", { className: "hint",
-        text: error.status === 404 ? "This job was not archived in the selected history location." : `Could not read archived input: ${error.message}` }));
-    }
-  }
 }
 
 function requireRetainedAccess(action) {
-  if (!state.config.authentication_enabled) { showMessage("Retained outputs require HydroShare authentication on this server.", true); return false; }
-  if (!authReady()) { showMessage(`Sign in with HydroShare to ${action}.`, true); return false; }
+  if (!authReady() || !state.workspace) { showMessage(`Sign in and open a workspace to ${action}.`, true); return false; }
   return true;
 }
 
@@ -1796,14 +1818,24 @@ function openLocation(bucket, prefix) {
   for (const item of document.querySelectorAll("#job-list li")) item.classList.remove("active");
   const view = newResultView(`s3://${bucket}/${prefix}`);
   addSummary(view, [["Output location", `s3://${bucket}/${prefix}`]]);
-  $("dl.summary", view).after(compareButtons(bucket, prefix));
+  if (workspaceRelativePrefix(bucket, prefix) !== null) $("dl.summary", view).after(compareButtons(bucket, prefix));
   $("[data-tabs=result] [data-tab=logs]", view).hidden = true;
   loadOutputDetails(view, bucket, prefix, null);
 }
 
 function openOutput(event) {
   event.preventDefault();
-  openLocation(event.target.elements.bucket.value.trim(), event.target.elements.prefix.value);
+  const prefix = event.target.elements.prefix.value.trim();
+  const error = workspaceRelativeError(prefix, "Workspace-relative prefix");
+  if (error) { showMessage(error, true); return; }
+  openLocation(state.workspace.bucket, joinKey(state.workspace.prefix, prefix));
+}
+
+function workspaceRelativePrefix(bucket, prefix) {
+  if (!state.workspace || bucket !== state.workspace.bucket) return null;
+  const root = joinKey(state.workspace.prefix);
+  const path = joinKey(prefix);
+  return path.startsWith(root + "/") ? path.slice(root.length + 1) : null;
 }
 
 function locationLink(bucket, prefix) {
@@ -1816,19 +1848,11 @@ function locationLink(bucket, prefix) {
 function compareButtons(bucket, prefix) {
   const use = (side) => () => {
     const form = $("#compare-results");
-    useCustomLocation(form.elements[`${side}_bucket`]);
-    form.elements[`${side}_bucket`].value = bucket;
-    form.elements[`${side}_prefix`].value = joinKey(prefix);
-    const base = joinKey(form.elements.base_prefix.value.trim());
-    const candidate = joinKey(form.elements.candidate_prefix.value.trim());
-    if (base && candidate && !form.elements.output_prefix.readOnly && !form.elements.output_prefix.value.trim()) {
-      const parent = base.split("/").slice(0, -1);
-      const name = (key) => key.split("/").pop();
-      form.elements.output_bucket.value = form.elements.base_bucket.value;
-      form.elements.output_prefix.value = joinKey(...parent, `compare-${name(base)}-vs-${name(candidate)}`);
-    }
+    const relative = workspaceRelativePrefix(bucket, prefix);
+    if (relative === null) { showMessage("Comparison inputs must be inside the active workspace.", true); return; }
+    form.elements[`${side}_prefix`].value = relative;
     form.scrollIntoView({ behavior: "smooth", block: "nearest" });
-    showMessage(`Set the comparison ${side} to s3://${bucket}/${joinKey(prefix)}.`);
+    showMessage(`Set the comparison ${side} to ${relative}.`);
   };
   return el("div", { className: "row" },
     el("button", { type: "button", text: "Compare as base", onclick: use("base") }),
@@ -1838,40 +1862,56 @@ function compareButtons(bucket, prefix) {
 async function submitCompare(event) {
   event.preventDefault();
   if (!requireRetainedAccess("compare results")) return;
+  if (!canWriteWorkspace()) { showMessage("Creating a comparison requires HydroShare write access.", true); return; }
   const form = event.target;
   const value = (name) => form.elements[name].value.trim();
+  const baseRelative = value("base_prefix");
+  const candidateRelative = value("candidate_prefix");
+  for (const prefix of [baseRelative, candidateRelative]) {
+    const error = workspaceRelativeError(prefix, "Workspace-relative prefix");
+    if (error) { showMessage(error, true); return; }
+  }
   const body = {
-    base_bucket: value("base_bucket"), base_prefix: joinKey(value("base_prefix")),
-    candidate_bucket: value("candidate_bucket"), candidate_prefix: joinKey(value("candidate_prefix")),
-    output_bucket: value("output_bucket"), output_prefix: joinKey(value("output_prefix")),
-    overwrite: form.elements.overwrite.checked,
+    base_bucket: state.workspace.bucket,
+    base_prefix: joinKey(state.workspace.prefix, baseRelative),
+    candidate_bucket: state.workspace.bucket,
+    candidate_prefix: joinKey(state.workspace.prefix, candidateRelative),
   };
   const button = $("button[type=submit]", form);
+  const workspaceVersion = state.workspaceVersion;
   button.disabled = true;
   try {
     const submitted = await api("/jobs/compare", { method: "POST", json: body });
+    if (workspaceVersion !== state.workspaceVersion) return;
     showMessage(`Comparison job ${submitted.job_id} submitted (${submitted.status}).`);
     await loadJobs();
     openJob(submitted.job_id);
   } catch (error) {
-    showMessage(`Comparison failed:\n${error.message}`, true);
+    if (!error.stale && workspaceVersion === state.workspaceVersion) showMessage(`Comparison failed:\n${error.message}`, true);
   } finally {
-    button.disabled = false;
+    if (workspaceVersion === state.workspaceVersion) button.disabled = false;
   }
 }
 
 // ---------- Startup ----------
 
 async function start() {
-  bindTabs("main");
   try {
     state.config = await api("/ui/config");
   } catch (error) {
     showMessage(`Could not load server configuration: ${error.message}`, true);
     return;
   }
+  if (!state.config.authentication_enabled) {
+    renderAuth();
+    return;
+  }
+  bindTabs("main");
   $("#sign-in").addEventListener("click", signIn);
   $("#sign-out").addEventListener("click", signOut);
+  $("#workspace-open").addEventListener("submit", openWorkspace);
+  $("#workspace-create").addEventListener("submit", createWorkspace);
+  $("#workspace-switch").addEventListener("click", switchWorkspace);
   $("#example-load").addEventListener("click", () => {
     const example = state.examples.find((item) => item.name === $("#example-select").value);
     if (example) setScenarios(example.scenarios);
@@ -1905,16 +1945,9 @@ async function start() {
   });
   $("#job-options").addEventListener("submit", submitJob);
   $("#jobs-refresh").addEventListener("click", loadJobs);
-  $("#jobs-clear").addEventListener("click", clearJobHistory);
-  $("#history-location-form").addEventListener("submit", useHistoryLocation);
-  $("#history-disable").addEventListener("click", disableHistoryLocation);
-  $("#history-export").addEventListener("click", exportRedisHistory);
   $("#open-output").addEventListener("submit", openOutput);
   $("#compare-results").addEventListener("submit", submitCompare);
-  $("#location-form").addEventListener("submit", saveLocation);
-  $("#location-cancel").addEventListener("click", resetLocationForm);
   setupJobOptions();
-  for (const container of document.querySelectorAll(".location-picker")) attachLocationPicker(container);
   renderScenarioEditor();
   // /ui?scenarios_url=<url> opens the submit tab with that input once signed in.
   const linked = new URLSearchParams(location.search).get("scenarios_url");
@@ -1924,8 +1957,8 @@ async function start() {
     $("#json-url").value = linked;
     activateTab("main", "submit");
     await examples;
-    if (authReady()) await loadScenariosFromUrl(linked);
-    else showMessage("Sign in with HydroShare, then press Load URL to load the linked scenarios.");
+    if (authReady() && state.workspace) await loadScenariosFromUrl(linked);
+    else showMessage("Sign in and open a workspace, then press Load URL to load the linked scenarios.");
   }
 }
 

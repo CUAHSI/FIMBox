@@ -113,31 +113,30 @@ class AuthTests(unittest.TestCase):
         self.addCleanup(context.stop)
         return client
 
-    def test_local_mode_exposes_config_and_needs_no_session(self):
+    def test_missing_oauth_exposes_config_but_disables_protected_work(self):
         with patch.object(auth.settings, "hydroshare_client_id", ""), patch.object(
             auth.settings, "hydroshare_client_secret", SecretStr(""),
         ):
             response = self.client.get("/auth/config")
             self.assertEqual(response.json(), {
-                "authentication_enabled": False, "require_hydroshare_output": False,
+                "authentication_enabled": False, "require_hydroshare_output": False, "workspace_required": True,
             })
             response = self.client.get("/auth/session")
-            self.assertEqual(response.status_code, 200)
-            self.assertEqual(response.json()["user_id"], auth.LOCAL_USER_ID)
-            self.assertEqual(self.client.post("/auth/logout").status_code, 409)
+            self.assertEqual(response.status_code, 503)
+            self.assertEqual(self.client.post("/auth/logout").status_code, 503)
         self.redis.get.assert_not_called()
 
     def test_configured_mode_advertises_authentication(self):
         self.assertEqual(
             self.client.get("/auth/config").json(), {
-                "authentication_enabled": True, "require_hydroshare_output": False,
+                "authentication_enabled": True, "require_hydroshare_output": False, "workspace_required": True,
             },
         )
 
     def test_config_advertises_required_hydroshare_output(self):
         with patch.object(auth.settings, "require_hydroshare_output", True):
             self.assertEqual(self.client.get("/auth/config").json(), {
-                "authentication_enabled": True, "require_hydroshare_output": True,
+                "authentication_enabled": True, "require_hydroshare_output": True, "workspace_required": True,
             })
 
     def __device_start(self):

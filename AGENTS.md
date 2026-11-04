@@ -42,7 +42,7 @@ making structural changes to the project, so future sessions can rely on it.
 ## Build / run / test commands
 
 - Google Cloud deployment: `terraform/` adapts fimbox-api's Cloud Run template.
-  It forces HydroShare auth/S3 on the API; Compose remains anonymous/local by default.
+  All deployments require HydroShare auth and persistent S3 workspaces.
   Run `terraform -chdir=terraform validate` after init; mock-provider tests use
   `terraform -chdir=terraform test` (Terraform 1.7+). Sensitive OAuth tfvars inputs
   optionally manage Secret Manager versions but enter state; never commit them.
@@ -50,12 +50,15 @@ making structural changes to the project, so future sessions can rely on it.
 
 - Build the base Docker image: `docker build --platform linux/amd64 -t cuahsi/handfim:latest docker/handfim`.
 - Run the service from the repository root: `docker compose up --build`.
-  No configuration means shared anonymous local mode; both OAuth client ID
-  and secret enable authentication, partial configuration fails startup.
+  Both OAuth client ID and secret are needed for protected work; anonymous
+  submission is removed, and partial configuration fails startup.
   Use `--env-file /dev/null` to avoid global interpolation for raw `.env` secrets.
-- Run the CLI: `fimbox submit --body test-data/single_reach.json`.
+- Create or open a workspace with `fimbox workspace create LOCATION --name NAME`
+  or `fimbox workspace open LOCATION`, then
+  `fimbox submit --body test-data/single_reach.json`.
+  Creation requires an empty subprefix under `<resource_id>/data/contents/`.
   Optional `--max-procs N` overrides worker concurrency (default 1);
-  optional `--output-bucket` enables S3, otherwise output stays on the mount.
+  the workspace assigns output destinations for all jobs.
 - Tests: `PYTHONPATH=src python -m unittest discover -s tests -v`.
   Tests cover API/worker/SDK/CLI/auth; scientific computation is mocked.
   Container-only regressions require the HAND-FIM image.

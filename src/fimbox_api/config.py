@@ -59,7 +59,7 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_authentication_configuration(self) -> "Settings":
         if bool(self.hydroshare_client_id) != bool(self.hydroshare_client_secret.get_secret_value()):
-            raise ValueError("Configure both HydroShare client ID and secret, or neither for local mode")
+            raise ValueError("Configure both HydroShare client ID and secret; anonymous work is not supported")
         if self.require_hydroshare_output and not self.authentication_enabled:
             raise ValueError("REQUIRE_HYDROSHARE_OUTPUT requires HydroShare client ID and secret")
         return self

@@ -15,14 +15,13 @@ Compose builds the worker on `linux/amd64` from `cuahsi/handfim:latest`. Build
 the base image locally only when changing the container implementation; see
 [the HAND-FIM guide](../handfim/README.md).
 
-## Local mode and authentication
+## Authentication
 
-With neither HydroShare OAuth credential configured, the API uses a shared
-local identity. Anyone who can reach the service can submit, inspect, or
-cancel local jobs, so keep the loopback-only default for trusted local use.
-Set both `HYDROSHARE_CLIENT_ID` and `HYDROSHARE_CLIENT_SECRET` to require
-authenticated sessions; setting only one is a startup error. The API reports
-its mode at `GET /auth/config`.
+Set both `HYDROSHARE_CLIENT_ID` and `HYDROSHARE_CLIENT_SECRET` for authenticated
+sessions; setting only one is a startup error. Anonymous/local job workflows
+are no longer supported. With neither credential, protected operations return
+503 rather than issuing a shared local identity. `GET /auth/config` reports
+configuration and `workspace_required: true`.
 
 To enable local HydroShare login, register a confidential OAuth client and put
 both credentials in the root `.env` file (never commit it). Register these
@@ -51,29 +50,24 @@ Submit a scenario JSON array through the CLI:
 pixi run fimbox submit --body test-data/single_reach.json
 ```
 
-Or use `POST /jobs/hand-fim` with an object containing `scenarios`, a required
-`output_prefix` (an empty string selects the bucket root), and optional
-`output_bucket` (defaults to `resource`), `overwrite`, `max_procs`, and
-`execution_mode` fields.
+First create or open a [workspace](#persistent-s3-workspaces).
+Use `POST /jobs/hand-fim` with an object containing `scenarios` and optional
+`max_procs` and `execution_mode` fields, plus the required
+`X-FIMBox-Workspace: s3://bucket/prefix` header.
 Requests require unique scenario IDs, eight-digit HUCs, and finite,
 nonnegative streamflows. The API validates requests before enqueueing.
 
-S3 submissions require authentication. With an explicitly null `output_bucket`
-and an empty `output_prefix`, the worker writes to the Compose output mount under
-`scenarios/<job_id>/`, then removes the files before job completion. Results
-contain metadata, not downloadable artifacts. To retain output, provide a
-HydroShare S3 bucket and a prefix; the bucket/resource must already
-exist and the submitting user must have write access. Uploaded files are
-reported in the job's file manifest. Existing keys cause failure unless
-`overwrite` is enabled.
+The server assigns `<workspace prefix>/jobs/<job_id>/outputs` in the workspace
+bucket. Omit independent output destinations; conflicting destinations are
+rejected. The resource must already exist and the submitter must have write
+access. Temporary worker files are cleaned up; durable outputs and metadata
+remain in S3. New jobs never reuse another job's output prefix.
 
 Both legacy and streaming jobs also save the validated input scenario array as
 `<prefix>/scenarios.json` (`application/json`), preserving scenario IDs, reaches,
 and streamflows in the same format accepted as input. It is included in the
-result's `files` list and retained alongside the S3 outputs after job metadata
-expires. The same overwrite policy applies to this key: use a separate prefix
-for independent runs, or enable `overwrite` to replace it. Local-only jobs still
-remove all files during cleanup.
+result's `files` list and retained alongside the S3 outputs. Each new job gets
+its own prefix, including reruns and comparisons.
 
 Both modes also retain `<prefix>/README.md` (`text/markdown`), listed in `files`.
 It describes the HAND-FIM outputs and input units, records the job ID, UTC
@@ -104,8 +98,8 @@ before selecting it. See [updated legacy mode](../handfim/README.md#updated-lega
 (including its ~3 cm minimum depth); it has the same requirements as
 `streaming-2024`. See [updated streaming mode](../handfim/README.md#updated-streaming-mode).
 `streaming-2024` runs the
-[streaming HAND-FIM mode](../handfim/README.md#streaming-mode): it requires
-`output_bucket`, permits only `max_procs` 1, and returns 409 unless the
+[streaming HAND-FIM mode](../handfim/README.md#streaming-mode): it uses the
+workspace output bucket, permits only `max_procs` 1, and returns 409 unless the
 deployment sets `STREAM_INPUT_BUCKET`. The worker passes the job's temporary
 S3 credentials to the computation through its environment, never its command
 line. Tiles go directly to `<prefix>/<ScenarioID>/<huc>/<row>_<col>.cog`; the
@@ -136,7 +130,7 @@ worker-container memory while the job ran. Concurrent jobs may contribute to
 that value, brief peaks can be missed, and it is `null` when cgroup metrics are
 unavailable.
 These timestamps expire with other Redis job metadata, while S3 job history
-retains them for new jobs. Redis exports include them only if they are still available.
+retains them for new jobs. Legacy Redis history export is no longer provided.
 Cancelled running jobs may lack `finished_at`.
 `DELETE /jobs/{job_id}` cancels a queued job on a best-effort basis; running
 jobs cannot be interrupted. Job metadata and ownership expire according to
@@ -146,8 +140,8 @@ jobs cannot be interrupted. Job metadata and ownership expire according to
 
 `POST /jobs/parity` checks the streaming implementation against a retained
 legacy run. The body has `legacy_bucket` and `legacy_prefix` (the legacy run's
-`output_prefix`), plus `output_bucket`, `output_prefix`, and optional
-`overwrite` for the new streaming outputs. The worker reads the legacy run's
+`output_prefix`), with the active workspace header. The legacy input must be
+inside that workspace; the server assigns a new output prefix. The worker reads the legacy run's
 `scenarios.json`, confirms every `<ScenarioID>.cog` exists, and reruns the
 same scenarios as a normal streaming job at the output prefix. It then
 compares each legacy COG with the union of that scenario's streaming tiles,
@@ -177,7 +171,7 @@ holds the full report. `<output_prefix>/parity/<ScenarioID>.diff.tif` is
 drawn after alignment on the legacy grid (padded by 2 pixels) and uses
 0 for equal cells, 1 for legacy-only flooding, and 2 for streaming-only
 flooding. Both are also listed in `files`. Existing parity outputs fail the
-job before computation unless `overwrite` is enabled.
+job before computation unless `overwrite` is enabled at the worker level.
 
 ### Comparing two results
 
@@ -185,8 +179,8 @@ job before computation unless `overwrite` is enabled.
 for example a legacy run against a streaming run, or two runs with different
 settings. The body has `base_bucket`/`base_prefix` and
 `candidate_bucket`/`candidate_prefix` (each an earlier job's output location),
-plus `output_bucket`, `output_prefix`, and optional `overwrite`. The output
-prefix must differ from both results, and the endpoint requires
+with the active workspace header. Both inputs must be inside that workspace;
+the server assigns a new output prefix. The endpoint requires
 authentication but not streaming configuration.
 
 The worker reads both `scenarios.json` files and compares the ScenarioIDs they
@@ -201,20 +195,17 @@ with red for base-only and orange for candidate-only flooding.
 
 ## Web page
 
-`GET /ui` serves a browser page with four tabs:
+`GET /ui` serves a browser page. Sign in, then create a workspace at an empty
+subprefix or open an existing workspace before using its three tabs.
+Successfully created/opened workspaces are remembered by name and location for
+your account in this browser. **Switch workspace** shows these shortcuts alongside
+the create/open forms. Every **Open** revalidates current access with the server;
+**Forget** removes only the browser shortcut, never shared S3 data. Shortcuts
+are not synchronized across browsers, and old saved S3 locations are not imported.
 
 - **Input dataset** browses and downloads the prepared streaming hydrofabric at
   `STREAM_INPUT_BUCKET`/`STREAM_INPUT_PREFIX`. Without that setting, the tab
   explains that legacy jobs download NOAA HAND data per HUC instead.
-- **S3 locations** saves named bucket/prefix locations for your account in this
-  browser's `localStorage`. They are not stored on the server and do not follow
-  you to other browsers. Job options, comparison base/candidate/output, open
-  output, and persistent history then have a **Saved location** selector. A
-  relative subprefix is appended to the location's prefix (for example,
-  `run-1` becomes `s3://resource/<id>/data/contents/run-1`). Submission and
-  comparison outputs require a subprefix. Prefixes and subprefixes reject `.`
-  and `..` segments, and subprefixes cannot start with `/`. Choose **Custom**
-  to type a bucket and prefix directly.
 - **Submit job** edits scenarios as a table or JSON. You can load the examples
   from the `test-data/*.json` files, upload a local JSON file, or load one
   from a URL. URLs can be public `https://` links or
@@ -253,8 +244,8 @@ with red for base-only and orange for candidate-only flooding.
   scenario per timestep, with ScenarioIDs like `20180915T1800Z`. Repeating
   this for other reaches over the same times adds them to the same timestep
   scenarios.
-- **Results** lists your jobs, streams their logs, and lets you cancel queued
-  jobs. For retained S3 output it shows several views:
+- **Results** lists the workspace's jobs and their submitters, streams their logs,
+  and lets submitters cancel their own queued jobs. For retained S3 output it shows several views:
   - the generated `README.md`, whose relative links open files or map layers
   - the `scenarios.json` parameters, with an "Edit and resubmit" button
   - a browser for the output files
@@ -270,70 +261,80 @@ with red for base-only and orange for candidate-only flooding.
   job's view links to both results and shows its input parameters from the
   base result.
 
-  Any retained output prefix can also be opened directly, even after the
-  job's 24-hour metadata has expired.
+  Retained output prefixes inside the active workspace can also be opened
+  directly, even after Redis metadata has expired.
 
-### Persistent S3 job history
+### Persistent S3 workspaces
 
-In the Results tab, set **Persistent job history** to an existing writable
-`s3://bucket/prefix`, for example
-`s3://resource/<resource id>/data/contents/fimbox-history`. The browser remembers
-this non-secret location per signed-in user. On a different browser/device,
-select the same location to reopen its history. CLI preferences are separate;
-see [`fimbox history`](../../sdk/README.md#persistent-job-history).
+Create with `POST /workspaces` and `{"name": "Study A", "location":
+"s3://resource/<resource_id>/data/contents/workspaces/study-a"}`. Choose an
+empty subprefix beneath the resource contents prefix; existing files or folders
+cause 409. Conditional descriptor writes prevent concurrent creation from
+replacing a workspace. Bucket creation and permission grants remain in HydroShare.
+The emptiness check and descriptor write are not a prefix-wide transaction;
+avoid unrelated writes to the chosen subprefix while creating it.
 
-Future HAND-FIM, parity, and comparison submissions write a queued record before
-enqueueing, then running and terminal snapshots. Records include the submission
-parameters, job type/ID, UTC timestamps, output result or error, and terminal
-worker logs. They contain no OAuth tokens or S3 credentials. The API namespaces
-objects under `<prefix>/users/<SHA256(user_id)>/jobs/<job_id>.json` and `.log`.
-Jobs use separate objects rather than a shared history index, avoiding concurrent
-submission overwrites. History reads use the current authenticated user's S3
-permissions and verify the record's user and job identifiers.
+Open with `POST /workspaces/open` and `{"location": "s3://bucket/prefix"}`.
+Opening validates the versioned descriptor and listing access without writing.
+Missing or unsupported workspaces fail explicitly; opening does not initialize
+a prefix. The UI offers both actions before its main tabs, remembers every
+successfully created/opened workspace per user/browser (most recent first),
+and reopens the last active workspace after checking access. A previous single
+saved workspace is added to the list only after successful revalidation.
+CLI preferences are separate.
 
-SDK/API callers select the location with the optional
-`X-FIMBox-History-Location: s3://bucket/prefix` header on submission and job
-read requests. `GET /jobs` merges live and archived records; status, logs, and
-job raster routes support archived successful jobs after Redis expiry.
-`GET /jobs/{job_id}/archive` returns the stored inputs, timestamps, and outcome.
-Without the header, existing Redis-only behavior is unchanged. Redis remains
-necessary for the live Celery queue, authentication, and temporary credentials;
-it is not the durable history store.
+Send `X-FIMBox-Workspace: s3://bucket/prefix` on every job and `/outputs` request,
+or configure this header on the generated SDK client. Every request revalidates
+the descriptor using the requesting user's storage credentials. No server-global
+workspace or FIMBox membership list exists. A shared location alone grants no
+access. Read access permits inspection; write access is needed for new jobs,
+including comparisons. Actual storage failures are explicit (403 for denied
+permissions); descriptor readability does not imply write/delete access.
 
-Enabling history does not automatically backfill previous jobs. Use **Export
-Redis history** in Results, `fimbox history export`, or
-`POST /jobs/history/export` with the history header to copy the signed-in user's
-completed Redis jobs and available logs. Queued/running jobs and existing archives
-are skipped; Redis is unchanged. The response counts `exported`,
-`skipped_existing`, and `skipped_active`. Original submission parameters,
-job types, and submission timestamps are not retained in Redis: exported records
-have `source: "redis-export"`, an empty request, unknown job type, null
-`submitted_at`, and the export time in `updated_at`. Retained output may still
-contain `scenarios.json`. Expired jobs cannot be recovered. Storage failures are
-reported; partial exports remain and retries skip completed records.
+Layout:
 
-To clear history, use **Clear history** in Results, `fimbox history clear`, or
-`POST /jobs/history/clear`. It removes the signed-in user's finished
-(`success`, `failure`, `revoked`) jobs from the live Redis list, including their
-results, logs, and timing. If a history location header is sent, it also deletes
-those jobs' archived records and logs from that S3 location, along with stale
-archives no longer tracked in Redis. Queued and running jobs remain, and output
-files are never deleted. The response counts `cleared` and `skipped_active`. S3
-deletions happen before Redis cleanup, so a storage failure leaves Redis intact
-for a retry. A job still running after its Redis entry expired rewrites its
-archive record when it finishes.
+```text
+<prefix>/workspace.json
+<prefix>/jobs/<job_id>/record.json
+<prefix>/jobs/<job_id>/worker.log
+<prefix>/jobs/<job_id>/outputs/...
+```
 
-Outputs still use their own output bucket/prefix, and local output files remain
-temporary. FIMBox applies no TTL to the S3 archive, but the bucket's lifecycle
-policy and user deletions still apply. S3 read/write failures are reported, not
-silently ignored: archive creation failure prevents enqueueing, and terminal
-archive failures fail the task. A worker lost abruptly can leave the last queued
-or running snapshot; the archive is not a replacement for the live queue.
+HAND-FIM, parity, and comparison jobs persist queued metadata before enqueueing,
+then running/terminal snapshots and terminal logs. Records include submitter,
+workspace identity, original inputs, job type, timestamps, and result/error.
+No provider tokens or storage credentials are retained there. Independent job
+objects avoid shared-index races. Switching workspace never redirects an
+already-submitted job's records or outputs.
 
-Sign-in uses the same HydroShare device flow as the CLI, through a popup. The
-FIMBox session token is kept in `sessionStorage`. In anonymous local mode, the
-page can only submit and track jobs, because S3 browsing and maps need a
-HydroShare session.
+`GET /jobs` lists only the selected workspace. Status, logs, archived inputs,
+and raster routes support collaborators and retained jobs after Redis expiry.
+Live Redis reads require a server-trusted workspace/job association; cancellation
+also requires the server-trusted submitter identity, not editable archive
+attribution. Only queued jobs can be cancelled, best-effort; running computation
+cannot be interrupted by the solo worker.
+
+FIMBox applies no S3 history TTL. Lifecycle policies, external deletions, and
+permission changes still apply. Missing output files produce an explicit viewing
+error without removing successful history. A lost worker may leave a last-known
+queued/running snapshot. `execution_state_known: false` distinguishes it when
+live state cannot be confirmed; Redis PENDING is not proof of a new queued job.
+Redis remains necessary for execution, sessions, and temporary credentials.
+Credentials already issued to a worker can outlive logout or permission changes
+until expiry; immediate revocation is not promised.
+
+Legacy per-user archives remain untouched and are not automatically published or
+imported. The old history header, export, and Clear history workflow are removed.
+Forgetting a saved workspace location only affects client preferences, never
+shared records or outputs. No shared deletion workflow is provided.
+
+Drain existing queues before deploying API and workers together: queued legacy
+tasks carry version-1 per-user archive metadata and are not workspace jobs.
+Regenerate the SDK and update clients; old clients using independent output
+destinations or the old history header are not compatible with workspace jobs.
+
+Sign-in uses the HydroShare device flow through a popup. The FIMBox session token
+is kept in `sessionStorage`.
 
 The page uses helper routes under `/ui/*` that are excluded from OpenAPI and
 the SDK:

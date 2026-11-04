@@ -5,6 +5,7 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -69,11 +70,11 @@ class StreamingOptionTests(unittest.TestCase):
                 ParityJobRequest(**DESTINATION, legacy_bucket="source", legacy_prefix="run", execution_mode=mode)
 
     def test_streaming_requires_s3_and_one_process(self):
-        HandFimJobOptions(**DESTINATION, execution_mode="streaming-2024", max_procs=1)
-        with self.assertRaisesRegex(ValidationError, "requires output_bucket"):
-            HandFimJobOptions(output_bucket=None, output_prefix="", execution_mode="streaming-2024")
+        options = HandFimJobOptions(execution_mode="streaming-2024", max_procs=1)
+        self.assertIsNone(options.output_bucket)
+        self.assertEqual(options.output_prefix, "")
         with self.assertRaisesRegex(ValidationError, "one process"):
-            HandFimJobOptions(**DESTINATION, execution_mode="streaming-2024", max_procs=2)
+            HandFimJobOptions(execution_mode="streaming-2024", max_procs=2)
         self.assertEqual(HandFimJobOptions(**DESTINATION).execution_mode, "fimserv-2024")
 
     def test_updatedlegacy_accepts_local_output_and_multiple_processes(self):
@@ -84,12 +85,10 @@ class StreamingOptionTests(unittest.TestCase):
         self.assertFalse(options.streamed)
 
     def test_updatedstreaming_has_streaming_constraints(self):
-        options = HandFimJobOptions(**DESTINATION, execution_mode="streaming-2026")
+        options = HandFimJobOptions(execution_mode="streaming-2026")
         self.assertTrue(options.streamed)
-        with self.assertRaisesRegex(ValidationError, "streaming-2026 execution_mode requires output_bucket"):
-            HandFimJobOptions(output_bucket=None, output_prefix="", execution_mode="streaming-2026")
         with self.assertRaisesRegex(ValidationError, "one process"):
-            HandFimJobOptions(**DESTINATION, execution_mode="streaming-2026", max_procs=2)
+            HandFimJobOptions(execution_mode="streaming-2026", max_procs=2)
 
 
 class _Lazy(dict):
@@ -242,7 +241,7 @@ class StreamingWorkerTests(unittest.TestCase):
                     f"`{self.job_id}`", f"Execution mode: `{mode}`", "Worker run started (UTC)",
                     "Scenario count: `2`", "Reach entries: `2`",
                     f"Effective maximum processes: `{1 if mode == 'streaming-2024' else 3}`",
-                    f"--execution-mode {mode}", "NEW_OUTPUT_PREFIX", "output_map(api_client, paths)",
+                    f"--execution-mode {mode}", "active workspace assigns", "output_map(api_client, paths)",
                 ):
                     self.assertIn(text, readme)
                 for sid in ("s1", "s2"):
@@ -379,10 +378,15 @@ class StreamingApiTests(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(main.app)
         self.session = auth.UserSession(user_id="alice", access_token="token", scope="read", expires_at=time.time() + 60)
+        self.workspace = main.workspaces.Workspace(
+            bucket="fim-output", prefix="data/output", workspace_id=uuid4(), name="Test workspace",
+            created_by="alice", created_at=datetime.now(timezone.utc),
+        )
         times = patch.object(main, "read_job_times", return_value={})
         times.start()
         self.addCleanup(times.stop)
         main.app.dependency_overrides[auth.get_authenticated_session] = lambda: self.session
+        main.app.dependency_overrides[main.workspaces.selected_workspace] = lambda: self.workspace
         self.addCleanup(main.app.dependency_overrides.clear)
         for name, value in (
             ("hydroshare_client_id", "test-client"),
@@ -396,6 +400,14 @@ class StreamingApiTests(unittest.TestCase):
             patcher = patch.object(main, name, return_value=True)
             setattr(self, name, patcher.start())
             self.addCleanup(patcher.stop)
+        for target, name, value in (
+            (main.job_history, "prepare", {}),
+            (main.job_history, "enqueue_failed", None),
+            (main.workspaces, "bind_job", None),
+        ):
+            patcher = patch.object(target, name, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.manifest = ScenarioManifest(
             ScenarioID="s1", key="data/output/s1/manifest.json", tile_count=2,
             bounds=(-78, 35, -77, 36), resolution=10.0, tile_size=2048,
@@ -407,19 +419,26 @@ class StreamingApiTests(unittest.TestCase):
 
     def submit(self, **options):
         with patch.object(tasks.hand_fim, "apply_async") as enqueue:
-            response = self.client.post("/jobs/hand-fim", json={"scenarios": PAYLOAD, **DESTINATION, **options})
+            response = self.client.post("/jobs/hand-fim", json={"scenarios": PAYLOAD, **options})
         return response, enqueue
 
     def test_streaming_submission_is_queued_with_mode_and_optional_queue(self):
         response, enqueue = self.submit(execution_mode="streaming-2024")
         self.assertEqual(response.status_code, 202)
-        self.assertEqual(enqueue.call_args.kwargs["args"][-1], "streaming-2024")
+        job_id = response.json()["job_id"]
+        self.assertEqual(enqueue.call_args.kwargs["args"], [
+            job_id, PAYLOAD, "fim-output", f"data/output/jobs/{job_id}/outputs", None, False,
+            "streaming-2024",
+        ])
         self.assertNotIn("queue", enqueue.call_args.kwargs)
         with patch.object(main.settings, "stream_queue", "streaming"):
             _response, enqueue = self.submit(execution_mode="streaming-2024")
         self.assertEqual(enqueue.call_args.kwargs["queue"], "streaming")
-        _response, enqueue = self.submit()
+        response, enqueue = self.submit(overwrite=True)
         self.assertEqual(len(enqueue.call_args.kwargs["args"]), 6)
+        job_id = response.json()["job_id"]
+        self.assertEqual(enqueue.call_args.kwargs["args"][3], f"data/output/jobs/{job_id}/outputs")
+        self.assertTrue(enqueue.call_args.kwargs["args"][5])
 
     def test_updatedstreaming_submission_uses_stream_queue_and_configuration(self):
         with patch.object(main.settings, "stream_queue", "streaming"):
@@ -439,32 +458,85 @@ class StreamingApiTests(unittest.TestCase):
         enqueue.assert_not_called()
         response, _ = self.submit(execution_mode="streaming-2024", max_procs=4)
         self.assertEqual(response.status_code, 422)
+        response, enqueue = self.submit(
+            output_bucket="elsewhere", output_prefix="other/jobs/output",
+        )
+        self.assertEqual(response.status_code, 422)
+        enqueue.assert_not_called()
 
-    def test_scenario_info_and_tile_use_owned_manifest(self):
-        with patch.object(main.celery_app, "AsyncResult", return_value=Mock(state="SUCCESS", result=self.result)), \
-                patch.object(main, "session_s3_client") as client, \
-                patch.object(main, "load_scenario_tiles", return_value=[("k", (0, 0, 1, 1))]) as load_tiles, \
+    def archived_job(self, job_id, *_args, status="success"):
+        now = datetime.now(timezone.utc)
+        return main.job_history.ArchivedJob(
+            job_id=str(job_id), status=status, user_id="alice", job_type="hand-fim",
+            workspace_id=self.workspace.workspace_id, submitted_at=now, updated_at=now,
+            request={}, result=self.result if status == "success" else None,
+        )
+
+    def test_scenario_info_and_tile_use_workspace_archive_for_collaborators(self):
+        self.user_has_job.return_value = False
+        job_id = uuid4()
+        with patch.object(main, "get_job_archive", side_effect=self.archived_job), \
+                patch.object(main, "output_s3_client") as client, \
+                patch.object(
+                    main, "load_scenario_tiles",
+                    return_value=[("data/output/s1/03020201/0_0.cog", (0, 0, 1, 1))],
+                ) as load_tiles, \
                 patch.object(main, "scenario_tile", return_value=b"png") as render:
-            info = self.client.get(f"/jobs/{uuid4()}/scenarios/0/info")
-            tile = self.client.get(f"/jobs/{uuid4()}/scenarios/0/tiles/9/140/200.png")
-            missing_index = self.client.get(f"/jobs/{uuid4()}/scenarios/1/info")
+            status = self.client.get(f"/jobs/{job_id}")
+            info = self.client.get(f"/jobs/{job_id}/scenarios/0/info")
+            tile = self.client.get(f"/jobs/{job_id}/scenarios/0/tiles/9/140/200.png")
+            missing_index = self.client.get(f"/jobs/{job_id}/scenarios/1/info")
+        self.assertEqual(status.status_code, 200)
+        self.assertEqual(status.json()["user_id"], "alice")
+        self.assertEqual(status.json()["job_type"], "hand-fim")
+        self.assertIsNotNone(status.json()["submitted_at"])
+        self.assertTrue(status.json()["execution_state_known"])
         self.assertEqual(info.status_code, 200)
         self.assertEqual(info.json()["bounds"], [-78, 35, -77, 36])
         self.assertEqual((tile.status_code, tile.content), (200, b"png"))
         self.assertEqual(load_tiles.call_args.args[1:], ("fim-output", self.manifest))
-        self.assertEqual(render.call_args.args[:5], ([("k", (0, 0, 1, 1))], 9, 140, 200, 16))
+        self.assertEqual(
+            render.call_args.args[:5],
+            ([("data/output/s1/03020201/0_0.cog", (0, 0, 1, 1))], 9, 140, 200, 16),
+        )
         self.assertEqual(missing_index.status_code, 404)
         client.assert_called_once()
 
-    def test_foreign_job_and_too_many_tiles_are_rejected(self):
-        self.user_has_job.return_value = False
-        self.assertEqual(self.client.get(f"/jobs/{uuid4()}/scenarios/0/info").status_code, 403)
-        self.user_has_job.return_value = True
-        with patch.object(main.celery_app, "AsyncResult", return_value=Mock(state="SUCCESS", result=self.result)), \
-                patch.object(main, "session_s3_client"), patch.object(main, "load_scenario_tiles", return_value=[]), \
+    def test_missing_workspace_job_is_not_found(self):
+        with patch.object(main.job_history, "read", return_value=None):
+            response = self.client.get(f"/jobs/{uuid4()}")
+        self.assertEqual(response.status_code, 404)
+
+    def test_tile_keys_must_stay_inside_workspace_and_tile_count_is_limited(self):
+        job_id = uuid4()
+        with patch.object(main, "get_job_archive", side_effect=self.archived_job), \
+                patch.object(main, "output_s3_client"), \
+                patch.object(main, "load_scenario_tiles", return_value=[("outside/private.cog", (0, 0, 1, 1))]):
+            response = self.client.get(f"/jobs/{job_id}/scenarios/0/tiles/2/1/1.png")
+        self.assertEqual(response.status_code, 403)
+        with patch.object(main, "get_job_archive", side_effect=self.archived_job), \
+                patch.object(main, "output_s3_client"), \
+                patch.object(main, "load_scenario_tiles", return_value=[]), \
                 patch.object(main, "scenario_tile", side_effect=rasters.TooManyTilesError("Zoom in")):
-            response = self.client.get(f"/jobs/{uuid4()}/scenarios/0/tiles/2/1/1.png")
+            response = self.client.get(f"/jobs/{job_id}/scenarios/0/tiles/2/1/1.png")
         self.assertEqual(response.status_code, 400)
+
+    def test_only_submitter_can_cancel_a_queued_workspace_job(self):
+        job_id = uuid4()
+        with patch.object(main.workspaces, "job_is_bound", return_value=True), \
+                patch.object(
+                    main, "get_job_archive",
+                    side_effect=lambda job_id, *_args: self.archived_job(job_id, status="queued"),
+                ), \
+                patch.object(main.celery_app, "AsyncResult", return_value=Mock(state="PENDING")), \
+                patch.object(main.celery_app.control, "revoke"), \
+                patch.object(main.job_history, "mark_cancelled"):
+            self.user_has_job.return_value = False
+            denied = self.client.delete(f"/jobs/{job_id}")
+            self.user_has_job.return_value = True
+            allowed = self.client.delete(f"/jobs/{job_id}")
+        self.assertEqual(denied.status_code, 403)
+        self.assertEqual(allowed.status_code, 204)
 
 
 class ScenarioCompositingTests(unittest.TestCase):

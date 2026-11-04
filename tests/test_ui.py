@@ -86,9 +86,12 @@ class UiTests(unittest.TestCase):
         self.assertNotIn('name="base_prefix"', page)
         self.assertNotIn('name="candidate_prefix"', page)
         self.assertNotIn("Your jobs", page)
-        self.assertIn('href="/ui/static/app.css?v=cam-1525-workspace-header"', page)
-        self.assertIn('src="/ui/static/app.js?v=cam-1525-workspace-header"', page)
-        css = self.client.get("/ui/static/app.css?v=cam-1525-workspace-header").text
+        self.assertIn('href="/ui/static/app.css?v=cam-1529-source-selector"', page)
+        self.assertIn('src="/ui/static/app.js?v=cam-1529-source-selector"', page)
+        self.assertIn('id="flow-selection"', page)
+        self.assertIn('id="flow-selection-content"', page)
+        self.assertIn("Choose a streamflow source and period", page)
+        css = self.client.get("/ui/static/app.css?v=cam-1529-source-selector").text
         self.assertIn("[hidden] { display: none !important; }", css)
         self.assertIn("s3://resource/&lt;resource_id&gt;/data/contents/&lt;empty_subprefix&gt;", page)
         self.assertIn("no existing files or folders", page)
@@ -100,6 +103,10 @@ class UiTests(unittest.TestCase):
         self.assertNotIn('name="output_prefix"', page)
         self.assertNotIn('name="overwrite"', page)
         script = self.client.get("/ui/static/app.js").text
+        self.assertIn('text: "Select streamflow"', script)
+        self.assertIn("openFlowSelection(scenario, reach, reachIndex)", script)
+        self.assertIn('text: "Pick on map"', script)
+        self.assertIn("function closeFlowSelection", script)
         self.assertNotIn("fimbox-locations:", script)
         self.assertIn("fimbox-workspace:v1:", script)
         self.assertIn("fimbox-workspaces:v1:", script)
@@ -134,10 +141,14 @@ class UiTests(unittest.TestCase):
         self.assertFalse([path for path in main.app.openapi()["paths"] if path.startswith("/ui")])
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for browser-state unit tests")
-    def test_remembered_workspace_browser_state(self):
-        script = Path(__file__).with_name("ui_workspaces.test.cjs")
+    def test_browser_state_regressions(self):
+        scripts = [
+            Path(__file__).with_name("ui_workspaces.test.cjs"),
+            Path(__file__).with_name("ui_streamflow.test.cjs"),
+        ]
         completed = subprocess.run(
-            [shutil.which("node"), "--test", str(script)], capture_output=True, text=True, timeout=30,
+            [shutil.which("node"), "--test", *(str(script) for script in scripts)],
+            capture_output=True, text=True, timeout=30,
         )
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
 

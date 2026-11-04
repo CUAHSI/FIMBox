@@ -249,16 +249,23 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
     handles:
     - device-flow popup sign-in
     - the S3 browser
-    - the scenario table/JSON editor, with a per-reach map picker. The picker
+    - the scenario table/JSON editor, with per-row NOAA/NWM flow selection
+      available for manually entered ReachID/HUC8 without opening the map, and
+      an independent per-reach map picker. The picker
       shows EPA NHDPlus ArcGIS `export` tiles and one WBDLine export image per
       view (`hudigit <= 8`, with retries). The WBD HUC8 polygon layer is
       scale-limited, and tile bursts get intermittent 503s. a click calls
       NLDI `comid/position` and the WBD HUC8 query from the browser.
       `main.py`'s CSP allowlists these origins. A picked or current reach
-      gets a streamflow panel: NOAA NWPS analysis/forecast series fetched from
-      the browser (ft³/s → m³/s, one `series` per request; forecasts may be
-      empty) and a retrospective date-range lookup; "Use" buttons set the
-      row's Streamflow (plus HUC/ReachID). Each series has a "Make
+      can show a streamflow panel: NOAA NWPS analysis/forecast series fetched
+      from the browser (ft³/s → m³/s, one `series` per request; forecasts may
+      be empty) and a retrospective date-range lookup; "Use" buttons set the
+      row's Streamflow (plus HUC/ReachID). Direct flow selection uses a
+      separate panel and preserves the map view/highlight. Both panels use a
+      source selector: only the selected NWPS product or retrospective controls
+      are displayed/fetched. Metadata describes provenance, reach-level spatial
+      resolution, time window, and actual returned UTC coverage/sample spacing;
+      source changes invalidate in-flight responses. Each series has a "Make
       time-step scenarios" form (UTC range, 1–24 h step, ≤ 240): it replaces
       the row with per-timestep scenarios (`YYYYMMDDTHHMMZ` IDs), merging by
       ScenarioID so several reaches share timesteps.

@@ -229,6 +229,10 @@ are not synchronized across browsers, and old saved S3 locations are not importe
   ReachID (the NHDPlus COMID, which NWM uses as its reach ID). The lookups
   call the public USGS NLDI and WBD services directly from the browser. A
   picked reach must still exist in the HAND hydrofabric.
+  Map interaction is optional: enter a ReachID and HUC8 directly in a row and
+  choose **Select streamflow** to open the same flow and period controls without
+  opening the map. This selection panel is separate from the map, so using it
+  does not alter the map view or its highlighted reach.
 
   TIFF (`.tif`/`.tiff`) and COG files in the input browser have a **View**
   button showing a first-band image preview (at most 1024 pixels per side).
@@ -239,16 +243,26 @@ are not synchronized across browsers, and old saved S3 locations are not importe
   as browsing, and download remains available. COG overviews make these previews
   faster; TIFFs without overviews may require more storage reads.
 
-  Below the map, the picked (or current) reach's streamflows can set the row's
-  Streamflow in m³/s:
+  For a manually entered or map-picked reach, the flow-selection panel can set
+  the row's Streamflow in m³/s. Choose a **Streamflow source**; only that source's
+  description and controls are shown, and only the selected NWPS series is
+  fetched. Source documentation links explain the model and its origin.
+  The panel distinguishes modeled flows from gauge observations and
+  reach-based streamflow from gridded flood depth:
   - recent analysis and short/medium/long-range forecasts from NOAA NWPS
     (`api.water.noaa.gov`, converted from ft³/s), with "Use latest"/"Use peak".
     NWPS forecast series are sometimes empty, which the page reports.
+    Forecast products are selected individually. Typical CONUS horizons are
+    18 hours (short range), 10 days (medium-range blend), and 30 days (long range).
+    Actual returned UTC coverage, sample count, and time spacing are shown
+    after loading; these are not the forecast's issuance frequency.
   - historic flows for a date range of up to 92 days from the NWM v3.0
     retrospective (1979-02-01 to 2023-02-01), with "Use max"/"Use mean". The
     API reads the public `noaa-nwm-retrospective-3-0-pds` Zarr store through
     `GET /ui/streamflow/retrospective`; each 28 days is one ~10 MB chunk, so a
     lookup can take 10–30 seconds.
+    The historical simulation has hourly reach-level flows, is driven by AORC
+    weather data, and does not assimilate streamflow observations.
 
   Each series also has **Make time-step scenarios**: choose a UTC time range
   and step (1–24 h, at most 240 timesteps). The row is replaced by one

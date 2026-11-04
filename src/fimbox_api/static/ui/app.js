@@ -766,7 +766,10 @@ function renderScenarioEditor() {
         oninput: (event) => { reach.ReachID = event.target.value.trim(); } })),
       el("td", {}, el("input", { type: "number", className: "num", min: 0, step: "any", value: reach.Streamflow, required: true,
         oninput: (event) => { reach.Streamflow = event.target.value === "" ? "" : Number(event.target.value); } })),
-      el("td", {}, el("button", { type: "button", className: "small", text: "Pick on map",
+      el("td", {}, el("button", { type: "button", className: "small", text: "Select streamflow",
+        onclick: () => openFlowSelection(scenario, reach, reachIndex) }),
+      " ",
+      el("button", { type: "button", className: "small", text: "Pick on map",
         onclick: () => openReachPicker(scenario, reach, reachIndex) }),
       " ",
       el("button", { type: "button", className: "small", text: "Remove", onclick: () => {
@@ -798,6 +801,7 @@ function renderScenarioEditor() {
 function setScenarios(scenarios) {
   if (!Array.isArray(scenarios)) throw new Error("Scenario JSON must be an array");
   closeReachPicker();
+  closeFlowSelection();
   state.scenarios = scenarios.map((scenario) => ({
     ScenarioID: String(scenario.ScenarioID ?? ""),
     Reaches: (scenario.Reaches || []).map((reach) => ({
@@ -813,6 +817,7 @@ const NLDI_COMID_URL = "https://api.water.usgs.gov/nldi/linked-data/comid";
 const WBD_URL = "https://hydro.nationalmap.gov/arcgis/rest/services/wbd/MapServer";
 const NHDPLUS_URL = "https://watersgeo.epa.gov/arcgis/rest/services/NHDPlus/NHDPlus/MapServer";
 const picker = { map: null, target: null, highlight: null, lookup: 0 };
+const flowSelection = { lookup: 0 };
 
 function osmLayer() {
   return L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
@@ -940,18 +945,37 @@ function ensurePickerMap() {
   return map;
 }
 
-function targetExists() {
-  return state.scenarios.some((scenario) => scenario.Reaches.includes(picker.target));
+function targetExists(target) {
+  return state.scenarios.some((scenario) => scenario.Reaches.includes(target));
 }
 
 // ---------- Reach streamflow lookups ----------
 
 const NWPS_REACHES_URL = "https://api.water.noaa.gov/nwps/v1/reaches";
 const NWPS_SERIES = [
-  { key: "analysisAssimilation", param: null, label: "Recent analysis" },
-  { key: "shortRange", param: "short_range", label: "Short-range forecast" },
-  { key: "mediumRangeBlend", param: "medium_range_blend", label: "Medium-range forecast" },
-  { key: "longRange", param: "long_range", label: "Long-range forecast" },
+  {
+    key: "analysisAssimilation", param: null, label: "Recent analysis",
+    description: "NOAA National Water Model analysis and assimilation, delivered by the National Water Prediction Service (NWPS). "
+      + "Modeled streamflow informed by observations; not a direct stream-gauge measurement.",
+    window: "Recent conditions in the rolling NWPS record. The exact window and time resolution are shown after loading.",
+  },
+  {
+    key: "shortRange", param: "short_range", label: "Short-range forecast",
+    description: "NOAA National Water Model short-range deterministic forecast, delivered by NWPS.",
+    window: "Up to 18 hours ahead for CONUS. The available window depends on the latest published run.",
+  },
+  {
+    key: "mediumRangeBlend", param: "medium_range_blend", label: "Medium-range blend forecast",
+    description: "NOAA National Water Model medium-range deterministic blend forecast, delivered by NWPS. "
+      + "Uses National Blend of Models precipitation and Global Forecast System forcing.",
+    window: "Up to 10 days ahead for CONUS. The available window depends on the latest published run.",
+  },
+  {
+    key: "longRange", param: "long_range", label: "Long-range forecast",
+    description: "NOAA National Water Model long-range ensemble forecast, delivered by NWPS. "
+      + "FIMBox uses the published mean when supplied, rather than choosing an individual ensemble member.",
+    window: "Up to 30 days ahead for CONUS. The available window depends on the latest published run.",
+  },
 ];
 const FT3_TO_M3 = 0.0283168466;
 const RETROSPECTIVE_RANGE = { min: "1979-02-01", max: "2023-02-01" };
@@ -970,19 +994,20 @@ function nwpsPoints(section) {
     .map((point) => ({ time: point.validTime, flow: point.flow * factor }));
 }
 
-function applyStreamflow(flow, reach) {
-  if (!targetExists()) { showMessage("That reach row no longer exists.", true); return; }
-  if (reach.huc) picker.target.HUC = reach.huc;
-  picker.target.ReachID = reach.reachId;
-  picker.target.Streamflow = roundFlow(flow);
+function applyStreamflow(flow, reach, target) {
+  if (!targetExists(target)) { showMessage("That reach row no longer exists.", true); return; }
+  if (reach.huc) target.HUC = reach.huc;
+  target.ReachID = reach.reachId;
+  target.Streamflow = roundFlow(flow);
   renderScenarioEditor();
   showMessage(`Set reach ${reach.reachId} streamflow to ${roundFlow(flow)} m³/s.`);
 }
 
-function flowButton(label, point, reach) {
+function flowButton(label, point, reach, target) {
   return el("button", {
     type: "button", className: "small", text: `${label}: ${roundFlow(point.flow)} m³/s`,
-    title: point.time ? formatTime(point.time) : undefined, onclick: () => applyStreamflow(point.flow, reach),
+    title: point.time ? formatTime(point.time) : undefined,
+    onclick: () => applyStreamflow(point.flow, reach, target),
   });
 }
 
@@ -997,14 +1022,14 @@ function parseUtcInput(value) { return value ? Date.parse(`${value}:00Z`) : NaN;
 
 function timestepId(time) { return `${new Date(time).toISOString().slice(0, 16).replace(/[-:]/g, "")}Z`; }
 
-// Replaces the picker's row with one scenario per timestep (ScenarioID like 20180915T1800Z),
+// Replaces a reach row with one scenario per timestep (ScenarioID like 20180915T1800Z),
 // merging into existing timestep scenarios so several reaches can share the same times.
-function applyTimesteps(points, reach) {
-  if (!targetExists()) { showMessage("That reach row no longer exists.", true); return; }
-  const huc = reach.huc || String(picker.target.HUC || "");
-  if (!/^\d+$/.test(huc)) { showMessage("Set the row's HUC8 before making time-step scenarios.", true); return; }
-  const owner = state.scenarios.find((scenario) => scenario.Reaches.includes(picker.target));
-  owner.Reaches.splice(owner.Reaches.indexOf(picker.target), 1);
+function applyTimesteps(points, reach, target, closePanel) {
+  if (!targetExists(target)) { showMessage("That reach row no longer exists.", true); return; }
+  const huc = reach.huc || String(target.HUC || "");
+  if (!/^\d{8}$/.test(huc)) { showMessage("Set the row's HUC8 before making time-step scenarios.", true); return; }
+  const owner = state.scenarios.find((scenario) => scenario.Reaches.includes(target));
+  owner.Reaches.splice(owner.Reaches.indexOf(target), 1);
   if (!owner.Reaches.length) state.scenarios.splice(state.scenarios.indexOf(owner), 1);
   for (const point of points) {
     const id = timestepId(point.time);
@@ -1019,12 +1044,12 @@ function applyTimesteps(points, reach) {
   const steps = state.scenarios.filter((scenario) => TIMESTEP_ID.test(scenario.ScenarioID))
     .sort((a, b) => a.ScenarioID.localeCompare(b.ScenarioID));
   state.scenarios.splice(0, state.scenarios.length, ...others, ...steps);
-  closeReachPicker();
+  closePanel();
   renderScenarioEditor();
   showMessage(`Set reach ${reach.reachId} in ${points.length} time-step scenario(s) (${steps.length} in total).`);
 }
 
-function timestepForm(points, reach) {
+function timestepForm(points, reach, target, closePanel) {
   const times = points.map((point) => Date.parse(point.time));
   const bounds = { min: utcInputValue(times[0]), max: utcInputValue(times[times.length - 1]) };
   const start = el("input", { type: "datetime-local", step: 3600, ...bounds, value: bounds.min, "aria-label": "First time (UTC)" });
@@ -1050,7 +1075,7 @@ function timestepForm(points, reach) {
   [start, end, every].forEach((input) => input.addEventListener("input", update));
   create.addEventListener("click", () => {
     const chosen = selected();
-    if (chosen.length && chosen.length <= MAX_TIMESTEP_SCENARIOS) applyTimesteps(chosen, reach);
+    if (chosen.length && chosen.length <= MAX_TIMESTEP_SCENARIOS) applyTimesteps(chosen, reach, target, closePanel);
   });
   update();
   return el("details", { className: "timesteps" },
@@ -1062,63 +1087,69 @@ function timestepForm(points, reach) {
 
 function peakPoint(points) { return points.reduce((best, point) => (point.flow > best.flow ? point : best)); }
 
-async function showNwpsFlows(container, reach, lookup) {
-  container.replaceChildren(el("span", { className: "hint", text: "Loading NOAA NWPS flows…" }));
-  const base = `${NWPS_REACHES_URL}/${encodeURIComponent(reach.reachId)}/streamflow`;
-  // NWPS accepts a single series per request; omitting it returns the analysis.
-  const results = await Promise.allSettled(NWPS_SERIES.map((series) =>
-    fetchPublicJson(series.param ? `${base}?${query({ series: series.param })}` : base)));
-  if (lookup !== picker.lookup) return;
-  const rows = [];
-  let forecasts = 0;
-  results.forEach((result, index) => {
-    const series = NWPS_SERIES[index];
-    const points = result.status === "fulfilled" ? nwpsPoints(result.value[series.key]) : [];
-    if (!points.length) return;
-    if (series.param) forecasts++;
-    const buttons = series.param ? [] : [flowButton("Use latest", points[points.length - 1], reach)];
-    buttons.push(flowButton("Use peak", peakPoint(points), reach));
-    rows.push(el("div", { className: "row" }, el("span", {
-      text: `${series.label} (${formatTime(points[0].time)} – ${formatTime(points[points.length - 1].time)})`,
-    }), buttons), timestepForm(points, reach));
-  });
-  if (rows.length) {
-    if (!forecasts) rows.push(el("span", { className: "hint", text: "NWPS currently has no forecast flows for this reach." }));
-    container.replaceChildren(...rows);
-    return;
-  }
-  const failure = results.find((result) => result.status === "rejected");
-  container.replaceChildren(el("span", {
-    className: failure ? "error" : "hint",
-    text: failure ? `NWPS lookup failed: ${failure.reason.message}` : "NWPS has no recent or forecast flows for this reach.",
-  }));
+function flowCoverage(points) {
+  const times = points.map((point) => Date.parse(point.time));
+  const intervals = [...new Set(times.slice(1).map((time, index) => (time - times[index]) / 60000))];
+  const resolution = !intervals.length ? "One sample; time resolution unavailable"
+    : intervals.length === 1 ? `${intervals[0]} minutes between samples`
+      : `Variable spacing (${Math.min(...intervals)}–${Math.max(...intervals)} minutes between samples)`;
+  return el("dl", { className: "summary" },
+    el("dt", { text: "Available times (UTC)" }),
+    el("dd", { text: `${utcInputValue(times[0]).replace("T", " ")} to ${utcInputValue(times[times.length - 1]).replace("T", " ")}` }),
+    el("dt", { text: "Returned time resolution" }),
+    el("dd", { text: `${resolution}; ${points.length} sample(s). Missing samples are not interpolated.` }));
 }
 
-function historicFlowControls(reach) {
+async function showNwpsFlows(container, series, reach, target, isCurrent, closePanel) {
+  container.replaceChildren(el("span", { className: "hint", text: `Loading ${series.label.toLowerCase()} from NOAA NWPS…` }));
+  const base = `${NWPS_REACHES_URL}/${encodeURIComponent(reach.reachId)}/streamflow`;
+  try {
+    const body = await fetchPublicJson(series.param ? `${base}?${query({ series: series.param })}` : base);
+    if (!isCurrent()) return;
+    const points = nwpsPoints(body[series.key]).sort((a, b) => Date.parse(a.time) - Date.parse(b.time));
+    if (!points.length) {
+      container.replaceChildren(el("span", {
+        className: "hint", text: `NWPS currently has no ${series.label.toLowerCase()} flows for this reach. Choose another source.`,
+      }));
+      return;
+    }
+    const buttons = series.param ? [] : [flowButton("Use latest", points[points.length - 1], reach, target)];
+    buttons.push(flowButton("Use peak", peakPoint(points), reach, target));
+    container.replaceChildren(flowCoverage(points),
+      el("div", { className: "row" }, buttons), timestepForm(points, reach, target, closePanel));
+  } catch (error) {
+    if (isCurrent()) container.replaceChildren(el("span", {
+      className: "error", text: `NWPS lookup failed: ${error.message}`,
+    }));
+  }
+}
+
+function historicFlowControls(reach, target, isCurrent, closePanel) {
   const start = el("input", { type: "date", ...RETROSPECTIVE_RANGE, value: "2023-01-01", required: true });
   const end = el("input", { type: "date", ...RETROSPECTIVE_RANGE, value: "2023-01-31", required: true });
   const output = el("div", { className: "row" });
   const steps = el("div");
   const button = el("button", { type: "button", className: "small", text: "Look up", onclick: async () => {
-    const lookup = picker.lookup;
     button.disabled = true;
     steps.replaceChildren();
     output.replaceChildren(el("span", { className: "hint", text: "Reading the NWM retrospective; this can take 10–30 seconds…" }));
     try {
       const body = await api(`/ui/streamflow/retrospective?${query({ reach_id: reach.reachId, start: start.value, end: end.value })}`);
-      if (lookup !== picker.lookup) return;
+      if (!isCurrent()) return;
       output.replaceChildren(
         el("span", { text: `${body.start.slice(0, 10)} to ${body.end.slice(0, 10)}: min ${roundFlow(body.min)}, mean ${roundFlow(body.mean)} m³/s` }),
-        flowButton("Use max", { flow: body.max, time: body.max_time }, reach),
+        flowButton("Use max", { flow: body.max, time: body.max_time }, reach, target),
         el("span", { className: "hint", text: `peak at ${formatTime(body.max_time)}` }),
-        flowButton("Use mean", { flow: body.mean }, reach));
+        flowButton("Use mean", { flow: body.mean }, reach, target));
       const first = Date.parse(body.start);
       const points = body.flows
         .map((flow, index) => ({ time: new Date(first + index * HOUR_MS).toISOString(), flow }))
         .filter((point) => point.flow !== null);
-      steps.replaceChildren(timestepForm(points, reach));
+      steps.replaceChildren(points.length
+        ? timestepForm(points, reach, target, closePanel)
+        : el("span", { className: "hint", text: "No hourly flows were available for this date range." }));
     } catch (error) {
-      if (lookup === picker.lookup) output.replaceChildren(el("span", { className: "error", text: error.message }));
+      if (isCurrent()) output.replaceChildren(el("span", { className: "error", text: error.message }));
     } finally {
       button.disabled = false;
     }
@@ -1131,14 +1162,73 @@ function historicFlowControls(reach) {
   ];
 }
 
-function showStreamflows(reach) {
-  const box = $("#picker-flows");
-  const recent = el("div");
+function showStreamflows(reach, target, box, isCurrent, closePanel) {
+  const source = el("select", { "aria-label": "Streamflow source" },
+    NWPS_SERIES.map((series) => el("option", { value: series.key, text: series.label })),
+    el("option", { value: "retrospective", text: "Historic — NWM v3.0 retrospective" }));
+  const description = el("div");
+  const controls = el("div", { "aria-live": "polite" });
+  let version = 0;
+  const update = () => {
+    const selectedVersion = ++version;
+    const current = () => isCurrent() && selectedVersion === version;
+    const historic = source.value === "retrospective";
+    const series = NWPS_SERIES.find((item) => item.key === source.value);
+    description.replaceChildren(
+      el("p", { text: historic
+        ? "NOAA National Water Model v3.0 CONUS retrospective simulation, read from NOAA's public AWS Zarr archive. "
+          + "Driven by Analysis of Record for Calibration (AORC) weather data, without streamflow assimilation. "
+          + "These are modeled historical flows, not stream-gauge observations."
+        : series.description }),
+      el("dl", { className: "summary" },
+        el("dt", { text: "Time window" }),
+        el("dd", { text: historic
+          ? `${RETROSPECTIVE_RANGE.min} to ${RETROSPECTIVE_RANGE.max} (UTC); select up to 92 days per lookup.`
+          : series.window }),
+        el("dt", { text: "Resolution" }),
+        el("dd", { text: historic ? "Hourly streamflow for an individual NWM river reach."
+          : "Streamflow for an individual NWM river reach. Time spacing is measured from the returned samples below, not the forecast update frequency." })),
+      el("p", { className: "hint", text: "Values are displayed in m³/s. Reach-based streamflow is not a gridded flood-depth product." }),
+      el("a", {
+        href: historic ? "https://registry.opendata.aws/nwm-archive/" : "https://water.noaa.gov/about/nwm",
+        target: "_blank", rel: "noopener noreferrer", text: "Source documentation",
+      }));
+    controls.replaceChildren();
+    if (historic) controls.append(...historicFlowControls(reach, target, current, closePanel));
+    else showNwpsFlows(controls, series, reach, target, current, closePanel);
+  };
+  source.addEventListener("change", update);
   box.replaceChildren(
-    el("h4", { text: `Streamflow for reach ${reach.reachId} — recent and forecast (NOAA NWPS)` }),
-    recent, ...historicFlowControls(reach));
+    el("h4", { text: `Streamflow for reach ${reach.reachId}` }),
+    el("label", { text: "Streamflow source " }, source), description, controls);
   box.hidden = false;
-  showNwpsFlows(recent, reach, picker.lookup);
+  update();
+}
+
+function openFlowSelection(scenario, reach, reachIndex) {
+  const reachId = String(reach.ReachID || "").trim();
+  const huc = String(reach.HUC || "").trim();
+  if (!/^\d+$/.test(reachId) || !/^\d{8}$/.test(huc)) {
+    showMessage("Enter a numeric NWM ReachID and an 8-digit HUC8 in the scenario row before selecting streamflow.", true);
+    return;
+  }
+  const lookup = ++flowSelection.lookup;
+  $("#flow-selection-title").textContent = `Scenario ${scenario.ScenarioID || "(unnamed)"}, reach ${reachIndex + 1}`;
+  $("#flow-selection").hidden = false;
+  showStreamflows(
+    { reachId, huc },
+    reach,
+    $("#flow-selection-content"),
+    () => lookup === flowSelection.lookup,
+    closeFlowSelection,
+  );
+  $("#flow-selection").scrollIntoView({ block: "nearest" });
+}
+
+function closeFlowSelection() {
+  flowSelection.lookup++;
+  $("#flow-selection").hidden = true;
+  $("#flow-selection-content").replaceChildren();
 }
 
 function hideStreamflows() {
@@ -1159,13 +1249,19 @@ async function pickReachAt(latlng) {
     result.replaceChildren(
       el("span", { text: `ReachID ${found.reachId} in HUC8 ${found.huc} (${found.hucName})` }),
       el("button", { type: "button", className: "primary small", text: "Use this reach", onclick: () => {
-        if (!targetExists()) { showMessage("That reach row no longer exists.", true); return; }
+        if (!targetExists(picker.target)) { showMessage("That reach row no longer exists.", true); return; }
         picker.target.HUC = found.huc;
         picker.target.ReachID = found.reachId;
         renderScenarioEditor();
         showMessage(`Set reach ${found.reachId} in HUC8 ${found.huc}.`);
       } }));
-    showStreamflows({ reachId: found.reachId, huc: found.huc });
+    showStreamflows(
+      { reachId: found.reachId, huc: found.huc },
+      picker.target,
+      $("#picker-flows"),
+      () => lookup === picker.lookup,
+      closeReachPicker,
+    );
   } catch (error) {
     if (lookup === picker.lookup) result.replaceChildren(el("span", { className: "error", text: error.message }));
   }
@@ -1179,7 +1275,13 @@ async function showCurrentReach(reachId) {
     if (lookup !== picker.lookup || !feature) return;
     highlightReach(feature, true);
     $("#picker-result").replaceChildren(el("span", { className: "hint", text: `Current ReachID ${reachId} is highlighted.` }));
-    showStreamflows({ reachId });
+    showStreamflows(
+      { reachId, huc: String(picker.target?.HUC || "") },
+      picker.target,
+      $("#picker-flows"),
+      () => lookup === picker.lookup,
+      closeReachPicker,
+    );
   } catch (error) {
     if (lookup === picker.lookup) {
       $("#picker-result").replaceChildren(el("span", { className: "hint", text: `Current ReachID ${reachId} was not found in NHDPlus.` }));
@@ -1193,6 +1295,7 @@ function openReachPicker(scenario, reach, reachIndex) {
     return;
   }
   if (!window.L) { showMessage("The map library could not be loaded.", true); return; }
+  closeFlowSelection();
   picker.target = reach;
   $("#picker-title").textContent = `Pick a reach for ${scenario.ScenarioID || "this scenario"}, row ${reachIndex + 1}`;
   $("#picker-result").replaceChildren();
@@ -1990,6 +2093,7 @@ async function start() {
   });
   $("#json-file").addEventListener("change", uploadScenarios);
   $("#picker-close").addEventListener("click", closeReachPicker);
+  $("#flow-selection-close").addEventListener("click", closeFlowSelection);
   $("#json-url-form").addEventListener("submit", (event) => {
     event.preventDefault();
     loadScenariosFromUrl($("#json-url").value.trim());

@@ -6,10 +6,10 @@
   <title>FIMBox HAND-FIM</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
-  <link rel="stylesheet" href="/ui/static/app.css?v=cam-1525-workspace-header">
+  <link rel="stylesheet" href="/ui/static/app.css?v=cam-1529-source-selector">
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
           integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="" defer></script>
-  <script src="/ui/static/app.js?v=cam-1525-workspace-header" defer></script>
+  <script src="/ui/static/app.js?v=cam-1529-source-selector" defer></script>
 </head>
 <body>
   <header>
@@ -83,6 +83,14 @@
       </form>
 
       <div id="scenario-editor"></div>
+      <div id="flow-selection" class="picker" hidden>
+        <div class="row">
+          <strong id="flow-selection-title"></strong>
+          <button type="button" class="small" id="flow-selection-close">Close flow selection</button>
+        </div>
+        <p class="hint">Choose a streamflow source and period for the ReachID and HUC8 entered in the scenario row. This workflow does not require the map.</p>
+        <div id="flow-selection-content" class="flows"></div>
+      </div>
       <div id="reach-picker" class="picker" hidden>
         <div class="row">
           <strong id="picker-title"></strong>

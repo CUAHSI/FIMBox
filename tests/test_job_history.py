@@ -3,7 +3,7 @@ import json
 import time
 import unittest
 from datetime import datetime, timezone
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 from uuid import uuid4
 
 from botocore.exceptions import ClientError
@@ -222,14 +222,18 @@ class HistoryTests(unittest.TestCase):
         archive = self.prepare()
         redis = Mock()
         redis.get.return_value = "a flood ☃\n".encode()
+        memory = MagicMock()
+        memory.__enter__.return_value.peak_bytes = 4096
         with patch.object(history, "get_redis_client", return_value=redis), \
+                patch.object(history, "PeakMemorySampler", return_value=memory), \
                 patch.object(Task, "__call__", return_value=self.result):
             returned = history.HistoryTask()("payload", **archive)
-        self.assertEqual(returned, self.result)
+        self.assertEqual(returned, {**self.result, "peak_memory_bytes": 4096})
         record = history.read(self.session, self.location, self.job_id)
         self.assertEqual(record.status, "success")
         self.assertEqual(record.request, self.request)
         self.assertEqual(record.result.output_prefix, "outputs")
+        self.assertEqual(record.result.peak_memory_bytes, 4096)
         self.assertEqual((record.started_at, record.finished_at), (STARTED, STARTED))
         content = b"".join(self.objects.values())
         self.assertNotIn(b"never-archive-this-token", content)

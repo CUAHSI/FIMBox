@@ -292,6 +292,7 @@ class ApiTests(unittest.TestCase):
             **DESTINATION, "local_output_dir": None,
             "files": [{"path": "result.cog", "key": "data/output/result.cog", "size_bytes": 10}],
             "outputs": [{"ScenarioID": "single-reach-scenario"}],
+            "peak_memory_bytes": 512 * 1024 * 1024,
         }
         with patch.object(
             main.celery_app, "AsyncResult", return_value=Mock(state="SUCCESS", result=result)
@@ -299,7 +300,10 @@ class ApiTests(unittest.TestCase):
             response = self.client.get(f"/jobs/{job_id}")
             self.assertEqual(
                 response.json()["result"],
-                {**result, "execution_mode": "fimserv-2024", "scenario_manifests": [], "parity": [], "compared": None},
+                {
+                    **result, "execution_mode": "fimserv-2024", "scenario_manifests": [],
+                    "parity": [], "compared": None,
+                },
             )
 
     def test_output_download_and_envelope_routes_are_removed(self):

@@ -97,5 +97,13 @@ class HandFimResult(BaseModel):
     """Result of a HAND-FIM request: one output entry per scenario."""
 
     outputs: List[HandFimOutput]
+    peak_memory_bytes: int | None = Field(
+        default=None,
+        description=(
+            "Sampled peak total worker-container memory while this job ran, in bytes. "
+            "Concurrent jobs may contribute, short-lived peaks may be missed, and the value is null "
+            "when cgroup memory metrics are unavailable."
+        ),
+    )
 
     model_config = {"extra": "forbid"}

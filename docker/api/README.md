@@ -129,6 +129,10 @@ with run-specific tile paths remain readable and are cleaned up when replaced.
 Once a worker begins a job, its status includes `started_at`, and finished jobs
 also include `finished_at` (UTC). Both are omitted while queued; the web page
 shows these times and the execution time, with a live elapsed time while running.
+Successful job results include `peak_memory_bytes`, the sampled peak total
+worker-container memory while the job ran. Concurrent jobs may contribute to
+that value, brief peaks can be missed, and it is `null` when cgroup metrics are
+unavailable.
 These timestamps expire with other Redis job metadata, while S3 job history
 retains them for new jobs. Redis exports include them only if they are still available.
 Cancelled running jobs may lack `finished_at`.

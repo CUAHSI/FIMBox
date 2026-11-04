@@ -397,6 +397,9 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
   `started_at`/`finished_at`, using the result TTL. `HistoryTask` records it for every
   task, copies it into S3 history records, and `get_job_status` returns it
   (except for queued jobs). The UI derives execution/elapsed time from it.
+- **`src/fimbox_api/job_resources.py`** — Samples cgroup memory usage while a
+  worker task runs; `HistoryTask` includes the sampled peak worker-container
+  memory in successful job results when the metric is available.
 - **`src/fimbox_api/history.py`** — Opt-in persistent S3 job metadata selected by
   `X-FIMBox-History-Location: s3://bucket/prefix`. Queued records are written
   before enqueue; `HistoryTask` wraps all three worker tasks to retain started

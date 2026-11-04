@@ -218,21 +218,27 @@ are not synchronized across browsers, and old saved S3 locations are not importe
   `STREAM_INPUT_BUCKET`/`STREAM_INPUT_PREFIX`. Without that setting, the tab
   explains that legacy jobs download NOAA HAND data per HUC instead.
 - **Submit job** edits scenarios as a table or JSON. You can load the examples
-  from the `test-data/*.json` files, upload a local JSON file, or load one
-  from a URL. URLs can be public `https://` links or
-  `s3://<bucket>/<key>` paths read with your HydroShare credentials.
-  `/ui?scenarios_url=<url>` opens the page with the URL ready to load. Then
+  from the `test-data/*.json` files or edit the scenario table directly. Then
   set the job options and submit to `POST /jobs/hand-fim`.
+  The execution-mode selector lists `streaming-2026` (selected by default),
+  `streaming-2024`, `fimserv-2026`, then `fimserv-2024`. When streaming is
+  not configured, only the FIMserv modes appear, defaulting to `fimserv-2026`.
+  This browser default does not change the API or CLI defaults.
 
-  Each reach row's **Pick on map** button opens a map with NHDPlus v2.1
-  flowlines and HUC8 boundaries. Clicking a stream fills in its HUC8 and
-  ReachID (the NHDPlus COMID, which NWM uses as its reach ID). The lookups
-  call the public USGS NLDI and WBD services directly from the browser. A
-  picked reach must still exist in the HAND hydrofabric.
-  Map interaction is optional: enter a ReachID and HUC8 directly in a row and
-  choose **Select streamflow** to open the same flow and period controls without
-  opening the map. This selection panel is separate from the map, so using it
-  does not alter the map view or its highlighted reach.
+  Below the Reach Set, the tabs are **Scenarios** (active by default),
+  **Map**, and **Streamflows (NWM)**, providing the scrollable
+  scenario list with editable flows, geographic reach selection, and
+  timestep generation.
+  The map shows every entered reach in blue over NHDPlus v2.1 flowlines and
+  HUC8 boundaries. Click a stream to highlight it in red, then **Add to reach
+  set** to append its HUC8 and ReachID (NHDPlus COMID); duplicate reaches are
+  rejected. **View on map** focuses a row, and **Fit reach set** fits all
+  displayed reaches. Lookups call public USGS NLDI and WBD services directly
+  from the browser, and failed lookups are reported beneath the map. A picked
+  reach must still exist in the HAND hydrofabric.
+  Map interaction is optional: enter ReachIDs and HUC8s directly in the set.
+  Scenario-wide **Select streamflow** uses a separate panel and does not
+  alter the map view or its highlighted reach.
 
   TIFF (`.tif`/`.tiff`) and COG files in the input browser have a **View**
   button showing a first-band image preview (at most 1024 pixels per side).
@@ -243,32 +249,42 @@ are not synchronized across browsers, and old saved S3 locations are not importe
   as browsing, and download remains available. COG overviews make these previews
   faster; TIFFs without overviews may require more storage reads.
 
-  For a manually entered or map-picked reach, the flow-selection panel can set
-  the row's Streamflow in m³/s. Choose a **Streamflow source**; only that source's
-  description and controls are shown, and only the selected NWPS series is
-  fetched. Source documentation links explain the model and its origin.
+  Each scenario has editable per-reach Streamflow values in m³/s and one
+  **Select streamflow** action for the whole scenario. Choose a source, load
+  its series for every reach, then choose one exact shared UTC timestamp and
+  **Apply to whole scenario**. Each reach receives its own flow at that time;
+  no values are changed if any lookup fails or the reaches have no shared
+  timestamp. Source documentation links explain the model and its origin.
   The panel distinguishes modeled flows from gauge observations and
   reach-based streamflow from gridded flood depth:
   - recent analysis and short/medium/long-range forecasts from NOAA NWPS
-    (`api.water.noaa.gov`, converted from ft³/s), with "Use latest"/"Use peak".
+    (`api.water.noaa.gov`, converted from ft³/s).
     NWPS forecast series are sometimes empty, which the page reports.
     Forecast products are selected individually. Typical CONUS horizons are
     18 hours (short range), 10 days (medium-range blend), and 30 days (long range).
     Actual returned UTC coverage, sample count, and time spacing are shown
     after loading; these are not the forecast's issuance frequency.
   - historic flows for a date range of up to 92 days from the NWM v3.0
-    retrospective (1979-02-01 to 2023-02-01), with "Use max"/"Use mean". The
+    retrospective (1979-02-01 to 2023-02-01). The
     API reads the public `noaa-nwm-retrospective-3-0-pds` Zarr store through
     `GET /ui/streamflow/retrospective`; each 28 days is one ~10 MB chunk, so a
     lookup can take 10–30 seconds.
     The historical simulation has hourly reach-level flows, is driven by AORC
     weather data, and does not assimilate streamflow observations.
 
-  Each series also has **Make time-step scenarios**: choose a UTC time range
-  and step (1–24 h, at most 240 timesteps). The row is replaced by one
-  scenario per timestep, with ScenarioIDs like `20180915T1800Z`. Repeating
-  this for other reaches over the same times adds them to the same timestep
-  scenarios.
+  The **Reach set** is the shared source for scenario creation. Add each HUC
+  and reach once; streamflow is not part of this form. **Add one scenario**
+  copies the set with blank flows, which must be entered or selected before
+  submission. Switching to **Streamflows (NWM)** automatically opens
+  the group source lookup for the entire reach set. Returning to the tab
+  preserves the selected source and loaded flows if the set is unchanged.
+  Load one source for every reach, choose a UTC time
+  range and step (1–24 h, at most 240 timesteps), and build one scenario per shared exact
+  timestamp, with ScenarioIDs like `20180915T1800Z`. Every generated timestep
+  scenario contains every reach in the set; missing samples are not
+  interpolated. The reach set remains available for subsequent scenario
+  creation. The **Scenarios to submit** section lists the scenarios currently
+  queued for the job, including editable flows for generated timesteps.
 - **Results** lists the workspace's jobs and their submitters, streams their logs,
   and lets submitters cancel their own queued jobs. For retained S3 output it shows several views:
   - the generated `README.md`, whose relative links open files or map layers
@@ -281,7 +297,7 @@ are not synchronized across browsers, and old saved S3 locations are not importe
     scenario shown, and the others load as the player reaches them
   - parity reports, with each scenario's diff raster on the map
 
-  The **Compare two results** form selects two successful jobs in the active
+  The separate **Compare** tab selects two successful jobs in the active
   workspace and submits their retained output locations to `POST /jobs/compare`.
   A comparison job's view links to both results and shows its input parameters
   from the base result.
@@ -371,12 +387,6 @@ the SDK:
   the needed column chunks with ranged S3 GETs, stops after 64 MiB (413), and
   shortens long cells to 200 characters
 - download links
-- scenario JSON loading (signed in, at most 2 MiB). Because the page's CSP
-  blocks direct browser fetches, the API fetches `https://` URLs itself: no
-  credentials, a 10 second timeout, and at most 5 redirects. Every hop must
-  resolve only to public IP addresses, and the connection is pinned to the
-  address that was checked.
-
 Downloads are short-lived (5 minute) presigned S3 URLs signed with the user's
 HydroShare S3 credentials, so large files bypass the API. The URL exposes the
 access key ID, but not the secret. When `STREAM_INPUT_UNSIGNED=true`, unsigned

@@ -6,10 +6,10 @@
   <title>FIMBox HAND-FIM</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
-  <link rel="stylesheet" href="/ui/static/app.css?v=cam-1529-source-selector">
+  <link rel="stylesheet" href="/ui/static/app.css?v=cam-1531-scrollable-reaches">
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
           integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="" defer></script>
-  <script src="/ui/static/app.js?v=cam-1529-source-selector" defer></script>
+  <script src="/ui/static/app.js?v=cam-1531-reach-tabs" defer></script>
 </head>
 <body>
   <header>
@@ -53,6 +53,7 @@
   <nav id="main-tabs" class="tabs" data-tabs="main" hidden>
     <button type="button" data-tab="input" class="active">Input dataset</button>
     <button type="button" data-tab="submit">Submit job</button>
+    <button type="button" data-tab="compare">Compare</button>
     <button type="button" data-tab="results">Results</button>
   </nav>
 
@@ -72,43 +73,57 @@
         <button type="button" id="example-load">Load example</button>
         <button type="button" id="json-toggle">Edit as JSON</button>
       </div>
-      <div class="row">
-        <label>Upload JSON <input type="file" id="json-file" accept=".json,application/json"></label>
-      </div>
-      <form class="row" id="json-url-form">
-        <label class="grow">Load from URL
-          <input type="text" name="url" id="json-url" placeholder="https://… or s3://resource/&lt;resource id&gt;/data/contents/scenarios.json" required>
-        </label>
-        <button type="submit">Load URL</button>
-      </form>
-
-      <div id="scenario-editor"></div>
-      <div id="flow-selection" class="picker" hidden>
+      <section id="reach-set-builder">
+        <h2>Reach set</h2>
+        <p class="hint">Add each HUC and reach once, then use the same reach set to create a single scenario or timestep scenarios. Every generated scenario includes every reach in this set.</p>
+        <div id="reach-set-editor" role="region" aria-label="Reach set" tabindex="0"></div>
         <div class="row">
-          <strong id="flow-selection-title"></strong>
-          <button type="button" class="small" id="flow-selection-close">Close flow selection</button>
+          <button type="button" id="reach-set-add">Add reach</button>
         </div>
-        <p class="hint">Choose a streamflow source and period for the ReachID and HUC8 entered in the scenario row. This workflow does not require the map.</p>
-        <div id="flow-selection-content" class="flows"></div>
-      </div>
-      <div id="reach-picker" class="picker" hidden>
-        <div class="row">
-          <strong id="picker-title"></strong>
-          <button type="button" class="small" id="picker-close">Close map</button>
+        <p class="hint">The reach set contains only HUCs and ReachIDs. Enter flows in each scenario, or select one streamflow source and UTC time for all its reaches.</p>
+      </section>
+      <section id="reach-tools">
+        <div class="tabs" data-tabs="reach-tools" role="tablist" aria-label="Reach set tools">
+          <button type="button" id="scenarios-tab" data-tab="scenarios" role="tab" aria-controls="scenario-output" aria-selected="true" class="active">Scenarios</button>
+          <button type="button" id="reach-map-tab" data-tab="map" role="tab" aria-controls="reach-picker" aria-selected="false" tabindex="-1">Map</button>
+          <button type="button" id="reach-set-timesteps" data-tab="timesteps" role="tab" aria-controls="timestep-panel" aria-selected="false" tabindex="-1">Streamflows (NWM)</button>
         </div>
-        <p class="hint">Click a stream to look up its NHDPlus v2.1 reach (COMID, which is the NWM ReachID) and
-          HUC8. Flowlines appear at zoom ≥ 11; HUC8 and coarser boundaries are outlined and can take a few seconds to load. The reach must exist in the HAND
-          hydrofabric for the job to map it.</p>
-        <div id="picker-map" class="map"></div>
-        <div class="row" id="picker-result"></div>
-        <div id="picker-flows" class="flows" hidden></div>
-      </div>
+        <div id="timestep-panel" class="picker" data-panel="reach-tools" data-name="timesteps" role="tabpanel" aria-labelledby="reach-set-timesteps" hidden>
+          <p class="hint">Load a streamflow source for every reach in the set, then choose shared UTC times to create scenarios.</p>
+          <div id="timestep-content" class="flows"></div>
+        </div>
+        <div id="reach-picker" class="picker" data-panel="reach-tools" data-name="map" role="tabpanel" aria-labelledby="reach-map-tab" hidden>
+          <div class="row">
+            <strong>Reach set map</strong>
+            <button type="button" class="small" id="picker-fit">Fit reach set</button>
+          </div>
+          <p class="hint">Blue features show the reach set; red shows the clicked reach. Click a stream, then choose Add to reach set.
+            NHDPlus v2.1 COMIDs are NWM ReachIDs. Flowlines appear at zoom ≥ 11. HUC8 boundaries may take a few seconds to load.
+            A reach must exist in the HAND hydrofabric for the job to map it; flow selection is separate from the map.</p>
+          <div id="picker-map" class="map"></div>
+          <p id="picker-status" class="hint" aria-live="polite"></p>
+          <div class="row" id="picker-result" aria-live="polite"></div>
+        </div>
+        <section id="scenario-output" data-panel="reach-tools" data-name="scenarios" role="tabpanel" aria-labelledby="scenarios-tab">
+          <h2>Scenarios to submit</h2>
+          <div class="row">
+            <button type="button" id="reach-set-add-scenario" class="primary">Add one scenario</button>
+          </div>
+          <div id="flow-selection" class="picker" hidden>
+            <div class="row">
+              <strong id="flow-selection-title"></strong>
+              <button type="button" class="small" id="flow-selection-close">Close flow selection</button>
+            </div>
+            <p class="hint">Choose a streamflow source and period for the whole scenario or timestep batch. Only exact UTC times shared by every reach are available; missing samples are not interpolated. This workflow does not require the map.</p>
+            <div id="flow-selection-content" class="flows"></div>
+          </div>
+          <div id="scenario-editor" role="region" aria-label="Scenarios to submit" tabindex="0"></div>
+        </section>
+      </section>
       <div id="json-editor" hidden>
         <textarea id="json-text" rows="20" spellcheck="false"></textarea>
         <div class="row"><button type="button" id="json-apply">Apply JSON</button></div>
       </div>
-      <div class="row" id="scenario-buttons"><button type="button" id="scenario-add">Add scenario</button></div>
-
       <form id="job-options">
         <h3>Job options</h3>
         <div class="grid">
@@ -121,33 +136,36 @@
       </form>
     </section>
 
+    <section data-panel="main" data-name="compare" hidden>
+      <form id="compare-results">
+        <h3>Compare</h3>
+        <p class="hint">Choose completed jobs from this workspace. Creating a comparison writes a new job and requires write access.</p>
+        <label>Job display name <input name="display_name" maxlength="120" placeholder="Optional; duplicate names are allowed"></label>
+        <fieldset>
+          <legend>Base</legend>
+          <label>Workspace job
+            <select name="base_job_id" required>
+              <option value="" selected disabled>Choose a completed job</option>
+            </select>
+          </label>
+        </fieldset>
+        <fieldset>
+          <legend>Candidate</legend>
+          <label>Workspace job
+            <select name="candidate_job_id" required>
+              <option value="" selected disabled>Choose a completed job</option>
+            </select>
+          </label>
+        </fieldset>
+        <button type="submit">Compare</button>
+      </form>
+    </section>
+
     <section data-panel="main" data-name="results" hidden>
       <div class="split">
         <aside>
           <h3>Workspace jobs <button type="button" id="jobs-refresh" class="small">Refresh</button></h3>
           <ul id="job-list" class="list"></ul>
-          <form id="compare-results">
-            <h3>Compare two results</h3>
-            <p class="hint">Choose completed jobs from this workspace. Creating a comparison writes a new job and requires write access.</p>
-            <label>Job display name <input name="display_name" maxlength="120" placeholder="Optional; duplicate names are allowed"></label>
-            <fieldset>
-              <legend>Base</legend>
-              <label>Workspace job
-                <select name="base_job_id" required>
-                  <option value="" selected disabled>Choose a completed job</option>
-                </select>
-              </label>
-            </fieldset>
-            <fieldset>
-              <legend>Candidate</legend>
-              <label>Workspace job
-                <select name="candidate_job_id" required>
-                  <option value="" selected disabled>Choose a completed job</option>
-                </select>
-              </label>
-            </fieldset>
-            <button type="submit">Compare</button>
-          </form>
         </aside>
         <div id="result-view">
           <p class="hint">Select a job to view its results.</p>

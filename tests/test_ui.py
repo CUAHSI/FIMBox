@@ -86,13 +86,48 @@ class UiTests(unittest.TestCase):
         self.assertNotIn('name="base_prefix"', page)
         self.assertNotIn('name="candidate_prefix"', page)
         self.assertNotIn("Your jobs", page)
-        self.assertIn('href="/ui/static/app.css?v=cam-1529-source-selector"', page)
-        self.assertIn('src="/ui/static/app.js?v=cam-1529-source-selector"', page)
+        self.assertIn('href="/ui/static/app.css?v=cam-1531-scrollable-reaches"', page)
+        self.assertIn('src="/ui/static/app.js?v=cam-1531-reach-tabs"', page)
+        self.assertNotIn('id="json-file"', page)
+        self.assertNotIn('id="json-url-form"', page)
+        self.assertNotIn('id="json-url"', page)
         self.assertIn('id="flow-selection"', page)
         self.assertIn('id="flow-selection-content"', page)
         self.assertIn("Choose a streamflow source and period", page)
-        css = self.client.get("/ui/static/app.css?v=cam-1529-source-selector").text
+        self.assertIn("Every generated scenario includes every reach in this set.", page)
+        self.assertIn('id="reach-set-builder"', page)
+        self.assertIn('data-tab="compare">Compare</button>', page)
+        self.assertLess(page.index('data-name="compare"'), page.index('id="compare-results"'))
+        self.assertLess(page.index('id="compare-results"'), page.index('data-name="results"'))
+        self.assertIn('id="scenario-output"', page)
+        self.assertLess(page.index('id="reach-set-builder"'), page.index('id="flow-selection"'))
+        self.assertLess(page.index('id="reach-set-builder"'), page.index('id="reach-tools"'))
+        self.assertLess(page.index('id="reach-picker"'), page.index('id="scenario-output"'))
+        self.assertLess(page.index('id="scenario-output"'), page.index('id="flow-selection"'))
+        self.assertIn('role="tablist" aria-label="Reach set tools"', page)
+        self.assertIn('aria-controls="timestep-panel"', page)
+        self.assertIn('aria-controls="reach-picker"', page)
+        self.assertIn('aria-controls="scenario-output"', page)
+        self.assertIn('id="scenario-output" data-panel="reach-tools" data-name="scenarios" role="tabpanel" aria-labelledby="scenarios-tab">', page)
+        self.assertIn('aria-controls="scenario-output" aria-selected="true" class="active">Scenarios</button>', page)
+        self.assertLess(page.index('id="scenarios-tab"'), page.index('id="reach-map-tab"'))
+        self.assertLess(page.index('id="reach-map-tab"'), page.index('id="reach-set-timesteps"'))
+        self.assertIn('aria-controls="reach-picker" aria-selected="false" tabindex="-1">Map</button>', page)
+        self.assertIn('aria-controls="timestep-panel" aria-selected="false" tabindex="-1">Streamflows (NWM)</button>', page)
+        self.assertIn("Fit reach set", page)
+        self.assertIn("Scenarios to submit", page)
+        self.assertLess(page.index('id="scenario-output"'), page.index('id="reach-set-add-scenario"'))
+        self.assertLess(page.index('id="reach-set-add-scenario"'), page.index('id="scenario-editor"'))
+        self.assertIn('id="reach-set-timesteps"', page)
+        self.assertNotIn('id="timestep-load"', page)
+        self.assertNotIn('id="picker-flows"', page)
+        self.assertIn("flow selection is separate from the map", page)
+        self.assertIn('id="scenario-editor" role="region" aria-label="Scenarios to submit" tabindex="0"', page)
+        self.assertIn('id="reach-set-editor" role="region" aria-label="Reach set" tabindex="0"', page)
+        css = self.client.get("/ui/static/app.css?v=cam-1531-scrollable-reaches").text
         self.assertIn("[hidden] { display: none !important; }", css)
+        self.assertIn("#scenario-editor { max-height: 60vh; overflow: auto; scrollbar-gutter: stable; }", css)
+        self.assertIn("#reach-set-editor { max-height: 60vh; overflow: auto; scrollbar-gutter: stable; }", css)
         self.assertIn("s3://resource/&lt;resource_id&gt;/data/contents/&lt;empty_subprefix&gt;", page)
         self.assertIn("no existing files or folders", page)
         self.assertIn("Do not choose the resource root", page)
@@ -103,9 +138,13 @@ class UiTests(unittest.TestCase):
         self.assertNotIn('name="output_prefix"', page)
         self.assertNotIn('name="overwrite"', page)
         script = self.client.get("/ui/static/app.js").text
+        self.assertNotIn("uploadScenarios", script)
+        self.assertNotIn("loadScenariosFromUrl", script)
+        self.assertNotIn("scenarios_url", script)
         self.assertIn('text: "Select streamflow"', script)
-        self.assertIn("openFlowSelection(scenario, reach, reachIndex)", script)
-        self.assertIn('text: "Pick on map"', script)
+        self.assertIn("openFlowSelection(scenario)", script)
+        self.assertIn('text: "View on map"', script)
+        self.assertIn('text: "Add to reach set"', script)
         self.assertIn("function closeFlowSelection", script)
         self.assertNotIn("fimbox-locations:", script)
         self.assertIn("fimbox-workspace:v1:", script)
@@ -156,7 +195,7 @@ class UiTests(unittest.TestCase):
         config = self.client.get("/ui/config").json()
         self.assertTrue(config["authentication_enabled"])
         self.assertFalse(config["streaming_enabled"])
-        self.assertEqual(config["execution_modes"], ["fimserv-2024", "fimserv-2026"])
+        self.assertEqual(config["execution_modes"], ["fimserv-2026", "fimserv-2024"])
         self.assertIsNone(config["input_dataset"])
 
     def test_config_with_streaming_dataset(self):
@@ -164,7 +203,9 @@ class UiTests(unittest.TestCase):
                             stream_input_unsigned=True)
         config = self.client.get("/ui/config").json()
         self.assertTrue(config["streaming_enabled"])
-        self.assertIn("streaming-2026", config["execution_modes"])
+        self.assertEqual(config["execution_modes"], [
+            "streaming-2026", "streaming-2024", "fimserv-2026", "fimserv-2024",
+        ])
         self.assertEqual(config["input_dataset"], {
             "bucket": "resource", "prefix": "abc/data/contents", "unsigned": True,
         })
@@ -351,35 +392,9 @@ class UiTests(unittest.TestCase):
         response = self.client.get("/ui/objects/parquet", params={"bucket": "fim", "key": "in/a.parquet"})
         self.assertEqual(response.status_code, 404)
 
-    def test_load_scenarios_from_s3_with_user_credentials(self):
-        self.s3.get_object.return_value = {"Body": io.BytesIO(b'[{"ScenarioID": "a", "Reaches": []}]')}
-        response = self.client.get("/ui/scenarios/load", params={"url": "s3://resource/abc/data/contents/s.json"})
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["scenarios"], [{"ScenarioID": "a", "Reaches": []}])
-        self.s3.get_object.assert_called_once_with(
-            Bucket="resource", Key="abc/data/contents/s.json", Range=f"bytes=0-{ui.remote_json.MAX_BYTES}",
-        )
-        for url, status in (("s3://bad bucket/k.json", 400), ("s3://resource/a/../k.json", 400)):
-            self.assertEqual(self.client.get("/ui/scenarios/load", params={"url": url}).status_code, status, url)
-        self.s3.get_object.return_value = {"Body": io.BytesIO(b'{"ScenarioID": "a"}')}
-        response = self.client.get("/ui/scenarios/load", params={"url": "s3://resource/abc/s.json"})
-        self.assertEqual(response.status_code, 422)
-        self.s3.get_object.return_value = {"Body": io.BytesIO(b"x" * (ui.remote_json.MAX_BYTES + 1))}
-        response = self.client.get("/ui/scenarios/load", params={"url": "s3://resource/abc/s.json"})
-        self.assertEqual(response.status_code, 413)
-
-    def test_load_scenarios_from_https_maps_errors(self):
-        with patch.object(ui.remote_json, "fetch_json", return_value=[{"ScenarioID": "a"}]) as fetch:
-            response = self.client.get("/ui/scenarios/load", params={"url": "https://example.org/s.json"})
-        self.assertEqual(response.json(), {"source": "https://example.org/s.json", "scenarios": [{"ScenarioID": "a"}]})
-        fetch.assert_called_once_with("https://example.org/s.json")
-        for error, status in (
-            (ui.remote_json.RemoteJsonError("Only https:// URLs can be loaded"), 400),
-            (httpx.ConnectTimeout("slow"), 502),
-        ):
-            with patch.object(ui.remote_json, "fetch_json", side_effect=error):
-                response = self.client.get("/ui/scenarios/load", params={"url": "https://example.org/s.json"})
-            self.assertEqual(response.status_code, status)
+    def test_scenario_url_loading_route_is_removed(self):
+        response = self.client.get("/ui/scenarios/load", params={"url": "https://example.org/s.json"})
+        self.assertEqual(response.status_code, 404)
 
     def test_retrospective_streamflow_uses_whole_utc_days_and_maps_errors(self):
         flows = {

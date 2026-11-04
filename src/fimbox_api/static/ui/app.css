@@ -48,9 +48,11 @@ pre.logs { background: #0d1117; color: #e6edf3; border-radius: 4px; min-height: 
 fieldset { border: 1px solid var(--border); border-radius: 4px; margin: 8px 0; }
 fieldset legend { display: flex; gap: 6px; align-items: center; }
 fieldset input.num { width: 120px; }
+#scenario-editor { max-height: 60vh; overflow: auto; scrollbar-gutter: stable; }
+#reach-set-editor { max-height: 60vh; overflow: auto; scrollbar-gutter: stable; }
 .split { display: grid; grid-template-columns: 280px 1fr; gap: 16px; }
-aside form { display: flex; flex-direction: column; gap: 6px; margin-top: 16px; }
-aside fieldset { display: flex; flex-direction: column; gap: 6px; margin: 0; }
+#compare-results { display: flex; flex-direction: column; gap: 6px; max-width: 640px; }
+#compare-results fieldset { display: flex; flex-direction: column; gap: 6px; margin: 0; }
 .list { list-style: none; padding: 0; margin: 0; max-height: 360px; overflow: auto; }
 .list li { padding: 4px 6px; border-radius: 4px; cursor: pointer; display: flex; justify-content: space-between; gap: 6px; font-family: ui-monospace, monospace; font-size: 12px; }
 .list li:hover, .list li.active { background: #ddf4ff; }

@@ -203,12 +203,6 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
   the API, which fails startup without OAuth credentials. All submissions derive
   their output bucket/prefix from the selected workspace regardless of this
   older deployment setting.
-- **`src/fimbox_api/remote_json.py`** — SSRF-guarded `fetch_json(url)`:
-  - accepts https only, with no URL credentials
-  - every redirect hop must resolve to global IPs only, and the connection is
-    pinned to the checked IP (keeping the Host header and SNI)
-  - no environment proxies; limits of 2 MiB, 10 s, and 5 redirects
-  - raises `RemoteJsonError`; tested in `tests/test_remote_json.py`
 - **`src/fimbox_api/retrospective.py`** — `streamflow(reach_id, start, end)`
   reads hourly flows for one reach from the public NWM v3.0 retrospective Zarr
   (`chrtout.zarr` on `noaa-nwm-retrospective-3-0-pds`) with plain GETs and
@@ -233,10 +227,6 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
     - `/ui/objects/parquet`: pyarrow schema, counts, and first rows (limit
       1-200) through a seekable ranged-GET reader with a 64 MiB read budget
     - `/ui/objects/download`: a 5-minute presigned GET URL
-    - `/ui/scenarios/load?url=`: a scenario list (authenticated, 2 MiB).
-      `s3://` uses the user's S3 client; `https://` uses `remote_json.py`.
-      The page also uploads files client-side and supports
-      `/ui?scenarios_url=`.
     - `/ui/streamflow/retrospective?reach_id=&start=&end=`: hourly NWM v3.0
       retrospective flows over whole UTC days via `retrospective.py`
       (`RetrospectiveError` → 400, HTTP/zstd errors → 502).
@@ -247,28 +237,71 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
     auth they return 409.
   - `static/ui/app.js` is plain JS that builds the DOM with `textContent`. It
     handles:
+    - execution modes in UI-config order: streaming-2026 (browser default),
+      streaming-2024, fimserv-2026, fimserv-2024. Unconfigured streaming modes
+      are omitted, making fimserv-2026 the fallback browser default.
+      API/CLI defaults remain unchanged.
+    - Compare has its own main tab, separate from Results.
+      Successful comparison submissions activate Results and open the new job.
     - device-flow popup sign-in
     - the S3 browser
-    - the scenario table/JSON editor, with per-row NOAA/NWM flow selection
-      available for manually entered ReachID/HUC8 without opening the map, and
-      an independent per-reach map picker. The picker
+    - the Reach Set builder and Scenarios to submit table/JSON editor, with
+      NOAA/NWM flow selection available for manually entered ReachID/HUC8
+      without opening the map, and a whole-reach-set map. The map
       shows EPA NHDPlus ArcGIS `export` tiles and one WBDLine export image per
       view (`hudigit <= 8`, with retries). The WBD HUC8 polygon layer is
       scale-limited, and tile bursts get intermittent 503s. a click calls
       NLDI `comid/position` and the WBD HUC8 query from the browser.
-      `main.py`'s CSP allowlists these origins. A picked or current reach
-      can show a streamflow panel: NOAA NWPS analysis/forecast series fetched
+      `main.py`'s CSP allowlists these origins. The map only picks/highlights
+      reaches; it never embeds streamflow controls. It displays the full reach
+      set in blue, a clicked reach in red, and supports Add to reach set
+      (duplicate ReachIDs rejected), per-row View on map, and Fit reach set.
+      Geometry lookups are cached per workspace; edits/removals refresh the
+      displayed set, errors are explicit, and stale responses are ignored.
+      Scenario-wide streamflow
+      selection loads NOAA NWPS analysis/forecast series fetched
       from the browser (ft³/s → m³/s, one `series` per request; forecasts may
-      be empty) and a retrospective date-range lookup; "Use" buttons set the
-      row's Streamflow (plus HUC/ReachID). Direct flow selection uses a
-      separate panel and preserves the map view/highlight. Both panels use a
-      source selector: only the selected NWPS product or retrospective controls
-      are displayed/fetched. Metadata describes provenance, reach-level spatial
+      be empty) or retrospective date-range flows for every scenario reach.
+      NWPS sources load automatically without a Load streamflow button;
+      retrospective lookups retain the button for the chosen date range.
+      A separate panel preserves the map view/highlight and uses one source
+      selector and one exact shared UTC timestamp; applying updates all reach
+      flows atomically and closes the selection panel on success. Metadata
+      describes provenance, reach-level spatial
       resolution, time window, and actual returned UTC coverage/sample spacing;
-      source changes invalidate in-flight responses. Each series has a "Make
-      time-step scenarios" form (UTC range, 1–24 h step, ≤ 240): it replaces
-      the row with per-timestep scenarios (`YYYYMMDDTHHMMZ` IDs), merging by
-      ScenarioID so several reaches share timesteps.
+      coverage summaries group reaches by identical sets of exact UTC sample
+      timestamps, independent of flow values, with one reach list per sample set.
+      source changes invalidate in-flight responses. The separate Reach Set
+      builder is the shared input for scenario creation: users add HUC/reach
+      rows once (HUC/ReachID only), then either add a single scenario with
+      blank flows or open a group source lookup to build up to 240 timestep
+      scenarios from exact UTC timestamps shared by every reach in the set
+      (no interpolation). Each generated scenario contains the full
+      reach set, and the set remains available for additional scenarios.
+      The reach list is a keyboard-focusable scrolling region capped at
+      60vh; Add reach stays outside the scrolling region and scrolls the
+      list to the newly added row without changing ordinary render scrolling.
+      Successfully building timestep scenarios activates Scenarios to submit.
+      Loading an example (including the initial default) replaces the reach
+      set with its unique ReachIDs across all scenarios, retaining only
+      HUC/ReachID, clearing the previous timestep lookup, and activating the
+      Scenarios to submit tab.
+      The Scenarios to submit section displays the resulting scenarios with
+      editable per-reach flows and one Select streamflow action per scenario.
+      Add one scenario is inside that tab, above the scrolling scenario list.
+      The scenario list is a keyboard-focusable scrolling region capped at
+      60vh, keeping job options outside the scrolling list.
+      Scenarios (first and active by default), Map, and Streamflows (NWM)
+      are keyboard-accessible tabs below the Reach Set builder. The streamflows tab
+      automatically loads its source panel when selected, reusing it while
+      the reach set is unchanged. Invalid reach-set guidance stays inside
+      that tab and is replaced automatically when reach edits resolve it;
+      scenario-wide flow selection is inside the
+      Scenarios tab. Switching tabs preserves map and flow state. Leaflet
+      sizing is refreshed when the map or parent Submit tab becomes visible.
+      Submission rejects blank/nonfinite/negative flows. Source/date changes,
+      workspace changes, closed panels, and changed/removed reach groups
+      invalidate pending lookups and application controls.
     - mandatory create/open workspace gate, per-user/browser last-workspace
       restoration through the API, job submission and log polling; workspace
       switches clear results/maps and ignore stale in-flight responses

@@ -9,6 +9,7 @@ const state = {
   workspace: null, workspaceVersion: 0, workspaceAction: 0, workspaceLocation: null, userId: null, scope: "",
 };
 state.workspaces = [];
+state.reachSet = [];
 
 function $(selector, root = document) { return root.querySelector(selector); }
 
@@ -115,6 +116,10 @@ function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 function activateTab(group, name, root = document) {
   for (const button of root.querySelectorAll(`[data-tabs="${group}"] button`)) {
     button.classList.toggle("active", button.dataset.tab === name);
+    if (button.getAttribute("role") === "tab") {
+      button.setAttribute("aria-selected", String(button.dataset.tab === name));
+      button.tabIndex = button.dataset.tab === name ? 0 : -1;
+    }
   }
   for (const panel of root.querySelectorAll(`[data-panel="${group}"]`)) {
     panel.hidden = panel.dataset.name !== name;
@@ -235,7 +240,11 @@ function clearActiveWorkspace({ removePreference = false } = {}) {
   state.workspaceLocation = null;
   state.currentJob = null;
   state.scenarios = [];
+  state.reachSet = [];
+  flowSelection.batchLookup++;
+  if ($("#timestep-content")) $("#timestep-content").replaceChildren();
   if ($("#scenario-editor")) renderScenarioEditor();
+  if ($("#reach-set-editor")) renderReachSet();
   if ($("#json-text")) $("#json-text").value = "";
   if ($("#input-description")) {
     $("#input-description").textContent = "Sign in and open a workspace before browsing the input dataset or using the reach map.";
@@ -248,6 +257,8 @@ function clearActiveWorkspace({ removePreference = false } = {}) {
     picker.map.remove();
     picker.map = null;
     picker.highlight = null;
+    picker.reaches = null;
+    picker.features.clear();
   }
   if (state.jobPoll) { clearTimeout(state.jobPoll); state.jobPoll = null; }
   state.viewId = (state.viewId || 0) + 1;
@@ -331,7 +342,9 @@ function showSignedOut() {
   state.scope = "";
   state.workspaces = [];
   state.scenarios = [];
+  state.reachSet = [];
   if ($("#scenario-editor")) renderScenarioEditor();
+  if ($("#reach-set-editor")) renderReachSet();
   if ($("#json-text")) $("#json-text").value = "";
   renderRememberedWorkspaces();
   syncWorkspaceGate();
@@ -755,46 +768,78 @@ function loadInputDataset() {
 
 // ---------- Scenario editor ----------
 
+function refreshTimestepSelection() {
+  if ($("#timestep-panel")?.hidden === false) openFlowSelection();
+}
+
+function renderReachSet(scrollToEnd = false) {
+  const editor = $("#reach-set-editor");
+  editor.replaceChildren();
+  refreshTimestepSelection();
+  if (picker.map) refreshReachMap();
+  if (!state.reachSet.length) {
+    editor.append(el("p", { className: "hint", text: "No reaches in the set yet." }));
+    return;
+  }
+  const rows = state.reachSet.map((reach, index) => el("tr", {},
+    el("td", {}, el("input", { value: reach.HUC, maxLength: 8, size: 9, pattern: "\\d{8}", required: true,
+      "aria-label": `HUC8 for reach ${index + 1}`,
+      oninput: (event) => {
+        reach.HUC = event.target.value.trim();
+        refreshTimestepSelection();
+      } })),
+    el("td", {}, el("input", { value: reach.ReachID, size: 12, required: true, "aria-label": `ReachID ${index + 1}`,
+      oninput: (event) => {
+        reach.ReachID = event.target.value.trim();
+        refreshTimestepSelection();
+      },
+      onchange: () => { if (picker.map) refreshReachMap(); } })),
+    el("td", {},
+      el("button", { type: "button", className: "small", text: "View on map",
+        onclick: () => openReachPicker(reach.ReachID) }),
+      " ",
+      el("button", { type: "button", className: "small", text: "Remove", onclick: () => {
+        state.reachSet.splice(index, 1);
+        renderReachSet();
+      } }))));
+  editor.append(el("table", {},
+    el("tr", {}, el("th", { text: "HUC (8 digits)" }), el("th", { text: "NWM ReachID" }),
+      el("th")),
+    rows));
+  if (scrollToEnd) editor.scrollTop = editor.scrollHeight;
+}
+
 function renderScenarioEditor() {
   const editor = $("#scenario-editor");
   editor.replaceChildren();
   state.scenarios.forEach((scenario, index) => {
     const rows = scenario.Reaches.map((reach, reachIndex) => el("tr", {},
-      el("td", {}, el("input", { value: reach.HUC, maxLength: 8, size: 9, pattern: "\\d{8}", required: true,
-        oninput: (event) => { reach.HUC = event.target.value.trim(); } })),
-      el("td", {}, el("input", { value: reach.ReachID, size: 12, required: true,
-        oninput: (event) => { reach.ReachID = event.target.value.trim(); } })),
-      el("td", {}, el("input", { type: "number", className: "num", min: 0, step: "any", value: reach.Streamflow, required: true,
-        oninput: (event) => { reach.Streamflow = event.target.value === "" ? "" : Number(event.target.value); } })),
-      el("td", {}, el("button", { type: "button", className: "small", text: "Select streamflow",
-        onclick: () => openFlowSelection(scenario, reach, reachIndex) }),
-      " ",
-      el("button", { type: "button", className: "small", text: "Pick on map",
-        onclick: () => openReachPicker(scenario, reach, reachIndex) }),
-      " ",
-      el("button", { type: "button", className: "small", text: "Remove", onclick: () => {
-        scenario.Reaches.splice(reachIndex, 1);
-        renderScenarioEditor();
-      } }))));
+      el("td", { text: reach.HUC }),
+      el("td", { text: reach.ReachID }),
+      el("td", {}, el("input", {
+        type: "number", className: "num", min: 0, step: "any", required: true,
+        value: reach.Streamflow,
+        "aria-label": `Streamflow for ${scenario.ScenarioID}, reach ${reachIndex + 1} (m³/s)`,
+        oninput: (event) => {
+          reach.Streamflow = event.target.value === "" ? "" : Number(event.target.value);
+          $("#json-text").value = JSON.stringify(state.scenarios, null, 2);
+        },
+      }))));
     editor.append(el("fieldset", {},
       el("legend", {}, "Scenario ",
-        el("input", { value: scenario.ScenarioID, required: true, placeholder: "ScenarioID",
-          oninput: (event) => { scenario.ScenarioID = event.target.value.trim(); } }),
+        el("span", { text: scenario.ScenarioID }),
+        el("button", { type: "button", className: "small", text: "Select streamflow",
+          onclick: () => openFlowSelection(scenario) }),
         el("button", { type: "button", className: "small", text: "Remove scenario", onclick: () => {
           state.scenarios.splice(index, 1);
           renderScenarioEditor();
         } })),
       el("table", {},
         el("tr", {}, el("th", { text: "HUC (8 digits)" }), el("th", { text: "NWM ReachID" }),
-          el("th", { text: "Streamflow (m³/s)" }), el("th")),
-        rows),
-      el("div", { className: "row" }, el("button", { type: "button", className: "small", text: "Add reach", onclick: () => {
-        const previous = scenario.Reaches[scenario.Reaches.length - 1];
-        scenario.Reaches.push({ HUC: previous ? previous.HUC : "", ReachID: "", Streamflow: 0 });
-        renderScenarioEditor();
-      } }))));
+          el("th", { text: "Streamflow (m³/s)" })),
+        rows)));
   });
-  if (!state.scenarios.length) editor.append(el("p", { className: "hint", text: "No scenarios yet. Load an example or add a scenario." }));
+  if (!state.scenarios.length) editor.append(el("p", { className: "hint", text: "No scenarios yet. Load an example or add one from the reach set above." }));
   $("#json-text").value = JSON.stringify(state.scenarios, null, 2);
 }
 
@@ -816,8 +861,8 @@ function setScenarios(scenarios) {
 const NLDI_COMID_URL = "https://api.water.usgs.gov/nldi/linked-data/comid";
 const WBD_URL = "https://hydro.nationalmap.gov/arcgis/rest/services/wbd/MapServer";
 const NHDPLUS_URL = "https://watersgeo.epa.gov/arcgis/rest/services/NHDPlus/NHDPlus/MapServer";
-const picker = { map: null, target: null, highlight: null, lookup: 0 };
-const flowSelection = { lookup: 0 };
+const picker = { map: null, highlight: null, reaches: null, features: new Map(), lookup: 0, render: 0 };
+const flowSelection = { lookup: 0, batchLookup: 0 };
 
 function osmLayer() {
   return L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
@@ -928,7 +973,13 @@ async function lookupReach(latlng) {
 
 function highlightReach(feature, fit) {
   if (picker.highlight) picker.highlight.remove();
-  picker.highlight = L.geoJSON(feature, { style: { color: "#d62728", weight: 5 } }).addTo(picker.map);
+  picker.highlight = L.geoJSON(feature, {
+    interactive: false,
+    style: { color: "#d62728", weight: 5 },
+    pointToLayer: (item, latlng) => L.circleMarker(latlng, {
+      radius: 8, color: "#d62728", fillOpacity: 0.8, interactive: false,
+    }),
+  }).addTo(picker.map);
   if (fit) picker.map.fitBounds(picker.highlight.getBounds(), { maxZoom: 14 });
 }
 
@@ -942,11 +993,58 @@ function ensurePickerMap() {
   map.setView([39, -98], 4);
   map.on("click", (event) => pickReachAt(event.latlng));
   picker.map = map;
+  picker.reaches = L.geoJSON(null, {
+    style: { color: "#1d5fa8", weight: 5 },
+    pointToLayer: (feature, latlng) => L.circleMarker(latlng, {
+      radius: 7, color: "#1d5fa8", fillOpacity: 0.8,
+    }),
+    onEachFeature: (feature, layer) => layer.bindTooltip(el("span", {
+      text: `Reach ${feature.properties.comid}`,
+    })),
+  }).addTo(map);
   return map;
 }
 
-function targetExists(target) {
-  return state.scenarios.some((scenario) => scenario.Reaches.includes(target));
+async function refreshReachMap(fit = false, focus = null) {
+  if (!picker.map || !picker.reaches) return;
+  const request = ++picker.render;
+  const map = picker.map;
+  const workspaceVersion = state.workspaceVersion;
+  const signature = JSON.stringify(state.reachSet.map((reach) => reach.ReachID));
+  const ids = [...new Set(state.reachSet.map((reach) => String(reach.ReachID).trim()).filter((id) => /^\d+$/.test(id)))];
+  picker.reaches.clearLayers();
+  const status = $("#picker-status");
+  status.className = "hint";
+  status.textContent = ids.length ? "Loading reach set locations…" : "Add reaches manually or click the map to build the reach set.";
+  if (!ids.length) return;
+  const failures = [];
+  for (const id of ids) {
+    let feature = picker.features.get(id);
+    try {
+      if (!feature) {
+        const body = await fetchPublicJson(`${NLDI_COMID_URL}/${encodeURIComponent(id)}`);
+        feature = body.features?.[0];
+        if (!feature) throw new Error("not found in NHDPlus");
+      }
+    } catch (error) {
+      failures.push(`Reach ${id}: ${error.message}`);
+    }
+    if (request !== picker.render || map !== picker.map || workspaceVersion !== state.workspaceVersion
+        || signature !== JSON.stringify(state.reachSet.map((reach) => reach.ReachID))) return;
+    if (feature) {
+      picker.features.set(id, feature);
+      picker.reaches.addData(feature);
+      if (focus === id) {
+        highlightReach(feature, true);
+      }
+    }
+  }
+  const bounds = picker.reaches.getBounds();
+  if (fit && bounds.isValid()) map.fitBounds(bounds, { maxZoom: 14 });
+  if (picker.highlight) picker.highlight.bringToFront();
+  status.textContent = `${ids.length - failures.length} of ${state.reachSet.length} reach-set rows shown.`
+    + (failures.length ? ` ${failures.join("; ")}` : "");
+  status.className = failures.length ? "error" : "hint";
 }
 
 // ---------- Reach streamflow lookups ----------
@@ -982,8 +1080,6 @@ const RETROSPECTIVE_RANGE = { min: "1979-02-01", max: "2023-02-01" };
 
 function roundFlow(flow) { return Number(flow.toFixed(3)); }
 
-function formatTime(value) { return new Date(value).toLocaleString(); }
-
 // Ensemble forecasts (medium/long range) publish members plus a "mean"; others publish "series".
 function nwpsPoints(section) {
   const series = section?.series ?? section?.mean;
@@ -992,23 +1088,6 @@ function nwpsPoints(section) {
   return series.data
     .filter((point) => Number.isFinite(point.flow) && point.flow >= 0)
     .map((point) => ({ time: point.validTime, flow: point.flow * factor }));
-}
-
-function applyStreamflow(flow, reach, target) {
-  if (!targetExists(target)) { showMessage("That reach row no longer exists.", true); return; }
-  if (reach.huc) target.HUC = reach.huc;
-  target.ReachID = reach.reachId;
-  target.Streamflow = roundFlow(flow);
-  renderScenarioEditor();
-  showMessage(`Set reach ${reach.reachId} streamflow to ${roundFlow(flow)} m³/s.`);
-}
-
-function flowButton(label, point, reach, target) {
-  return el("button", {
-    type: "button", className: "small", text: `${label}: ${roundFlow(point.flow)} m³/s`,
-    title: point.time ? formatTime(point.time) : undefined,
-    onclick: () => applyStreamflow(point.flow, reach, target),
-  });
 }
 
 const MAX_TIMESTEP_SCENARIOS = 240;
@@ -1022,70 +1101,148 @@ function parseUtcInput(value) { return value ? Date.parse(`${value}:00Z`) : NaN;
 
 function timestepId(time) { return `${new Date(time).toISOString().slice(0, 16).replace(/[-:]/g, "")}Z`; }
 
-// Replaces a reach row with one scenario per timestep (ScenarioID like 20180915T1800Z),
-// merging into existing timestep scenarios so several reaches can share the same times.
-function applyTimesteps(points, reach, target, closePanel) {
-  if (!targetExists(target)) { showMessage("That reach row no longer exists.", true); return; }
-  const huc = reach.huc || String(target.HUC || "");
-  if (!/^\d{8}$/.test(huc)) { showMessage("Set the row's HUC8 before making time-step scenarios.", true); return; }
-  const owner = state.scenarios.find((scenario) => scenario.Reaches.includes(target));
-  owner.Reaches.splice(owner.Reaches.indexOf(target), 1);
-  if (!owner.Reaches.length) state.scenarios.splice(state.scenarios.indexOf(owner), 1);
-  for (const point of points) {
-    const id = timestepId(point.time);
-    let scenario = state.scenarios.find((item) => item.ScenarioID === id);
-    if (!scenario) { scenario = { ScenarioID: id, Reaches: [] }; state.scenarios.push(scenario); }
-    const row = { HUC: huc, ReachID: reach.reachId, Streamflow: roundFlow(point.flow) };
-    const existing = scenario.Reaches.findIndex((item) => String(item.ReachID) === reach.reachId);
-    if (existing >= 0) scenario.Reaches[existing] = row;
-    else scenario.Reaches.push(row);
+function sharedTimesteps(reaches, series) {
+  const pointMaps = [];
+  for (const reach of reaches) {
+    const points = series.get(reach);
+    if (!points) return [];
+    const byTime = new Map();
+    for (const point of points) {
+      const time = Date.parse(point.time);
+      if (Number.isFinite(time) && Number.isFinite(point.flow) && point.flow >= 0) {
+        byTime.set(time, point);
+      }
+    }
+    pointMaps.push(byTime);
+  }
+  if (!pointMaps.length) return [];
+  return [...pointMaps[0].keys()].filter((time) => pointMaps.every((points) => points.has(time)))
+    .sort((a, b) => a - b)
+    .map((time) => ({
+      time: new Date(time).toISOString(),
+      reaches: reaches.map((reach, index) => ({ target: reach, point: pointMaps[index].get(time) })),
+    }));
+}
+
+function renderTimestepBatch(selected, series, isCurrent) {
+  if (!selected.length) return el("div");
+  const available = sharedTimesteps(selected, series);
+  if (!available.length) {
+    return el("p", { className: "hint", text: "No exact UTC timestamps are shared by every reach in the set. Choose different sources or time ranges." });
+  }
+
+  const start = el("input", {
+    type: "datetime-local", step: 3600, value: utcInputValue(Date.parse(available[0].time)),
+    min: utcInputValue(Date.parse(available[0].time)), max: utcInputValue(Date.parse(available.at(-1).time)),
+    "aria-label": "First shared time (UTC)",
+  });
+  const end = el("input", {
+    type: "datetime-local", step: 3600, value: utcInputValue(Date.parse(available.at(-1).time)),
+    min: utcInputValue(Date.parse(available[0].time)), max: utcInputValue(Date.parse(available.at(-1).time)),
+    "aria-label": "Last shared time (UTC)",
+  });
+  const every = el("select", { "aria-label": "Shared timestep interval" },
+    [1, 3, 6, 12, 24].map((hours) => el("option", { value: hours, text: `every ${hours} h` })));
+  const count = el("span", { className: "hint" });
+  const create = el("button", { type: "button", className: "small", text: "Build timestep scenarios" });
+  const chosen = () => {
+    const first = parseUtcInput(start.value);
+    const last = parseUtcInput(end.value);
+    const stepMs = Number(every.value) * HOUR_MS;
+    if (!(first <= last)) return [];
+    return available.filter((item) => {
+      const time = Date.parse(item.time);
+      return time >= first && time <= last && (time - first) % stepMs === 0;
+    });
+  };
+  const update = () => {
+    const total = chosen().length;
+    create.disabled = !total || total > MAX_TIMESTEP_SCENARIOS;
+    count.textContent = total > MAX_TIMESTEP_SCENARIOS
+      ? `${total} timesteps; choose at most ${MAX_TIMESTEP_SCENARIOS} (narrow the range or use a longer step).`
+      : `${total} shared timestep(s), with ${selected.length} reaches in each scenario.`;
+  };
+  [start, end, every].forEach((input) => input.addEventListener("input", update));
+  create.addEventListener("click", () => {
+    const times = chosen();
+    if (!isCurrent()) { showMessage("The reach set changed. Load streamflow again.", true); return; }
+    if (times.length && times.length <= MAX_TIMESTEP_SCENARIOS) applyGroupedTimesteps(times, selected, series);
+  });
+  update();
+  return el("fieldset", { className: "timestep-batch" },
+    el("legend", { text: "Build scenarios from reach timesteps" }),
+    el("p", { className: "hint", text: "Only exact UTC timestamps present for every reach in the set are used; missing samples are not interpolated." }),
+    el("div", { className: "row" },
+      el("label", { text: "From (UTC) " }, start), el("label", { text: "to " }, end), every, create, count));
+}
+
+function applyGroupedTimesteps(chosen, selected, series) {
+  if (!selected.length || chosen.length === 0 || chosen.length > MAX_TIMESTEP_SCENARIOS) return;
+  const ids = selected.map((reach) => String(reach.ReachID).trim());
+  if (ids.some((id) => !/^\d+$/.test(id)) || new Set(ids).size !== ids.length
+      || selected.some((reach) => !/^\d{8}$/.test(String(reach.HUC).trim()))) {
+    showMessage("Every reach must have a unique numeric ReachID and 8-digit HUC.", true);
+    return;
+  }
+  const available = new Map(sharedTimesteps(selected, series).map((item) => [item.time, item]));
+  const grouped = chosen.map((item) => available.get(item.time));
+  if (grouped.some((item) => !item)) {
+    showMessage("The selected shared timesteps changed. Review the timestep batch and try again.", true);
+    return;
+  }
+
+  for (const item of grouped) {
+    const id = timestepId(item.time);
+    const scenario = {
+      ScenarioID: id,
+      Reaches: item.reaches.map(({ target, point }) => ({
+        HUC: String(target.HUC).trim(),
+        ReachID: String(target.ReachID).trim(),
+        Streamflow: roundFlow(point.flow),
+      })),
+    };
+    const existing = state.scenarios.findIndex((candidate) => candidate.ScenarioID === id);
+    if (existing >= 0) state.scenarios[existing] = scenario;
+    else state.scenarios.push(scenario);
   }
   const others = state.scenarios.filter((scenario) => !TIMESTEP_ID.test(scenario.ScenarioID));
   const steps = state.scenarios.filter((scenario) => TIMESTEP_ID.test(scenario.ScenarioID))
     .sort((a, b) => a.ScenarioID.localeCompare(b.ScenarioID));
   state.scenarios.splice(0, state.scenarios.length, ...others, ...steps);
-  closePanel();
   renderScenarioEditor();
-  showMessage(`Set reach ${reach.reachId} in ${points.length} time-step scenario(s) (${steps.length} in total).`);
+  activateTab("reach-tools", "scenarios");
+  showMessage(`Built ${grouped.length} timestep scenario(s), each with ${selected.length} reaches.`);
 }
 
-function timestepForm(points, reach, target, closePanel) {
-  const times = points.map((point) => Date.parse(point.time));
-  const bounds = { min: utcInputValue(times[0]), max: utcInputValue(times[times.length - 1]) };
-  const start = el("input", { type: "datetime-local", step: 3600, ...bounds, value: bounds.min, "aria-label": "First time (UTC)" });
-  const end = el("input", { type: "datetime-local", step: 3600, ...bounds, value: bounds.max, "aria-label": "Last time (UTC)" });
-  const every = el("select", { "aria-label": "Time step" },
-    [1, 3, 6, 12, 24].map((hours) => el("option", { value: hours, text: `every ${hours} h` })));
-  const count = el("span", { className: "hint" });
-  const create = el("button", { type: "button", className: "small", text: "Create scenarios" });
-  const selected = () => {
-    const first = parseUtcInput(start.value);
-    const last = parseUtcInput(end.value);
-    const stepMs = Number(every.value) * HOUR_MS;
-    if (!(first <= last)) return [];
-    return points.filter((point, index) => times[index] >= first && times[index] <= last && (times[index] - first) % stepMs === 0);
-  };
-  const update = () => {
-    const total = selected().length;
-    create.disabled = !total || total > MAX_TIMESTEP_SCENARIOS;
-    count.textContent = total > MAX_TIMESTEP_SCENARIOS
-      ? `${total} timesteps; choose at most ${MAX_TIMESTEP_SCENARIOS} (narrow the range or use a longer step).`
-      : `${total} timestep(s) → one scenario each.`;
-  };
-  [start, end, every].forEach((input) => input.addEventListener("input", update));
-  create.addEventListener("click", () => {
-    const chosen = selected();
-    if (chosen.length && chosen.length <= MAX_TIMESTEP_SCENARIOS) applyTimesteps(chosen, reach, target, closePanel);
+function addScenarioFromReachSet() {
+  const reaches = state.reachSet;
+  if (!reaches.length) {
+    showMessage("Add at least one reach to the reach set first.", true);
+    return;
+  }
+  const ids = reaches.map((reach) => String(reach.ReachID).trim());
+  if (ids.some((id) => !/^\d+$/.test(id)) || new Set(ids).size !== ids.length
+      || reaches.some((reach) => !/^\d{8}$/.test(String(reach.HUC).trim()))) {
+    showMessage("Every reach needs a unique numeric ReachID and an 8-digit HUC.", true);
+    return;
+  }
+  let suffix = state.scenarios.length + 1;
+  let id = `scenario-${suffix}`;
+  while (state.scenarios.some((scenario) => scenario.ScenarioID === id)) {
+    suffix += 1;
+    id = `scenario-${suffix}`;
+  }
+  state.scenarios.push({
+    ScenarioID: id,
+    Reaches: reaches.map((reach) => ({
+      HUC: String(reach.HUC).trim(),
+      ReachID: String(reach.ReachID).trim(),
+      Streamflow: "",
+    })),
   });
-  update();
-  return el("details", { className: "timesteps" },
-    el("summary", { text: "Make time-step scenarios" }),
-    el("div", { className: "row" },
-      el("label", { text: "From (UTC) " }, start), el("label", { text: "to " }, end), every, create, count),
-    el("p", { className: "hint", text: "Replaces this row with one scenario per selected timestep. Repeat for other reaches over the same times to add them to the same scenarios." }));
+  renderScenarioEditor();
+  showMessage(`Added ${id} with all ${reaches.length} reaches.`);
 }
-
-function peakPoint(points) { return points.reduce((best, point) => (point.flow > best.flow ? point : best)); }
 
 function flowCoverage(points) {
   const times = points.map((point) => Date.parse(point.time));
@@ -1100,69 +1257,68 @@ function flowCoverage(points) {
     el("dd", { text: `${resolution}; ${points.length} sample(s). Missing samples are not interpolated.` }));
 }
 
-async function showNwpsFlows(container, series, reach, target, isCurrent, closePanel) {
-  container.replaceChildren(el("span", { className: "hint", text: `Loading ${series.label.toLowerCase()} from NOAA NWPS…` }));
-  const base = `${NWPS_REACHES_URL}/${encodeURIComponent(reach.reachId)}/streamflow`;
-  try {
-    const body = await fetchPublicJson(series.param ? `${base}?${query({ series: series.param })}` : base);
-    if (!isCurrent()) return;
-    const points = nwpsPoints(body[series.key]).sort((a, b) => Date.parse(a.time) - Date.parse(b.time));
-    if (!points.length) {
-      container.replaceChildren(el("span", {
-        className: "hint", text: `NWPS currently has no ${series.label.toLowerCase()} flows for this reach. Choose another source.`,
-      }));
-      return;
-    }
-    const buttons = series.param ? [] : [flowButton("Use latest", points[points.length - 1], reach, target)];
-    buttons.push(flowButton("Use peak", peakPoint(points), reach, target));
-    container.replaceChildren(flowCoverage(points),
-      el("div", { className: "row" }, buttons), timestepForm(points, reach, target, closePanel));
-  } catch (error) {
-    if (isCurrent()) container.replaceChildren(el("span", {
-      className: "error", text: `NWPS lookup failed: ${error.message}`,
-    }));
+function groupedFlowCoverage(reaches, series) {
+  const groups = new Map();
+  for (const reach of reaches) {
+    const times = [...new Set(series.get(reach).map((point) => Date.parse(point.time)))].sort((a, b) => a - b);
+    const key = times.join(",");
+    if (!groups.has(key)) groups.set(key, { times, reaches: [] });
+    groups.get(key).reaches.push(reach);
   }
+  return [...groups.values()].map((group, index) => el("div", {},
+    el("h4", { text: `Sample set ${index + 1} (${group.reaches.length} reach${group.reaches.length === 1 ? "" : "es"})` }),
+    flowCoverage(group.times.map((time) => ({ time: new Date(time).toISOString() }))),
+    el("p", { text: group.reaches.map((reach) => `Reach ${reach.ReachID} (HUC ${reach.HUC})`).join(", ") })));
 }
 
-function historicFlowControls(reach, target, isCurrent, closePanel) {
-  const start = el("input", { type: "date", ...RETROSPECTIVE_RANGE, value: "2023-01-01", required: true });
-  const end = el("input", { type: "date", ...RETROSPECTIVE_RANGE, value: "2023-01-31", required: true });
-  const output = el("div", { className: "row" });
-  const steps = el("div");
-  const button = el("button", { type: "button", className: "small", text: "Look up", onclick: async () => {
-    button.disabled = true;
-    steps.replaceChildren();
-    output.replaceChildren(el("span", { className: "hint", text: "Reading the NWM retrospective; this can take 10–30 seconds…" }));
-    try {
-      const body = await api(`/ui/streamflow/retrospective?${query({ reach_id: reach.reachId, start: start.value, end: end.value })}`);
-      if (!isCurrent()) return;
-      output.replaceChildren(
-        el("span", { text: `${body.start.slice(0, 10)} to ${body.end.slice(0, 10)}: min ${roundFlow(body.min)}, mean ${roundFlow(body.mean)} m³/s` }),
-        flowButton("Use max", { flow: body.max, time: body.max_time }, reach, target),
-        el("span", { className: "hint", text: `peak at ${formatTime(body.max_time)}` }),
-        flowButton("Use mean", { flow: body.mean }, reach, target));
-      const first = Date.parse(body.start);
-      const points = body.flows
-        .map((flow, index) => ({ time: new Date(first + index * HOUR_MS).toISOString(), flow }))
-        .filter((point) => point.flow !== null);
-      steps.replaceChildren(points.length
-        ? timestepForm(points, reach, target, closePanel)
-        : el("span", { className: "hint", text: "No hourly flows were available for this date range." }));
-    } catch (error) {
-      if (isCurrent()) output.replaceChildren(el("span", { className: "error", text: error.message }));
-    } finally {
-      button.disabled = false;
-    }
-  } });
-  return [
-    el("h4", { text: `Historic (NWM v3.0 retrospective, ${RETROSPECTIVE_RANGE.min} to ${RETROSPECTIVE_RANGE.max}, up to 92 days)` }),
-    el("div", { className: "row" }, el("label", { text: "From " }, start), el("label", { text: "to " }, end), button),
-    output,
-    steps,
-  ];
+async function fetchReachFlows(reach, source, start, end) {
+  let points;
+  if (source === "retrospective") {
+    const body = await api(`/ui/streamflow/retrospective?${query({ reach_id: reach.ReachID, start, end })}`);
+    const first = Date.parse(body.start);
+    points = body.flows.map((flow, index) => ({
+      time: new Date(first + index * HOUR_MS).toISOString(), flow,
+    }));
+  } else {
+    const series = NWPS_SERIES.find((item) => item.key === source);
+    if (!series) throw new Error("Choose a supported streamflow source.");
+    const base = `${NWPS_REACHES_URL}/${encodeURIComponent(reach.ReachID)}/streamflow`;
+    const body = await fetchPublicJson(series.param ? `${base}?${query({ series: series.param })}` : base);
+    points = nwpsPoints(body[series.key]);
+  }
+  points = points.filter((point) => Number.isFinite(Date.parse(point.time))
+    && Number.isFinite(point.flow) && point.flow >= 0)
+    .sort((a, b) => Date.parse(a.time) - Date.parse(b.time));
+  if (!points.length) throw new Error(`No streamflow samples are available for reach ${reach.ReachID}. Choose another source or date range.`);
+  return points;
 }
 
-function showStreamflows(reach, target, box, isCurrent, closePanel) {
+function applyScenarioFlows(scenario, timestep, isCurrent) {
+  if (!isCurrent()) { showMessage("The scenario changed. Load streamflow again.", true); return; }
+  if (!timestep || timestep.reaches.length !== scenario.Reaches.length
+      || timestep.reaches.some(({ target, point }, index) => target !== scenario.Reaches[index]
+        || !Number.isFinite(point.flow) || point.flow < 0)) {
+    showMessage("An exact streamflow sample is required for every reach. No flows were changed.", true);
+    return;
+  }
+  for (const { target, point } of timestep.reaches) target.Streamflow = roundFlow(point.flow);
+  renderScenarioEditor();
+  closeFlowSelection();
+  showMessage(`Set all ${scenario.Reaches.length} reach flows in ${scenario.ScenarioID} at ${timestep.time}.`);
+}
+
+function renderScenarioFlowTimes(scenario, reaches, series, isCurrent) {
+  const times = sharedTimesteps(reaches, series);
+  if (!times.length) return el("p", { className: "hint", text: "No exact UTC timestamps are shared by every reach in this scenario. Choose another source or date range. No flows were changed." });
+  const select = el("select", { "aria-label": "Scenario streamflow time (UTC)" },
+    times.map((item) => el("option", { value: item.time, text: item.time })));
+  return el("div", { className: "row" },
+    el("label", { text: "Time (UTC) " }, select),
+    el("button", { type: "button", text: "Apply to whole scenario",
+      onclick: () => applyScenarioFlows(scenario, times.find((item) => item.time === select.value), isCurrent) }));
+}
+
+function showStreamflows(scenario, reaches, box, isCurrent) {
   const source = el("select", { "aria-label": "Streamflow source" },
     NWPS_SERIES.map((series) => el("option", { value: series.key, text: series.label })),
     el("option", { value: "retrospective", text: "Historic — NWM v3.0 retrospective" }));
@@ -1194,35 +1350,103 @@ function showStreamflows(reach, target, box, isCurrent, closePanel) {
         target: "_blank", rel: "noopener noreferrer", text: "Source documentation",
       }));
     controls.replaceChildren();
-    if (historic) controls.append(...historicFlowControls(reach, target, current, closePanel));
-    else showNwpsFlows(controls, series, reach, target, current, closePanel);
+    const start = el("input", { type: "date", ...RETROSPECTIVE_RANGE, value: "2023-01-01", required: true });
+    const end = el("input", { type: "date", ...RETROSPECTIVE_RANGE, value: "2023-01-31", required: true });
+    const output = el("div");
+    const button = el("button", { type: "button", text: "Load streamflow" });
+    let request = 0;
+    const load = async () => {
+      const selectedRequest = ++request;
+      const active = () => current() && selectedRequest === request;
+      button.disabled = true;
+      output.replaceChildren(el("p", { className: "hint", text: historic
+        ? "Reading the NWM retrospective for every reach; each lookup can take 10–30 seconds…"
+        : `Loading ${series.label.toLowerCase()} for every reach…` }));
+      try {
+        if (historic && (!start.value || !end.value || start.value > end.value)) {
+          throw new Error("Choose a valid UTC date range.");
+        }
+        const loaded = new Map();
+        for (const reach of reaches) {
+          let points;
+          try { points = await fetchReachFlows(reach, source.value, start.value, end.value); }
+          catch (error) { throw new Error(`Reach ${reach.ReachID}: ${error.message}`); }
+          if (!active()) return;
+          loaded.set(reach, points);
+        }
+        output.replaceChildren(
+          ...groupedFlowCoverage(reaches, loaded),
+          scenario ? renderScenarioFlowTimes(scenario, reaches, loaded, active)
+            : renderTimestepBatch(reaches, loaded, active));
+      } catch (error) {
+        if (active()) output.replaceChildren(el("p", {
+          className: "error", text: `Streamflow lookup failed: ${error.message} No flows were changed.`,
+        }));
+      } finally {
+        if (active()) button.disabled = false;
+      }
+    };
+    button.addEventListener("click", load);
+    const invalidate = () => {
+      request++;
+      button.disabled = false;
+      output.replaceChildren(el("p", { className: "hint", text: "Date range changed. Load streamflow again." }));
+    };
+    [start, end].forEach((input) => input.addEventListener("input", invalidate));
+    if (historic) controls.append(el("div", { className: "row" },
+      el("label", { text: "From (UTC) " }, start), el("label", { text: "to " }, end)), button);
+    controls.append(output);
+    if (!historic) load();
   };
   source.addEventListener("change", update);
   box.replaceChildren(
-    el("h4", { text: `Streamflow for reach ${reach.reachId}` }),
+    el("h4", { text: `Streamflow for all ${reaches.length} reaches` }),
     el("label", { text: "Streamflow source " }, source), description, controls);
   box.hidden = false;
   update();
 }
 
-function openFlowSelection(scenario, reach, reachIndex) {
-  const reachId = String(reach.ReachID || "").trim();
-  const huc = String(reach.HUC || "").trim();
-  if (!/^\d+$/.test(reachId) || !/^\d{8}$/.test(huc)) {
-    showMessage("Enter a numeric NWM ReachID and an 8-digit HUC8 in the scenario row before selecting streamflow.", true);
+function openFlowSelection(scenario = null) {
+  if (!scenario) {
+    activateTab("reach-tools", "timesteps");
+    if (flowSelection.batchCurrent?.()) return;
+    flowSelection.batchLookup++;
+    $("#timestep-content").replaceChildren();
+  }
+  const sourceReaches = () => scenario ? scenario.Reaches : state.reachSet;
+  const reaches = sourceReaches().slice();
+  const ids = reaches.map((reach) => String(reach.ReachID).trim());
+  if (!reaches.length || new Set(ids).size !== ids.length
+      || reaches.some((reach) => !/^\d+$/.test(String(reach.ReachID).trim())
+        || !/^\d{8}$/.test(String(reach.HUC).trim()))) {
+    const message = "Add at least one reach, with unique numeric ReachIDs and 8-digit HUCs, before selecting streamflow.";
+    if (scenario) showMessage(message, true);
+    else $("#timestep-content").append(el("p", { className: "hint", text: message }));
     return;
   }
-  const lookup = ++flowSelection.lookup;
-  $("#flow-selection-title").textContent = `Scenario ${scenario.ScenarioID || "(unnamed)"}, reach ${reachIndex + 1}`;
-  $("#flow-selection").hidden = false;
+  const key = scenario ? "lookup" : "batchLookup";
+  const lookup = ++flowSelection[key];
+  const workspaceVersion = state.workspaceVersion;
+  const signatures = reaches.map((reach) => `${reach.HUC}/${reach.ReachID}`);
+  const current = () => lookup === flowSelection[key] && workspaceVersion === state.workspaceVersion
+    && (!scenario || state.scenarios.includes(scenario))
+    && sourceReaches().length === reaches.length
+    && reaches.every((reach, index) => sourceReaches()[index] === reach
+      && signatures[index] === `${reach.HUC}/${reach.ReachID}`);
+  if (scenario) {
+    $("#flow-selection-title").textContent = `Select streamflow for scenario ${scenario.ScenarioID || "(unnamed)"}`;
+    $("#flow-selection").hidden = false;
+  } else {
+    flowSelection.batchCurrent = current;
+  }
+  const content = scenario ? $("#flow-selection-content") : $("#timestep-content");
   showStreamflows(
-    { reachId, huc },
-    reach,
-    $("#flow-selection-content"),
-    () => lookup === flowSelection.lookup,
-    closeFlowSelection,
+    scenario,
+    reaches,
+    content,
+    current,
   );
-  $("#flow-selection").scrollIntoView({ block: "nearest" });
+  (scenario ? $("#flow-selection") : $("#reach-tools")).scrollIntoView({ block: "nearest" });
 }
 
 function closeFlowSelection() {
@@ -1231,127 +1455,93 @@ function closeFlowSelection() {
   $("#flow-selection-content").replaceChildren();
 }
 
-function hideStreamflows() {
-  const box = $("#picker-flows");
-  box.hidden = true;
-  box.replaceChildren();
-}
-
 async function pickReachAt(latlng) {
   const result = $("#picker-result");
   const lookup = ++picker.lookup;
   result.replaceChildren(el("span", { className: "hint", text: "Looking up reach and HUC8…" }));
-  hideStreamflows();
   try {
     const found = await lookupReach(latlng);
     if (lookup !== picker.lookup) return;
     highlightReach(found.feature, false);
     result.replaceChildren(
       el("span", { text: `ReachID ${found.reachId} in HUC8 ${found.huc} (${found.hucName})` }),
-      el("button", { type: "button", className: "primary small", text: "Use this reach", onclick: () => {
-        if (!targetExists(picker.target)) { showMessage("That reach row no longer exists.", true); return; }
-        picker.target.HUC = found.huc;
-        picker.target.ReachID = found.reachId;
-        renderScenarioEditor();
-        showMessage(`Set reach ${found.reachId} in HUC8 ${found.huc}.`);
+      el("button", { type: "button", className: "primary small", text: "Add to reach set", onclick: () => {
+        if (lookup !== picker.lookup) { showMessage("The map selection changed. Click the reach again.", true); return; }
+        if (state.reachSet.some((reach) => String(reach.ReachID).trim() === found.reachId)) {
+          showMessage(`Reach ${found.reachId} is already in the reach set.`, true);
+          return;
+        }
+        picker.features.set(found.reachId, found.feature);
+        state.reachSet.push({ HUC: found.huc, ReachID: found.reachId });
+        renderReachSet();
+        showMessage(`Added reach ${found.reachId} in HUC8 ${found.huc} to the reach set.`);
       } }));
-    showStreamflows(
-      { reachId: found.reachId, huc: found.huc },
-      picker.target,
-      $("#picker-flows"),
-      () => lookup === picker.lookup,
-      closeReachPicker,
-    );
   } catch (error) {
     if (lookup === picker.lookup) result.replaceChildren(el("span", { className: "error", text: error.message }));
   }
 }
 
-async function showCurrentReach(reachId) {
-  const lookup = ++picker.lookup;
-  try {
-    const body = await fetchPublicJson(`${NLDI_COMID_URL}/${encodeURIComponent(reachId)}`);
-    const feature = body.features?.[0];
-    if (lookup !== picker.lookup || !feature) return;
-    highlightReach(feature, true);
-    $("#picker-result").replaceChildren(el("span", { className: "hint", text: `Current ReachID ${reachId} is highlighted.` }));
-    showStreamflows(
-      { reachId, huc: String(picker.target?.HUC || "") },
-      picker.target,
-      $("#picker-flows"),
-      () => lookup === picker.lookup,
-      closeReachPicker,
-    );
-  } catch (error) {
-    if (lookup === picker.lookup) {
-      $("#picker-result").replaceChildren(el("span", { className: "hint", text: `Current ReachID ${reachId} was not found in NHDPlus.` }));
-    }
-  }
-}
-
-function openReachPicker(scenario, reach, reachIndex) {
+function openReachPicker(focus = null) {
   if (!authReady() || !state.workspace) {
     showMessage("Sign in and open a workspace before using the reach map.", true);
     return;
   }
   if (!window.L) { showMessage("The map library could not be loaded.", true); return; }
-  closeFlowSelection();
-  picker.target = reach;
-  $("#picker-title").textContent = `Pick a reach for ${scenario.ScenarioID || "this scenario"}, row ${reachIndex + 1}`;
-  $("#picker-result").replaceChildren();
-  hideStreamflows();
-  $("#reach-picker").hidden = false;
+  activateTab("reach-tools", "map");
   const map = ensurePickerMap();
   map.invalidateSize();
-  if (picker.highlight) { picker.highlight.remove(); picker.highlight = null; }
-  if (/^\d+$/.test(reach.ReachID)) showCurrentReach(reach.ReachID);
-  else picker.lookup++;
+  refreshReachMap(!focus, focus);
   $("#reach-picker").scrollIntoView({ block: "nearest" });
 }
 
 function closeReachPicker() {
-  picker.target = null;
   picker.lookup++;
-  hideStreamflows();
-  $("#reach-picker").hidden = true;
+  picker.render++;
+  if (picker.highlight) { picker.highlight.remove(); picker.highlight = null; }
+  $("#picker-result").replaceChildren();
 }
 
-function applyLoadedScenarios(scenarios, source) {
-  try {
-    setScenarios(scenarios);
-    $("#example-select").value = "";
-    showMessage(`Loaded ${state.scenarios.length} scenario(s) from ${source}.`);
-  } catch (error) {
-    showMessage(`Could not use ${source}: ${error.message}`, true);
-  }
+function setupReachTabs() {
+  const tabs = [...document.querySelectorAll('[data-tabs="reach-tools"] button')];
+  const select = (tab) => {
+    if (tab.dataset.tab === "map") openReachPicker();
+    else if (tab.dataset.tab === "timesteps") openFlowSelection();
+    else activateTab("reach-tools", tab.dataset.tab);
+  };
+  tabs.forEach((tab, index) => {
+    tab.addEventListener("click", () => select(tab));
+    tab.addEventListener("keydown", (event) => {
+      let next;
+      if (event.key === "ArrowRight") next = (index + 1) % tabs.length;
+      else if (event.key === "ArrowLeft") next = (index + tabs.length - 1) % tabs.length;
+      else if (event.key === "Home") next = 0;
+      else if (event.key === "End") next = tabs.length - 1;
+      else return;
+      event.preventDefault();
+      tabs[next].focus();
+      select(tabs[next]);
+    });
+  });
+  document.addEventListener("tabchange", (event) => {
+    if (event.detail.group === "main" && event.detail.name === "submit"
+        && picker.map && !$("#reach-picker").hidden) picker.map.invalidateSize();
+  });
 }
 
-async function uploadScenarios(event) {
-  const file = event.target.files[0];
-  event.target.value = "";
-  if (!file) return;
-  if (file.size > 2 * 1024 * 1024) { showMessage(`${file.name} is larger than 2 MiB.`, true); return; }
-  let scenarios;
-  try {
-    scenarios = JSON.parse(await file.text());
-  } catch (error) {
-    showMessage(`${file.name} is not valid JSON: ${error.message}`, true);
-    return;
+function loadExample(example) {
+  setScenarios(example.scenarios);
+  const reaches = new Map();
+  for (const scenario of state.scenarios) {
+    for (const reach of scenario.Reaches) {
+      const id = reach.ReachID.trim();
+      if (!reaches.has(id)) reaches.set(id, { HUC: reach.HUC.trim(), ReachID: id });
+    }
   }
-  applyLoadedScenarios(scenarios, file.name);
-}
-
-async function loadScenariosFromUrl(url) {
-  const button = $("#json-url-form button[type=submit]");
-  button.disabled = true;
-  try {
-    const loaded = await api(`/ui/scenarios/load?${query({ url })}`);
-    applyLoadedScenarios(loaded.scenarios, url);
-  } catch (error) {
-    showMessage(`Could not load ${url}: ${error.message}`, true);
-  } finally {
-    button.disabled = false;
-  }
+  state.reachSet = [...reaches.values()];
+  flowSelection.batchLookup++;
+  $("#timestep-content").replaceChildren();
+  renderReachSet();
+  activateTab("reach-tools", "scenarios");
 }
 
 async function loadExamples() {
@@ -1366,7 +1556,7 @@ async function loadExamples() {
   if (state.examples.length) {
     const preferred = state.examples.find((example) => example.name === "single_reach") || state.examples[0];
     select.value = preferred.name;
-    setScenarios(preferred.scenarios);
+    loadExample(preferred);
   }
 }
 
@@ -1392,6 +1582,11 @@ async function submitJob(event) {
   if (!canWriteWorkspace()) { showMessage("Submitting a job requires HydroShare write access.", true); return; }
   if (!$("#json-editor").hidden) {
     try { setScenarios(JSON.parse($("#json-text").value)); } catch (error) { showMessage(`Invalid JSON: ${error.message}`, true); return; }
+  }
+  if (state.scenarios.some((scenario) => scenario.Reaches.some((reach) =>
+    !Number.isFinite(reach.Streamflow) || reach.Streamflow < 0))) {
+    showMessage("Enter a finite nonnegative streamflow for every reach in each scenario, or use Select streamflow.", true);
+    return;
   }
   const form = event.target;
   const maxProcs = form.elements.max_procs.value;
@@ -2038,6 +2233,7 @@ async function submitCompare(event) {
     const submitted = await api("/jobs/compare", { method: "POST", json: body });
     if (workspaceVersion !== state.workspaceVersion) return;
     showMessage(`Comparison job ${submitted.job_id} submitted (${submitted.status}).`);
+    activateTab("main", "results");
     await loadJobs();
     openJob(submitted.job_id);
   } catch (error) {
@@ -2068,7 +2264,7 @@ async function start() {
   $("#workspace-switch").addEventListener("click", switchWorkspace);
   $("#example-load").addEventListener("click", () => {
     const example = state.examples.find((item) => item.name === $("#example-select").value);
-    if (example) setScenarios(example.scenarios);
+    if (example) loadExample(example);
   });
   $("#json-toggle").addEventListener("click", () => {
     const editor = $("#json-editor");
@@ -2078,42 +2274,32 @@ async function start() {
       try { setScenarios(JSON.parse($("#json-text").value)); } catch (error) { showMessage(`Invalid JSON: ${error.message}`, true); return; }
     }
     editor.hidden = !editor.hidden;
-    $("#scenario-editor").hidden = !editor.hidden;
-    $("#scenario-buttons").hidden = !editor.hidden;
+    $("#reach-set-builder").hidden = !editor.hidden;
+    $("#reach-tools").hidden = !editor.hidden;
     $("#json-toggle").textContent = editor.hidden ? "Edit as JSON" : "Edit as table";
-    if (!editor.hidden) closeReachPicker();
+    if (!editor.hidden) { closeReachPicker(); closeFlowSelection(); }
+    else activateTab("reach-tools", "scenarios");
   });
   $("#json-apply").addEventListener("click", () => {
     try { setScenarios(JSON.parse($("#json-text").value)); showMessage("JSON applied."); }
     catch (error) { showMessage(`Invalid JSON: ${error.message}`, true); }
   });
-  $("#scenario-add").addEventListener("click", () => {
-    state.scenarios.push({ ScenarioID: `scenario-${state.scenarios.length + 1}`, Reaches: [{ HUC: "", ReachID: "", Streamflow: 0 }] });
-    renderScenarioEditor();
+  $("#reach-set-add").addEventListener("click", () => {
+    state.reachSet.push({ HUC: "", ReachID: "" });
+    renderReachSet(true);
   });
-  $("#json-file").addEventListener("change", uploadScenarios);
-  $("#picker-close").addEventListener("click", closeReachPicker);
+  $("#reach-set-add-scenario").addEventListener("click", addScenarioFromReachSet);
+  setupReachTabs();
+  $("#picker-fit").addEventListener("click", () => refreshReachMap(true));
   $("#flow-selection-close").addEventListener("click", closeFlowSelection);
-  $("#json-url-form").addEventListener("submit", (event) => {
-    event.preventDefault();
-    loadScenariosFromUrl($("#json-url").value.trim());
-  });
   $("#job-options").addEventListener("submit", submitJob);
   $("#jobs-refresh").addEventListener("click", loadJobs);
   $("#compare-results").addEventListener("submit", submitCompare);
   setupJobOptions();
+  renderReachSet();
   renderScenarioEditor();
-  // /ui?scenarios_url=<url> opens the submit tab with that input once signed in.
-  const linked = new URLSearchParams(location.search).get("scenarios_url");
   const examples = loadExamples();
   await refreshAfterAuth();
-  if (linked) {
-    $("#json-url").value = linked;
-    activateTab("main", "submit");
-    await examples;
-    if (authReady() && state.workspace) await loadScenariosFromUrl(linked);
-    else showMessage("Sign in and open a workspace, then press Load URL to load the linked scenarios.");
-  }
 }
 
 document.addEventListener("DOMContentLoaded", start);

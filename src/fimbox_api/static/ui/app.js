@@ -241,7 +241,7 @@ function clearActiveWorkspace({ removePreference = false } = {}) {
     $("#input-description").textContent = "Sign in and open a workspace before browsing the input dataset or using the reach map.";
     $("#input-browser").replaceChildren();
   }
-  if ($("#open-output")) $("#open-output").reset();
+
   if ($("#compare-results")) $("#compare-results").reset();
   if ($("#reach-picker")) closeReachPicker();
   if (picker.map) {
@@ -1863,14 +1863,6 @@ function openLocation(bucket, prefix) {
   loadOutputDetails(view, bucket, prefix, null);
 }
 
-function openOutput(event) {
-  event.preventDefault();
-  const prefix = event.target.elements.prefix.value.trim();
-  const error = workspaceRelativeError(prefix, "Workspace-relative prefix");
-  if (error) { showMessage(error, true); return; }
-  openLocation(state.workspace.bucket, joinKey(state.workspace.prefix, prefix));
-}
-
 function workspaceRelativePrefix(bucket, prefix) {
   if (!state.workspace || bucket !== state.workspace.bucket) return null;
   const root = joinKey(state.workspace.prefix);
@@ -1987,7 +1979,6 @@ async function start() {
   });
   $("#job-options").addEventListener("submit", submitJob);
   $("#jobs-refresh").addEventListener("click", loadJobs);
-  $("#open-output").addEventListener("submit", openOutput);
   $("#compare-results").addEventListener("submit", submitCompare);
   setupJobOptions();
   renderScenarioEditor();

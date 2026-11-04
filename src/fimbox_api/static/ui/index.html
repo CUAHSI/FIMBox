@@ -117,11 +117,6 @@
         <aside>
           <h3>Workspace jobs <button type="button" id="jobs-refresh" class="small">Refresh</button></h3>
           <ul id="job-list" class="list"></ul>
-          <form id="open-output">
-            <h3>Open workspace output</h3>
-            <label>Workspace-relative prefix <input name="prefix" placeholder="jobs/&lt;job id&gt;/outputs" required></label>
-            <button type="submit">Open</button>
-          </form>
           <form id="compare-results">
             <h3>Compare two results</h3>
             <p class="hint">Compare two outputs inside this workspace. Creating a comparison writes a new job and requires write access.</p>
@@ -138,7 +133,7 @@
           </form>
         </aside>
         <div id="result-view">
-          <p class="hint">Select a job or open a retained output location.</p>
+          <p class="hint">Select a job to view its results.</p>
         </div>
       </div>
     </section>

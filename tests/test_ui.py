@@ -73,6 +73,8 @@ class UiTests(unittest.TestCase):
         self.assertIn("Forget only removes the browser shortcut", page)
         self.assertIn('id="workspace-create"', page)
         self.assertIn('id="workspace-open"', page)
+        self.assertNotIn('id="open-output"', page)
+        self.assertIn("Select a job to view its results.", page)
         self.assertIn("Workspace jobs", page)
         self.assertIn('name="display_name"', page)
         self.assertIn("duplicate names are allowed", page)
@@ -107,6 +109,8 @@ class UiTests(unittest.TestCase):
         self.assertIn('method: "PATCH"', script)
         self.assertIn("api(`/jobs/${jobId}`", script)
         self.assertIn('["Job ID", jobId]', script)
+        self.assertNotIn("openOutput", script)
+        self.assertNotIn("#open-output", script)
         for field in ("output_bucket", "output_prefix", "overwrite"):
             self.assertNotIn(field, submit_job)
             self.assertNotIn(field, compare_job)

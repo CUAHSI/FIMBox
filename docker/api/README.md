@@ -267,13 +267,13 @@ are not synchronized across browsers, and old saved S3 locations are not importe
     scenario shown, and the others load as the player reaches them
   - parity reports, with each scenario's diff raster on the map
 
-  The **Compare two results** form submits `POST /jobs/compare`; "Compare as
-  base"/"Compare as candidate" on an opened result fills it in. A comparison
-  job's view links to both results and shows its input parameters from the
-  base result.
+  The **Compare two results** form selects two successful jobs in the active
+  workspace and submits their retained output locations to `POST /jobs/compare`.
+  A comparison job's view links to both results and shows its input parameters
+  from the base result.
 
-  Retained output prefixes inside the active workspace can also be opened
-  directly, even after Redis metadata has expired.
+  Retained outputs can be opened from links in a job's results, even after Redis
+  metadata has expired.
 
 ### Persistent S3 workspaces
 

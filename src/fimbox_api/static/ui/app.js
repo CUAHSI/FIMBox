@@ -1321,6 +1321,7 @@ async function submitJob(event) {
 async function loadJobs() {
   const list = $("#job-list");
   if (!authReady() || !state.workspace) {
+    updateCompareJobOptions([]);
     list.replaceChildren(el("li", { className: "hint", text: "Open a workspace to list jobs." }));
     return;
   }
@@ -1328,6 +1329,7 @@ async function loadJobs() {
   try {
     const { jobs } = await api("/jobs");
     if (workspaceVersion !== state.workspaceVersion) return;
+    updateCompareJobOptions(jobs);
     list.replaceChildren(...jobs.slice().reverse().map((job) => {
       const stateLabel = job.execution_state_known === false ? `${job.status} · stale` : job.status;
       const item = el("li", { onclick: () => openJob(job.job_id) },
@@ -1341,7 +1343,29 @@ async function loadJobs() {
     if (!jobs.length) list.append(el("li", { className: "hint", text: "No jobs in this workspace." }));
   } catch (error) {
     if (workspaceVersion !== state.workspaceVersion || error.stale) return;
+    updateCompareJobOptions([]);
     list.replaceChildren(el("li", { className: "hint", text: `Could not list jobs: ${error.message}` }));
+  }
+}
+
+function updateCompareJobOptions(jobs) {
+  const completed = jobs.filter((job) => job.status === "success");
+  for (const side of ["base", "candidate"]) {
+    const select = $(`#compare-results select[name="${side}_job_id"]`);
+    if (!select) continue;
+    const selected = select.value;
+    select.replaceChildren(el("option", {
+      value: "", text: completed.length ? "Choose a completed job" : "No completed jobs available",
+      disabled: true, selected: true,
+    }), ...completed.map((job) => {
+      const shortId = job.job_id.slice(0, 8);
+      return el("option", {
+        value: job.job_id,
+        text: `${job.display_name || job.job_type || "Job"} · ${shortId}`,
+        title: job.job_id,
+      });
+    }));
+    if (completed.some((job) => job.job_id === selected)) select.value = selected;
   }
 }
 
@@ -1829,10 +1853,6 @@ async function openJob(jobId) {
     } })));
   }
   if (job.execution_state_known !== false) startLogPolling(view, jobId, job.status);
-  if (result && result.output_bucket && !compared
-      && workspaceRelativePrefix(result.output_bucket, result.output_prefix) !== null) {
-    $("dl.summary", view).after(compareButtons(result.output_bucket, result.output_prefix));
-  }
   if (result && result.output_bucket) {
     loadOutputDetails(view, result.output_bucket, result.output_prefix, result);
   } else {
@@ -1858,7 +1878,6 @@ function openLocation(bucket, prefix) {
   for (const item of document.querySelectorAll("#job-list li")) item.classList.remove("active");
   const view = newResultView(`s3://${bucket}/${prefix}`);
   addSummary(view, [["Output location", `s3://${bucket}/${prefix}`]]);
-  if (workspaceRelativePrefix(bucket, prefix) !== null) $("dl.summary", view).after(compareButtons(bucket, prefix));
   $("[data-tabs=result] [data-tab=logs]", view).hidden = true;
   loadOutputDetails(view, bucket, prefix, null);
 }
@@ -1877,44 +1896,42 @@ function locationLink(bucket, prefix) {
   } });
 }
 
-function compareButtons(bucket, prefix) {
-  const use = (side) => () => {
-    const form = $("#compare-results");
-    const relative = workspaceRelativePrefix(bucket, prefix);
-    if (relative === null) { showMessage("Comparison inputs must be inside the active workspace.", true); return; }
-    form.elements[`${side}_prefix`].value = relative;
-    form.scrollIntoView({ behavior: "smooth", block: "nearest" });
-    showMessage(`Set the comparison ${side} to ${relative}.`);
-  };
-  return el("div", { className: "row" },
-    el("button", { type: "button", text: "Compare as base", onclick: use("base") }),
-    el("button", { type: "button", text: "Compare as candidate", onclick: use("candidate") }));
-}
-
 async function submitCompare(event) {
   event.preventDefault();
   if (!requireRetainedAccess("compare results")) return;
   if (!canWriteWorkspace()) { showMessage("Creating a comparison requires HydroShare write access.", true); return; }
   const form = event.target;
   const value = (name) => form.elements[name].value.trim();
-  const baseRelative = value("base_prefix");
-  const candidateRelative = value("candidate_prefix");
-  for (const prefix of [baseRelative, candidateRelative]) {
-    const error = workspaceRelativeError(prefix, "Workspace-relative prefix");
-    if (error) { showMessage(error, true); return; }
+  const baseJobId = value("base_job_id");
+  const candidateJobId = value("candidate_job_id");
+  if (baseJobId === candidateJobId) {
+    showMessage("Choose two different workspace jobs to compare.", true);
+    return;
   }
-  const body = {
-    base_bucket: state.workspace.bucket,
-    base_prefix: joinKey(state.workspace.prefix, baseRelative),
-    candidate_bucket: state.workspace.bucket,
-    candidate_prefix: joinKey(state.workspace.prefix, candidateRelative),
-  };
   const displayName = value("display_name");
-  if (displayName) body.display_name = displayName;
   const button = $("button[type=submit]", form);
   const workspaceVersion = state.workspaceVersion;
   button.disabled = true;
   try {
+    const [baseJob, candidateJob] = await Promise.all([
+      api(`/jobs/${baseJobId}`), api(`/jobs/${candidateJobId}`),
+    ]);
+    if (workspaceVersion !== state.workspaceVersion) return;
+    for (const job of [baseJob, candidateJob]) {
+      if (job.status !== "success" || !job.result || !job.result.output_bucket || !job.result.output_prefix) {
+        throw new Error(`Job ${job.job_id} has no successful retained output to compare.`);
+      }
+      if (workspaceRelativePrefix(job.result.output_bucket, job.result.output_prefix) === null) {
+        throw new Error(`Job ${job.job_id} output is outside the active workspace.`);
+      }
+    }
+    const body = {
+      base_bucket: baseJob.result.output_bucket,
+      base_prefix: baseJob.result.output_prefix,
+      candidate_bucket: candidateJob.result.output_bucket,
+      candidate_prefix: candidateJob.result.output_prefix,
+    };
+    if (displayName) body.display_name = displayName;
     const submitted = await api("/jobs/compare", { method: "POST", json: body });
     if (workspaceVersion !== state.workspaceVersion) return;
     showMessage(`Comparison job ${submitted.job_id} submitted (${submitted.status}).`);

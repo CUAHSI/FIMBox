@@ -280,8 +280,8 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
       (play/step/slider/delay), preloading the next frame at opacity 0 and
       waiting for its tiles. Over 12 scenarios, only the first is added
       up front.
-    - a "Compare two results" form (`POST /jobs/compare`, prefilled by
-      "Compare as base/candidate" on any opened result); comparison jobs show
+    - a "Compare two results" form (`POST /jobs/compare`) that selects two
+      successful jobs from the active workspace; comparison jobs show
       base/candidate links, a parity table with "Map diff", and diff layers
   - Tests are in `tests/test_ui.py`; browser-state regressions in
     `tests/ui_workspaces.test.cjs` run through Node's built-in test runner

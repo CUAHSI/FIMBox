@@ -78,9 +78,13 @@ class UiTests(unittest.TestCase):
         self.assertIn("Workspace jobs", page)
         self.assertIn('name="display_name"', page)
         self.assertIn("duplicate names are allowed", page)
+        self.assertIn('name="base_job_id"', page)
+        self.assertIn('name="candidate_job_id"', page)
+        self.assertNotIn('name="base_prefix"', page)
+        self.assertNotIn('name="candidate_prefix"', page)
         self.assertNotIn("Your jobs", page)
         self.assertIn('href="/ui/static/app.css?v=cam-1525-job-display-names"', page)
-        self.assertIn('src="/ui/static/app.js?v=cam-1525-job-display-names"', page)
+        self.assertIn('src="/ui/static/app.js?v=cam-1525-job-select-comparison"', page)
         css = self.client.get("/ui/static/app.css?v=cam-1525-job-display-names").text
         self.assertIn("[hidden] { display: none !important; }", css)
         self.assertIn("s3://resource/&lt;resource_id&gt;/data/contents/&lt;empty_subprefix&gt;", page)
@@ -111,9 +115,17 @@ class UiTests(unittest.TestCase):
         self.assertIn('["Job ID", jobId]', script)
         self.assertNotIn("openOutput", script)
         self.assertNotIn("#open-output", script)
+        self.assertIn('jobs.filter((job) => job.status === "success")', script)
+        self.assertIn('api(`/jobs/${baseJobId}`)', script)
+        self.assertIn('api(`/jobs/${candidateJobId}`)', script)
+        self.assertIn("Choose two different workspace jobs to compare.", script)
+        self.assertIn("base_bucket: baseJob.result.output_bucket", compare_job)
+        self.assertIn("base_prefix: baseJob.result.output_prefix", compare_job)
+        self.assertIn("candidate_bucket: candidateJob.result.output_bucket", compare_job)
+        self.assertIn("candidate_prefix: candidateJob.result.output_prefix", compare_job)
         for field in ("output_bucket", "output_prefix", "overwrite"):
             self.assertNotIn(field, submit_job)
-            self.assertNotIn(field, compare_job)
+        self.assertNotIn("overwrite", compare_job)
 
     def test_ui_routes_are_not_in_openapi(self):
         self.assertFalse([path for path in main.app.openapi()["paths"] if path.startswith("/ui")])

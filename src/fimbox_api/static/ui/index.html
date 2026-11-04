@@ -9,7 +9,7 @@
   <link rel="stylesheet" href="/ui/static/app.css?v=cam-1525-job-display-names">
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
           integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="" defer></script>
-  <script src="/ui/static/app.js?v=cam-1525-job-display-names" defer></script>
+  <script src="/ui/static/app.js?v=cam-1525-job-select-comparison" defer></script>
 </head>
 <body>
   <header>
@@ -119,15 +119,23 @@
           <ul id="job-list" class="list"></ul>
           <form id="compare-results">
             <h3>Compare two results</h3>
-            <p class="hint">Compare two outputs inside this workspace. Creating a comparison writes a new job and requires write access.</p>
+            <p class="hint">Choose completed jobs from this workspace. Creating a comparison writes a new job and requires write access.</p>
             <label>Job display name <input name="display_name" maxlength="120" placeholder="Optional; duplicate names are allowed"></label>
             <fieldset>
               <legend>Base</legend>
-              <label>Workspace-relative prefix <input name="base_prefix" placeholder="jobs/&lt;job id&gt;/outputs" required></label>
+              <label>Workspace job
+                <select name="base_job_id" required>
+                  <option value="" selected disabled>Choose a completed job</option>
+                </select>
+              </label>
             </fieldset>
             <fieldset>
               <legend>Candidate</legend>
-              <label>Workspace-relative prefix <input name="candidate_prefix" placeholder="jobs/&lt;job id&gt;/outputs" required></label>
+              <label>Workspace job
+                <select name="candidate_job_id" required>
+                  <option value="" selected disabled>Choose a completed job</option>
+                </select>
+              </label>
             </fieldset>
             <button type="submit">Compare</button>
           </form>

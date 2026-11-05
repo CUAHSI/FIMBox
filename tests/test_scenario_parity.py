@@ -168,10 +168,12 @@ class LegacyStreamingScenarioParityTests(unittest.TestCase):
                     huc, Path(f"/home/output/flood_{huc}/{huc}"), dataset,
                 )
 
-            def read_index(key):
+            def read_index(key, feature_ids=None):
                 path = dataset / key
                 if not path.is_file():
                     return None
+                if key.endswith("/reaches.parquet"):
+                    return stream.read_reaches_parquet(path.read_bytes(), feature_ids or [])
                 return stream.read_index_parquet(key, path.read_bytes())
 
             reports = []
@@ -187,7 +189,9 @@ class LegacyStreamingScenarioParityTests(unittest.TestCase):
                         return str(path)
 
                     manifest = stream.run_scenario(
-                        scenario, read_index, lambda key: str(dataset / key), write_tile,
+                        scenario, read_index,
+                        lambda key: "/vsicurl/" + key if key.startswith("https://") else str(dataset / key),
+                        write_tile,
                     )
                     (folder / "manifest.json").write_bytes(stream.dumps_manifest(manifest))
                     report = compare_scenario_outputs(

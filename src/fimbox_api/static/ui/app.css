@@ -85,3 +85,12 @@ dl.summary dt { font-weight: 600; } dl.summary dd { margin: 0; word-break: break
   .header-actions { flex-wrap: wrap; }
   #workspace-name { max-width: 55vw; }
 }
+
+.file-browser .browser-scroll { max-height: 360px; overflow: auto; scrollbar-gutter: stable; border: 1px solid var(--border); }
+.file-browser .browser-scroll th { position: sticky; top: 0; background: var(--bg); }
+#input-browsers { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
+#input-browsers .file-browser { overflow-x: auto; }
+@media (max-width: 900px) { #input-browsers { grid-template-columns: 1fr; } }
+#input-browsers { grid-template-rows: auto auto 1fr; }
+#input-browsers > section { display: grid; grid-row: span 3; grid-template-rows: subgrid; margin: 0; }
+#input-browsers > section > h2, #input-browsers > section > p { margin: 0 0 8px; }

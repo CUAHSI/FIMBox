@@ -21,6 +21,11 @@ logger = logging.getLogger(__name__)
 JOB_CREDENTIALS_PREFIX = "storage:job_credentials:"
 
 
+SOURCE_BUCKET = "ciroh-owp-hand-fim"
+SOURCE_REGION = "us-east-2"
+SOURCE_ENDPOINT = f"https://s3.{SOURCE_REGION}.amazonaws.com"
+
+
 class StorageCredentialsError(RuntimeError):
     """Sanitized HydroShare credentials failure safe for task results."""
 
@@ -163,6 +168,13 @@ def anonymous_s3_client():
         endpoint_url=settings.s3_endpoint_url,
         region_name=settings.s3_region,
         config=Config(signature_version=UNSIGNED, s3={"addressing_style": settings.s3_addressing_style}),
+    )
+
+
+def source_s3_client():
+    """Unsigned reads of NOAA's public HAND-FIM source bucket on AWS."""
+    return boto3.client(
+        "s3", region_name=SOURCE_REGION, config=Config(signature_version=UNSIGNED),
     )
 
 

@@ -37,6 +37,31 @@ API after changing credentials:
 docker compose --env-file /dev/null up -d --build api
 ```
 
+### Input dataset preparation
+
+The Input dataset tab no longer submits preparation jobs (the `/ui/preparations`
+endpoints are removed). It explains the input files and has scrollable browsers
+for the NOAA source files and the prepared Parquet dataset. The Celery tasks
+below remain for running preparation outside the page. Preparation is not tied to a HAND-FIM workspace: it
+always writes to the configured input dataset location
+(`STREAM_INPUT_BUCKET`/`STREAM_INPUT_PREFIX`, for example the HydroShare
+resource's `data/contents/parquet` prefix), next to the existing input files.
+Later runs can add selected HUC8s or prepare all available HUCs ; each selected
+HUC's existing prefix is deleted and replaced with the newly prepared files.
+One run per input dataset at a time.
+
+The API submits preparation through Celery, just like other background jobs.
+Compose configures both API and worker with the same broker and Redis session
+store; no Cloud Run Job settings or Google ADC credentials are needed. Set
+`STREAM_INPUT_BUCKET` and `STREAM_INPUT_PREFIX` and restart the services. The
+configured prefix can already contain dataset objects.
+
+For host-run development, start the API and worker with the same
+`CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND`, and `REDIS_URL`; include
+`docker/handfim` on `PYTHONPATH` so the worker can import the preparation
+helpers. A local deployment and the Cloud Run worker pool use the same Celery
+task flow and runtime HydroShare session credentials.
+
 The CLI discovers whether authentication is enabled and uses a FIMBox session
 token, not the HydroShare provider token. See the [SDK and CLI guide](../../sdk/README.md)
 for login and token handling. For public deployments, use HTTPS, secure OAuth

@@ -5,11 +5,13 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import rasterio
 from rasterio.transform import Affine
@@ -33,10 +35,12 @@ stream = load("streaming_test.streamFIM", HANDFIM / "patches" / "streamFIM.py")
 prepare = load("streaming_test.prepare", HANDFIM / "prepare_streaming_dataset.py")
 
 
-def read_index(root: Path, key: str):
+def read_index(root: Path, key: str, feature_ids=None):
     path = root / key
     if not path.is_file():
         return None
+    if key.endswith("/reaches.parquet"):
+        return stream.read_reaches_parquet(path.read_bytes(), feature_ids or [])
     return stream.read_index_parquet(key, path.read_bytes())
 
 
@@ -138,6 +142,7 @@ class StreamingFimTests(unittest.TestCase):
         cls.directory = tempfile.TemporaryDirectory()
         root = Path(cls.directory.name)
         huc_dir, cls.sources, cls.rows = build_hydrofabric(root)
+        cls.huc_dir = huc_dir
         cls.dataset = root / "dataset"
         cls.metadata = prepare.prepare_huc("12090301", huc_dir, cls.dataset, block_size=128, log=lambda _: None)
 
@@ -145,8 +150,11 @@ class StreamingFimTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.directory.cleanup()
 
-    def read_prepared(self, key: str):
-        return read_index(self.dataset, key)
+    def source_path(self, key: str) -> str:
+        return str(self.huc_dir / key.removeprefix(prepare.SOURCE_HTTPS_BASE + "hand_fim_4_5_2_11/12090301/"))
+
+    def read_prepared(self, key: str, feature_ids=None):
+        return read_index(self.dataset, key, feature_ids)
 
     def run_local(self, reaches: list[dict], **kwargs) -> tuple[dict, dict[str, bytes]]:
         written = {}
@@ -157,25 +165,30 @@ class StreamingFimTests(unittest.TestCase):
 
         manifest = stream.run_scenario(
             {"ScenarioID": "s1", "Reaches": reaches}, self.read_prepared,
-            lambda key: str(self.dataset / key), write_tile, log=lambda _: None, **kwargs,
+            self.source_path, write_tile, log=lambda _: None, **kwargs,
         )
         return manifest, written
 
-    def test_prepared_cogs_are_lossless_and_index_branch_offsets(self):
+    def test_prepared_index_references_source_rasters_without_copying_them(self):
         self.assertEqual(set(self.metadata["branches"]), {"0", "1"})
         branch1 = self.metadata["branches"]["1"]
         self.assertEqual((branch1["row_off"], branch1["col_off"]), BRANCH1_OFFSET)
-        with rasterio.open(self.dataset / branch1["rem"]) as dataset:
-            self.assertEqual(dataset.block_shapes[0], (128, 128))
+        self.assertEqual(
+            branch1["rem"],
+            prepare.SOURCE_HTTPS_BASE + "hand_fim_4_5_2_11/12090301/branches/1/rem_zeroed_masked_1.tif",
+        )
+        self.assertFalse(list(self.dataset.rglob("*.tif")))
+        with rasterio.open(self.source_path(branch1["rem"])) as dataset:
             np.testing.assert_array_equal(dataset.read(1), self.sources["1"][0])
-        reach = self.read_prepared("hucs/12090301/reaches/12.parquet")
+        reach = self.read_prepared("hucs/12090301/reaches.parquet", ["12"])["12"]
         hydroids = [entry["id"] for entry in reach["branches"][0]["hydroids"]]
         self.assertEqual(hydroids, [1003, 1005])
 
     def test_parquet_is_directly_readable_and_preserves_rating_values(self):
         self.assertEqual(self.read_prepared("dataset.parquet")["version"], 3)
-        self.assertFalse(list((self.dataset / "hucs/12090301/reaches").glob("*.json")))
-        table = pq.read_table(self.dataset / "hucs/12090301/reaches/11.parquet")
+        self.assertFalse((self.dataset / "hucs/12090301/reaches").exists())
+        table = pq.read_table(self.dataset / "hucs/12090301/reaches.parquet")
+        table = table.filter(pc.equal(table["feature_id"], "11"))
         self.assertEqual(table.schema.field("hydroid").type, pa.int64())
         self.assertEqual(table.schema.field("discharge_cms").type, pa.list_(pa.float64()))
         self.assertEqual(table.schema.field("blocks").type, pa.list_(pa.list_(pa.int32(), 2)))
@@ -261,7 +274,7 @@ class StreamingFimTests(unittest.TestCase):
         for metadata in (None, {"format": stream.DATASET_FORMAT, "version": 2}):
             requested = []
 
-            def read(key):
+            def read(key, feature_ids=None):
                 requested.append(key)
                 return metadata
 
@@ -272,7 +285,7 @@ class StreamingFimTests(unittest.TestCase):
     def test_parquet_invalid_content_and_rating_lengths_fail_explicitly(self):
         with self.assertRaisesRegex(stream.StreamingInputError, "not valid Parquet"):
             stream.read_reach_parquet(b"not parquet")
-        path = self.dataset / "hucs/12090301/reaches/11.parquet"
+        path = self.dataset / "hucs/12090301/reaches.parquet"
         table = pq.read_table(path)
         rows = table.to_pylist()
         rows[0]["stage"] = []
@@ -280,7 +293,49 @@ class StreamingFimTests(unittest.TestCase):
             pq.write_table(pa.Table.from_pylist(rows, schema=table.schema), output)
             content = output.getvalue().to_pybytes()
         with self.assertRaisesRegex(stream.StreamingInputError, "invalid rating arrays"):
-            stream.read_reach_parquet(content)
+            stream.read_reaches_parquet(content, [rows[0]["feature_id"]])
+        with self.assertRaisesRegex(stream.StreamingInputError, "not valid Parquet"):
+            stream.read_reaches_parquet(b"not parquet", ["11"])
+
+    def test_reaches_are_sorted_in_row_groups_and_read_selectively(self):
+        reaches = {f"{number:04d}": [{
+            "branch": "0", "blocks": [[0, 0]],
+            "hydroids": [{"id": number, "discharge_cms": [1.0, 2.0], "stage": [0.5, 1.0]}],
+        }] for number in range(5)}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "reaches.parquet"
+            with patch.object(prepare, "REACHES_PER_GROUP", 2):
+                prepare.__dict__["__write_reaches"](path, "12090301", reaches)
+            parquet = pq.ParquetFile(path)
+            self.assertEqual(parquet.metadata.num_row_groups, 3)
+            reads = []
+            original = pq.ParquetFile.read_row_groups
+
+            def spy(file, groups, *args, **kwargs):
+                reads.append(list(groups))
+                return original(file, groups, *args, **kwargs)
+
+            with patch.object(pq.ParquetFile, "read_row_groups", spy):
+                found = stream.read_reaches_parquet(path.read_bytes(), ["0001", "0004", "9999"])
+        self.assertEqual(reads, [[0, 2]])
+        self.assertEqual(sorted(found), ["0001", "0004"])
+        self.assertEqual(found["0004"]["branches"][0]["hydroids"][0]["id"], 4)
+
+    def test_plan_falls_back_to_per_reach_files_in_older_datasets(self):
+        requested = []
+
+        def read(key, feature_ids=None):
+            requested.append(key)
+            if key.endswith("/huc.parquet"):
+                return self.read_prepared(key)
+            return None if key.endswith("/reaches.parquet") else self.read_prepared(
+                "hucs/12090301/reaches.parquet", ["11"],
+            )["11"]
+
+        _, plans, missing = stream.plan_huc("12090301", {"11": 10}, read)
+        self.assertEqual(requested[-1], "hucs/12090301/reaches/11.parquet")
+        self.assertFalse(missing)
+        self.assertTrue(plans)
 
     def test_preparation_rejects_mixing_parquet_with_a_legacy_dataset(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -388,7 +443,7 @@ class StreamingFimTests(unittest.TestCase):
         self.assertFalse(mosaic(manifest, tiles).any())
 
     def test_remote_reads_use_ranges_and_fetch_only_needed_blocks(self):
-        root = self.dataset.resolve()
+        root = self.huc_dir.resolve()
         ranges = []
 
         class Handler(BaseHTTPRequestHandler):
@@ -433,7 +488,8 @@ class StreamingFimTests(unittest.TestCase):
             with rasterio.Env(**stream.GDAL_STREAMING_OPTIONS):
                 manifest = stream.run_scenario(
                     {"ScenarioID": "remote", "Reaches": reaches}, self.read_prepared,
-                    lambda key: f"{base}/{key}", lambda name, data: name, log=lambda _: None,
+                    lambda key: f"{base}/{Path(self.source_path(key)).resolve().relative_to(root)}",
+                    lambda name, data: name, log=lambda _: None,
                 )
         finally:
             server.shutdown()
@@ -461,8 +517,8 @@ class SharedHydroIdTests(unittest.TestCase):
             output = root / "prepared"
             prepare.prepare_huc("12090301", huc_dir, output, block_size=128, log=lambda _: None)
 
-            def read_prepared(key):
-                return read_index(output, key)
+            def read_prepared(key, feature_ids=None):
+                return read_index(output, key, feature_ids)
 
             for forecasts in ({"11": 10}, {"15": 20}, {"11": 10, "15": 20}, {"15": 20, "11": 10}):
                 with self.subTest(forecasts=forecasts):
@@ -478,16 +534,15 @@ class SharedHydroIdTests(unittest.TestCase):
                     )[0], 4))
                     self.assertFalse(missing)
                     self.assertEqual(next(plan for plan in plans if plan.branch == "0").stages[1000], expected)
-            reach = read_prepared("hucs/12090301/reaches/15.parquet")
+            reach = read_prepared("hucs/12090301/reaches.parquet", ["15"])["15"]
             self.assertTrue(reach["branches"][0]["blocks"])
             self.assertIn("row_order", reach["branches"][0]["hydroids"][0])
-            for feature in ("11", "15"):
-                path = output / "hucs" / "12090301" / "reaches" / f"{feature}.parquet"
-                table = pq.read_table(path)
-                rows = table.to_pylist()
-                for row in rows:
-                    row["row_order"] = None
-                pq.write_table(pa.Table.from_pylist(rows, schema=table.schema), path)
+            path = output / "hucs" / "12090301" / "reaches.parquet"
+            table = pq.read_table(path)
+            rows = table.to_pylist()
+            for row in rows:
+                row["row_order"] = None
+            pq.write_table(pa.Table.from_pylist(rows, schema=table.schema), path)
             with self.assertRaisesRegex(stream.StreamingInputError, "needs row order"):
                 stream.plan_huc("12090301", {"11": 10, "15": 20}, read_prepared)
 
@@ -519,22 +574,22 @@ class DownloadHucTests(unittest.TestCase):
         "branches/0/gw_catchments_reaches_filtered_addedAttributes_0.tif",
         "branches/0/gw_catchments_reaches_filtered_addedAttributes_0.gpkg",
         "branches/0/hydroTable_0.csv", "branches/0/src_full_crosswalked_0.csv",
-        "branches/7/rem_zeroed_masked_7.tif", "branches/7/rem_zeroed_masked_8.tif",
+        "branches/7/hydroTable_7.csv", "branches/7/rem_zeroed_masked_8.tif",
     ]
 
     def test_downloads_only_inputs_and_resumes(self):
         with tempfile.TemporaryDirectory() as directory:
             huc_dir = Path(directory) / "flood_12090301" / "12090301"
             (huc_dir / "branches" / "7").mkdir(parents=True)
-            (huc_dir / "branches" / "7" / "rem_zeroed_masked_7.tif").write_text("existing")
+            (huc_dir / "branches" / "7" / "hydroTable_7.csv").write_text("existing")
             client = FakeS3(self.KEYS)
             prepare.download_huc("12090301", huc_dir, "4.5.2.11", client=client, log=lambda _: None)
             prefix = "hand_fim_4_5_2_11/12090301/"
             self.assertEqual(client.downloads, [(prepare.SOURCE_BUCKET, prefix + key) for key in (
-                "branch_ids.csv", "hydrotable.csv", "branches/0/rem_zeroed_masked_0.tif",
+                "branch_ids.csv", "hydrotable.csv",
                 "branches/0/gw_catchments_reaches_filtered_addedAttributes_0.tif",
             )])
-            self.assertEqual((huc_dir / "branches" / "7" / "rem_zeroed_masked_7.tif").read_text(), "existing")
+            self.assertEqual((huc_dir / "branches" / "7" / "hydroTable_7.csv").read_text(), "existing")
             self.assertFalse(list(huc_dir.rglob("*.part")))
 
             client = FakeS3(self.KEYS)

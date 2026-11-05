@@ -19,7 +19,7 @@ services:
         format: raw
     environment:
       APP_ROLE: api
-      REDIS_URL: redis://redis:6379/2
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/2}
       HYDROSHARE_OAUTH_AUTHORIZE_URL: ${HYDROSHARE_OAUTH_AUTHORIZE_URL:-https://www.hydroshare.org/o/authorize/}
       HYDROSHARE_OAUTH_TOKEN_URL: ${HYDROSHARE_OAUTH_TOKEN_URL:-https://www.hydroshare.org/o/token/}
       HYDROSHARE_USERINFO_URL: ${HYDROSHARE_USERINFO_URL:-https://www.hydroshare.org/hsapi/userInfo/}
@@ -51,7 +51,7 @@ services:
       dockerfile: docker/api/worker.Dockerfile
     environment:
       APP_ROLE: worker
-      REDIS_URL: redis://redis:6379/2
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/2}
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/1
       HAND_FIM_MAX_PROCS: ${HAND_FIM_MAX_PROCS:-1}

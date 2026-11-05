@@ -13,7 +13,7 @@ import httpx
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
-from fimbox_api import auth, main, ui
+from fimbox_api import auth, main, ui, workspaces
 
 
 def client_error(code):
@@ -76,6 +76,11 @@ class UiTests(unittest.TestCase):
         self.assertIn('id="workspace-switch"', page)
         self.assertIn('id="workspace-create"', page)
         self.assertIn('id="workspace-open"', page)
+        self.assertNotIn('id="dataset-preparation-form"', page)
+        self.assertIn('id="input-files-help"', page)
+        self.assertNotIn('id="open-input-default"', page)
+        self.assertNotIn('name="hucs"', page)
+        self.assertNotIn('name="all_hucs"', page)
         self.assertNotIn('id="open-output"', page)
         self.assertIn("Select a job to view its results.", page)
         self.assertIn("Workspace jobs", page)
@@ -87,7 +92,7 @@ class UiTests(unittest.TestCase):
         self.assertNotIn('name="candidate_prefix"', page)
         self.assertNotIn("Your jobs", page)
         self.assertIn('href="/ui/static/app.css?v=cam-1531-scrollable-reaches"', page)
-        self.assertIn('src="/ui/static/app.js?v=cam-1531-reach-tabs"', page)
+        self.assertIn('src="/ui/static/app.js?v=cam-1527-reaches"', page)
         self.assertNotIn('id="json-file"', page)
         self.assertNotIn('id="json-url-form"', page)
         self.assertNotIn('id="json-url"', page)
@@ -149,6 +154,7 @@ class UiTests(unittest.TestCase):
         self.assertNotIn("fimbox-locations:", script)
         self.assertIn("fimbox-workspace:v1:", script)
         self.assertIn("fimbox-workspaces:v1:", script)
+        self.assertNotIn("/ui/preparations", script)
         self.assertIn("X-FIMBox-Workspace", script)
         self.assertIn('api("/workspaces/open"', script)
         self.assertIn('api("/workspaces"', script)
@@ -195,6 +201,7 @@ class UiTests(unittest.TestCase):
         config = self.client.get("/ui/config").json()
         self.assertTrue(config["authentication_enabled"])
         self.assertFalse(config["streaming_enabled"])
+        self.assertNotIn("dataset_preparation_enabled", config)
         self.assertEqual(config["execution_modes"], ["fimserv-2026", "fimserv-2024"])
         self.assertIsNone(config["input_dataset"])
 
@@ -208,7 +215,14 @@ class UiTests(unittest.TestCase):
         ])
         self.assertEqual(config["input_dataset"], {
             "bucket": "resource", "prefix": "abc/data/contents", "unsigned": True,
+            "endpoint": main.settings.s3_endpoint_url,
         })
+        self.assertEqual(config["source_endpoint"], "https://s3.us-east-2.amazonaws.com")
+
+    def test_preparation_submission_routes_are_removed(self):
+        self.assertEqual(self.client.post("/ui/preparations", json={}).status_code, 404)
+        self.assertEqual(self.client.get("/ui/preparations/job-123").status_code, 404)
+        self.assertEqual(self.client.post("/ui/preparations/job-123/cancel").status_code, 404)
 
     def test_examples_include_test_data_and_skip_invalid_files(self):
         names = {example["name"] for example in self.client.get("/ui/examples").json()}
@@ -262,6 +276,30 @@ class UiTests(unittest.TestCase):
         self.anonymous_client.assert_called_once()
         self.assertEqual(self.client.get("/ui/objects", params={"bucket": "resource", "prefix": "abc/database"}).status_code, 409)
         self.assertEqual(self.client.get("/ui/objects", params={"bucket": "other", "prefix": "abc/data"}).status_code, 409)
+
+    def test_noaa_source_bucket_uses_public_source_client_only_for_hand_fim_prefixes(self):
+        source = Mock()
+        source.list_objects_v2.return_value = {}
+        source_client = self.patch(ui, "source_s3_client", return_value=source)
+        for prefix in ("", "hand_fim_4_5_2_11/03020203"):
+            response = self.client.get("/ui/objects", params={"bucket": ui.SOURCE_BUCKET, "prefix": prefix})
+            self.assertEqual(response.status_code, 200)
+        self.assertEqual(source_client.call_count, 2)
+        self.s3.list_objects_v2.return_value = {}
+        self.client.get("/ui/objects", params={"bucket": ui.SOURCE_BUCKET, "prefix": "private"})
+        self.assertEqual(source_client.call_count, 2)
+        self.assertEqual(self.client.get("/ui/config").json()["source_bucket"], ui.SOURCE_BUCKET)
+
+    def test_unsigned_download_omits_response_header_overrides(self):
+        source = Mock()
+        source.meta.config.signature_version = ui.UNSIGNED
+        source.generate_presigned_url.return_value = "https://noaa.test/f.csv"
+        self.patch(ui, "source_s3_client", return_value=source)
+        response = self.client.get("/ui/objects/download", params={
+            "bucket": ui.SOURCE_BUCKET, "key": "hand_fim_4_5_2_11/hydrotable.csv"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(source.generate_presigned_url.call_args.kwargs["Params"],
+                         {"Bucket": ui.SOURCE_BUCKET, "Key": "hand_fim_4_5_2_11/hydrotable.csv"})
 
     def test_preview_returns_truncated_text(self):
         self.s3.get_object.return_value = {"Body": io.BytesIO(b"# Title\n"), "ContentRange": "bytes 0-7/900000"}

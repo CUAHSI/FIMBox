@@ -9,7 +9,7 @@
   <link rel="stylesheet" href="/ui/static/app.css?v=cam-1531-scrollable-reaches">
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
           integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="" defer></script>
-  <script src="/ui/static/app.js?v=cam-1531-reach-tabs" defer></script>
+  <script src="/ui/static/app.js?v=cam-1527-reaches" defer></script>
 </head>
 <body>
   <header>
@@ -61,8 +61,26 @@
 
   <main id="main-content" hidden>
     <section data-panel="main" data-name="input">
-      <p class="hint" id="input-description"></p>
-      <div id="input-browser"></div>
+      <section id="input-files-help">
+        <h2>About the input files</h2>
+        <p class="hint">Streaming jobs read two sets of files; both are browsable below.</p>
+        <ul class="hint">
+          <li><strong>NOAA HAND-FIM source files</strong> (public bucket <code>ciroh-owp-hand-fim</code>, <code>hand_fim_&lt;version&gt;/&lt;huc&gt;/</code>): per-HUC branch rasters (<code>rem_zeroed_masked_&lt;branch&gt;.tif</code> and <code>gw_catchments_reaches_filtered_addedAttributes_&lt;branch&gt;.tif</code>) and rating tables (<code>hydrotable.csv</code>, <code>hydroTable_&lt;branch&gt;.csv</code>). The rasters are read in place and never copied.</li>
+          <li><strong>Prepared dataset</strong> (HydroShare resource): Parquet files only. <code>dataset.parquet</code> records the format version and block size. <code>hucs/&lt;huc&gt;/huc.parquet</code> lists each branch with links to its NOAA rasters. <code>hucs/&lt;huc&gt;/reaches.parquet</code> holds every reach's rating curves and the raster blocks its catchment covers, so a job can range-read just the requested reaches and blocks.</li>
+        </ul>
+      </section>
+      <div id="input-browsers">
+      <section id="source-dataset">
+        <h2>NOAA HAND-FIM source files</h2>
+        <p class="hint" id="source-description"></p>
+        <div id="source-browser" class="file-browser"></div>
+      </section>
+      <section id="prepared-dataset">
+        <h2>Prepared dataset (HydroShare resource)</h2>
+        <p class="hint" id="input-description"></p>
+        <div id="input-browser" class="file-browser"></div>
+      </section>
+      </div>
     </section>
 
     <section data-panel="main" data-name="submit" hidden>

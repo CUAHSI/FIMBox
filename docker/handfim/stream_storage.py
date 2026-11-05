@@ -1,11 +1,12 @@
 """S3 access for the container's ``stream-scenario`` command.
 
-Prepared hydrofabric COGs are read with GDAL range requests; reach indexes are
-read with small object GETs; output tiles are uploaded one at a time as they
+Source HAND rasters (NOAA's bucket, or relative keys in the dataset) are read with GDAL range requests; reach indexes are
+read with small object GETs or, for a HUC's reaches.parquet, ranged GETs; output tiles are uploaded one at a time as they
 are produced. Nothing is staged on the local (memory-backed) filesystem except
 the small per-scenario manifests returned to the worker.
 """
 
+import io
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -20,6 +21,8 @@ from botocore.exceptions import ClientError
 from rasterio.session import AWSSession
 
 MAX_INDEX_BYTES = 16 * 1024 * 1024
+RANGE_BLOCK_BYTES = 1024 * 1024
+NOAA_RASTER_BASE = "https://ciroh-owp-hand-fim.s3.us-east-2.amazonaws.com/"
 TILE_CONTENT_TYPE = "image/tiff; application=geotiff; profile=cloud-optimized"
 
 
@@ -65,6 +68,51 @@ class StreamConfig:
 
     def scenario_prefix(self, scenario_id: str) -> str:
         return join_key(self.output_prefix, scenario_id)
+
+
+class RangedObject(io.RawIOBase):
+    """Seekable read-only view of an S3 object that fetches aligned blocks on demand."""
+
+    def __init__(self, client, bucket: str, key: str, size: int):
+        self.__client, self.__bucket, self.__key, self.__size = client, bucket, key, size
+        self.__position = 0
+        self.__blocks: dict[int, bytes] = {}
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def tell(self) -> int:
+        return self.__position
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        base = {io.SEEK_SET: 0, io.SEEK_CUR: self.__position, io.SEEK_END: self.__size}[whence]
+        self.__position = max(0, base + offset)
+        return self.__position
+
+    def __block(self, number: int) -> bytes:
+        if number not in self.__blocks:
+            start = number * RANGE_BLOCK_BYTES
+            end = min(start + RANGE_BLOCK_BYTES, self.__size) - 1
+            response = self.__client.get_object(
+                Bucket=self.__bucket, Key=self.__key, Range=f"bytes={start}-{end}",
+            )
+            with response["Body"] as body:
+                self.__blocks[number] = body.read()
+        return self.__blocks[number]
+
+    def readinto(self, buffer) -> int:
+        wanted = min(len(buffer), self.__size - self.__position)
+        copied = 0
+        while copied < wanted:
+            number, offset = divmod(self.__position, RANGE_BLOCK_BYTES)
+            chunk = self.__block(number)[offset:offset + wanted - copied]
+            buffer[copied:copied + len(chunk)] = chunk
+            copied += len(chunk)
+            self.__position += len(chunk)
+        return copied
 
 
 def __client(config: StreamConfig, unsigned: bool):
@@ -123,8 +171,10 @@ def run_streaming(
     input_client = __client(config, config.input_unsigned)
     output_client = __client(config, False)
 
-    def read_index(key: str) -> dict | None:
+    def read_index(key: str, feature_ids=None) -> dict | None:
         location = f"s3://{config.input_bucket}/{join_key(config.input_prefix, key)}"
+        if key.endswith("/reaches.parquet"):
+            return read_reaches(key, location, feature_ids or [])
         try:
             response = input_client.get_object(
                 Bucket=config.input_bucket, Key=join_key(config.input_prefix, key),
@@ -150,7 +200,27 @@ def run_streaming(
                 "the HUC indexes and COGs from the original files."
             ) from error
 
+    def read_reaches(key: str, location: str, feature_ids) -> dict | None:
+        object_key = join_key(config.input_prefix, key)
+        try:
+            size = input_client.head_object(Bucket=config.input_bucket, Key=object_key)["ContentLength"]
+        except ClientError as error:
+            if error.response.get("Error", {}).get("Code") in {"404", "NoSuchKey", "NotFound"}:
+                return None
+            raise
+        try:
+            return stream_module.read_reaches_parquet(
+                RangedObject(input_client, config.input_bucket, object_key, size), feature_ids,
+            )
+        except stream_module.StreamingInputError as error:
+            raise RuntimeError(f"Prepared dataset index {location}: {error}") from error
+
     def raster_path(key: str) -> str:
+        if key.startswith("https://"):
+            # Source rasters are read in place from NOAA's public bucket; no other host is trusted.
+            if not key.startswith(NOAA_RASTER_BASE):
+                raise RuntimeError("Prepared dataset references an untrusted raster location")
+            return "/vsicurl/" + key
         return f"s3://{config.input_bucket}/{join_key(config.input_prefix, key)}"
 
     output_dir.mkdir(parents=True, exist_ok=True)

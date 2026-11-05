@@ -31,6 +31,7 @@ fimserve or NOAA packages. Callers supply object access functions.
 """
 
 import json
+from bisect import bisect_left
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 
@@ -65,7 +66,8 @@ GDAL_STREAMING_OPTIONS = {
     "GDAL_NUM_THREADS": 1,
 }
 
-ReadIndex = Callable[[str], dict | None]
+# (key, optional feature IDs) -> decoded table; a HUC's ``reaches.parquet`` returns reaches by feature ID.
+ReadIndex = Callable[..., dict | None]
 RasterPath = Callable[[str], str]
 WriteTile = Callable[[str, bytes], str]
 # (feature_id, requested discharge, rating discharge_cms, rating stage) in hydro-table order.
@@ -126,9 +128,51 @@ def read_index_parquet(key: str, content: bytes) -> dict:
 
 
 def read_reach_parquet(content: bytes) -> dict:
-    """Decodes a prepared Parquet reach index into the planning representation."""
+    """Decodes a single-reach Parquet index (the older per-reach layout)."""
 
-    rows = __parquet_rows(content)
+    return __reach_from_rows(__parquet_rows(content))
+
+
+def read_reaches_parquet(source, feature_ids: Iterable[str]) -> dict[str, dict]:
+    """
+    Reads the requested reaches from a HUC's ``reaches.parquet``.
+
+    The file is sorted by feature ID in row groups, so only row groups whose
+    feature ID range can contain a requested reach are read.
+
+    Arguments:
+        source: Parquet bytes or a seekable binary file (ranged reads are fine).
+        feature_ids: Feature IDs to return.
+    Returns:
+        Feature ID to planning representation; absent reaches are omitted.
+    """
+
+    wanted = sorted(set(feature_ids))
+    try:
+        parquet = pq.ParquetFile(pa.BufferReader(source) if isinstance(source, bytes) else source)
+        column = parquet.schema_arrow.get_field_index("feature_id")
+        __require(column >= 0, "Prepared reaches index is missing feature_id")
+        groups = []
+        for number in range(parquet.metadata.num_row_groups):
+            statistics = parquet.metadata.row_group(number).column(column).statistics
+            if statistics is None or not statistics.has_min_max:
+                groups.append(number)
+                continue
+            position = bisect_left(wanted, statistics.min)
+            if position < len(wanted) and wanted[position] <= statistics.max:
+                groups.append(number)
+        rows = parquet.read_row_groups(groups, use_threads=False).to_pylist() if groups else []
+    except (pa.ArrowException, OSError) as error:
+        raise StreamingInputError("Prepared dataset index is not valid Parquet") from error
+    selected = set(wanted)
+    by_reach: dict[str, list[dict]] = {}
+    for row in rows:
+        if row.get("feature_id") in selected:
+            by_reach.setdefault(row["feature_id"], []).append(row)
+    return {feature_id: __reach_from_rows(reach_rows) for feature_id, reach_rows in by_reach.items()}
+
+
+def __reach_from_rows(rows: list[dict]) -> dict:
     feature_id = rows[0].get("feature_id")
     huc = rows[0].get("huc")
     branches: dict[str, dict] = {}
@@ -289,8 +333,16 @@ def plan_huc(
     plans: dict[str, BranchPlan] = {}
     ratings: dict[tuple[str, int], list[tuple[str, float, dict]]] = {}
     missing = []
+    reaches = read_index(f"hucs/{huc}/reaches.parquet", list(discharges))
+    if reaches is None:
+        # Older datasets keep one file per reach.
+        reaches = {}
+        for feature_id in discharges:
+            reach = read_index(f"hucs/{huc}/reaches/{feature_id}.parquet")
+            if reach is not None:
+                reaches[feature_id] = reach
     for feature_id, discharge in discharges.items():
-        reach = read_index(f"hucs/{huc}/reaches/{feature_id}.parquet")
+        reach = reaches.get(feature_id)
         if reach is None:
             missing.append(feature_id)
             continue

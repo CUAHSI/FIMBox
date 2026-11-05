@@ -5,6 +5,7 @@ import json
 import re
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import boto3
@@ -22,6 +23,7 @@ DATASET_JSON_FILE = "dataset.json"
 DATASET_INFO_FILE = "dataset-info.txt"
 HUC_MARKER = "huc.parquet"
 UPLOAD_LOG_INTERVAL = 100
+UPLOAD_WORKERS = 10  # botocore's default connection pool size
 
 
 def list_hucs(client, fim_version: str = DEFAULT_FIM_VERSION) -> list[str]:
@@ -230,14 +232,18 @@ def __publish_huc(client, bucket: str, prefix: str, huc: str, output_dir: Path, 
     removed = __delete_huc_objects(client, bucket, prefix, huc)
     log(f"HUC {huc}: removed {removed} existing objects; uploading {total} files to S3")
     started = time.monotonic()
-    for number, path in enumerate(uploads, 1):
+
+    def upload(path: Path) -> None:
         content_type = "image/tiff" if path.suffix.lower() == ".tif" else "application/vnd.apache.parquet"
         client.upload_file(
             str(path), bucket, __output_key(prefix, path.relative_to(output_dir)),
             ExtraArgs={"ContentType": content_type},
         )
-        if number % UPLOAD_LOG_INTERVAL == 0:
-            log(f"HUC {huc}: uploaded {number}/{total} files ({time.monotonic() - started:.0f}s)")
+
+    with ThreadPoolExecutor(max_workers=UPLOAD_WORKERS) as pool:
+        for number, _ in enumerate(pool.map(upload, uploads), 1):
+            if number % UPLOAD_LOG_INTERVAL == 0:
+                log(f"HUC {huc}: uploaded {number}/{total} files ({time.monotonic() - started:.0f}s)")
     client.upload_file(
         str(marker), bucket, __output_key(prefix, marker.relative_to(output_dir)),
         ExtraArgs={"ContentType": "application/vnd.apache.parquet"},

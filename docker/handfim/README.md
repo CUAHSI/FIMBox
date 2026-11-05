@@ -166,8 +166,11 @@ prepared dataset can be consumed by streaming jobs when its prefix is
 configured as `stream_input_prefix`.
 
 This writes `dataset.parquet`, `hucs/<huc>/huc.parquet`, and one
-`hucs/<huc>/reaches/<feature_id>.parquet` per reach holding its rating curves and
-the 512-pixel blocks its catchments occupy. No rasters are copied: `huc.parquet`
+`hucs/<huc>/reaches.parquet` per HUC holding every reach's rating curves and
+the 512-pixel blocks its catchments occupy. Reaches are sorted by feature ID in
+row groups of 64 reaches, so jobs range-read only the row groups for the reaches
+they request. Datasets prepared earlier with one
+`reaches/<feature_id>.parquet` file per reach are still read. No rasters are copied: `huc.parquet`
 references NOAA's original tiled GeoTIFFs by https URL
 (`https://ciroh-owp-hand-fim.s3.us-east-2.amazonaws.com/...`), which workers
 range-read in place; only that host is trusted. Older datasets with relative
@@ -217,12 +220,13 @@ import pyarrow.parquet as pq
 
 dataset = pq.read_table("/data/hand-stream/dataset.parquet").to_pandas()
 branches = pq.read_table("/data/hand-stream/hucs/03020201/huc.parquet").to_pandas()
-table = pq.read_table("/data/hand-stream/hucs/03020201/reaches/8780625.parquet")
+table = pq.read_table(
+    "/data/hand-stream/hucs/03020201/reaches.parquet", filters=[("feature_id", "=", "8780625")],
+)
 ratings = table.to_pandas().explode(["discharge_cms", "stage"])
 ```
 
-Or read every reach in a HUC as one table with
-`pyarrow.dataset.dataset("/data/hand-stream/hucs/03020201/reaches", format="parquet")`.
+Omit `filters` to read every reach in the HUC as one table.
 PyArrow is included in the HAND-FIM image and the test requirements.
 
 Preparation and streaming use dataset format version 3, with Parquet-only

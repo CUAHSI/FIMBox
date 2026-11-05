@@ -5,7 +5,7 @@ layout read by ``fimserve.streamFIM``::
 
     dataset.parquet
     hucs/<huc>/huc.parquet                       branch grids and source raster URLs
-    hucs/<huc>/reaches/<feature_id>.parquet      ratings and occupied blocks
+    hucs/<huc>/reaches.parquet                   ratings and occupied blocks, all reaches
 
 No rasters are copied: huc.parquet references NOAA's original tiled GeoTIFFs in
 the public HAND-FIM bucket, which jobs read with range requests. If the HUC is
@@ -32,6 +32,7 @@ from rasterio.windows import Window
 
 DATASET_FORMAT = "fimbox-hand-stream"
 DATASET_VERSION = 3
+REACHES_PER_GROUP = 64
 LAKE_FREE = -999
 SOURCE_BUCKET = "ciroh-owp-hand-fim"
 SOURCE_REGION = "us-east-2"
@@ -147,23 +148,30 @@ def __write_huc(path: Path, metadata: dict) -> None:
     __write_parquet(path, rows, schema)
 
 
-def __write_reach(path: Path, huc: str, feature_id: str, entries: list[dict]) -> None:
+def __write_reaches(path: Path, huc: str, reaches: dict[str, list[dict]]) -> None:
+    """Writes all reaches sorted by feature ID, REACHES_PER_GROUP reaches per row group."""
+
     schema = pa.schema([
         ("huc", pa.string()), ("feature_id", pa.string()), ("branch", pa.string()),
         ("hydroid", pa.int64()), ("discharge_cms", pa.list_(pa.float64())),
         ("stage", pa.list_(pa.float64())), ("row_order", pa.list_(pa.int64())),
         ("blocks", pa.list_(pa.list_(pa.int32(), 2))),
     ])
-    rows = [
-        {
-            "huc": huc, "feature_id": feature_id, "branch": entry["branch"],
-            "hydroid": rating["id"], "discharge_cms": rating["discharge_cms"],
-            "stage": rating["stage"], "row_order": rating.get("row_order"),
-            "blocks": entry["blocks"],
-        }
-        for entry in entries for rating in entry["hydroids"]
-    ]
-    __write_parquet(path, rows, schema)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    feature_ids = sorted(reaches)
+    with pq.ParquetWriter(path, schema, compression="snappy") as writer:
+        for start in range(0, len(feature_ids), REACHES_PER_GROUP):
+            rows = [
+                {
+                    "huc": huc, "feature_id": feature_id, "branch": entry["branch"],
+                    "hydroid": rating["id"], "discharge_cms": rating["discharge_cms"],
+                    "stage": rating["stage"], "row_order": rating.get("row_order"),
+                    "blocks": entry["blocks"],
+                }
+                for feature_id in feature_ids[start:start + REACHES_PER_GROUP]
+                for entry in reaches[feature_id] for rating in entry["hydroids"]
+            ]
+            writer.write_table(pa.Table.from_pylist(rows, schema=schema))
 
 
 def __dataset_root(output_dir: Path, block_size: int, fim_version: str) -> None:
@@ -264,7 +272,7 @@ def prepare_huc(
     log: Callable[[str], None] = print,
 ) -> dict:
     """
-    Converts one HUC into per-reach Parquet block/rating tables that reference NOAA's source rasters.
+    Converts one HUC into a Parquet block/rating table of all its reaches that reference NOAA's source rasters.
 
     Arguments:
         huc: Eight-digit HUC identifier.
@@ -344,8 +352,7 @@ def prepare_huc(
                 entry["blocks"] = [list(block) for block in sorted(entry["blocks"])]
                 reaches.setdefault(feature_id, []).append(entry)
     metadata["branches"] = branches
-    for feature_id, entries in reaches.items():
-        __write_reach(huc_out / "reaches" / f"{feature_id}.parquet", huc, feature_id, entries)
+    __write_reaches(huc_out / "reaches.parquet", huc, reaches)
     # Written last so a partially prepared HUC is never discoverable.
     __write_huc(huc_out / "huc.parquet", metadata)
     log(f"Prepared HUC {huc}: {len(branches)} branches, {len(reaches)} reaches")

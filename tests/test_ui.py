@@ -92,7 +92,7 @@ class UiTests(unittest.TestCase):
         self.assertNotIn('name="candidate_prefix"', page)
         self.assertNotIn("Your jobs", page)
         self.assertIn('href="/ui/static/app.css?v=cam-1531-scrollable-reaches"', page)
-        self.assertIn('src="/ui/static/app.js?v=cam-1527-endpoints"', page)
+        self.assertIn('src="/ui/static/app.js?v=cam-1527-reaches"', page)
         self.assertNotIn('id="json-file"', page)
         self.assertNotIn('id="json-url-form"', page)
         self.assertNotIn('id="json-url"', page)

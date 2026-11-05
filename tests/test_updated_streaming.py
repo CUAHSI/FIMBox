@@ -53,7 +53,7 @@ class UpdatedStreamingNoaaTests(unittest.TestCase):
 
         manifest = self.fixtures.stream.run_scenario(
             {"ScenarioID": "s1", "Reaches": reaches},
-            lambda key: self.fixtures.read_index(self.dataset, key),
+            lambda key, ids=None: self.fixtures.read_index(self.dataset, key, ids),
             lambda key: str(self.dataset / key), write_tile, tile_size=512, log=lambda _: None,
             **({"rule": rule} if rule else {}),
         )

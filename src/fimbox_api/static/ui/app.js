@@ -761,7 +761,7 @@ function loadInputDataset() {
   }
   description.textContent = `Prepared cloud-optimized HAND hydrofabric read by streaming jobs: `
     + `s3://${dataset.bucket}/${dataset.prefix} (endpoint ${dataset.endpoint}). It holds dataset.parquet, per-HUC metadata (hucs/<huc>/huc.parquet), `
-    + `and per-reach rating Parquet files. Rasters are read in place from the NOAA source files.`;
+    + `and a per-HUC reach rating Parquet file (hucs/<huc>/reaches.parquet). Rasters are read in place from the NOAA source files.`;
   if (!dataset.unsigned && !authReady()) {
     container.replaceChildren(el("p", { className: "hint", text: "Sign in with HydroShare to browse this dataset." }));
     return;

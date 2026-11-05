@@ -706,8 +706,8 @@ uploaded tile by tile.
   request): `prepare_huc` converts a downloaded `flood_<huc>/<huc>` directory
   into `dataset.parquet`, `hucs/<huc>/huc.parquet` (written last; `rem`/`catchments`
   are NOAA https raster URLs, no rasters are copied; `stream_storage.raster_path`
-  maps them to `/vsicurl/` and only trusts the NOAA host), and per-reach Snappy-compressed Parquet files
-  with HydroID ratings
+  maps them to `/vsicurl/` and only trusts the NOAA host), and `reaches.parquet` (one Snappy Parquet file per HUC, sorted by
+  feature ID in 64-reach row groups) with HydroID ratings
   (lake rows dropped) and the COG blocks each reach occupies. `download_huc`
   (run first by the CLI) fetches only catchments/hydroTable CSV inputs from the public
   `ciroh-owp-hand-fim` bucket (us-east-2, unsigned, `hand_fim_<version>/`)
@@ -733,8 +733,11 @@ uploaded tile by tile.
   float64 `transform`, reference `width`/`height`, `block_size`; branch columns
   `branch`, `rem`, `catchments`, `row_off`, `col_off`, `branch_width`/`branch_height`.
   IDs are strings, dimensions/offsets int64, version/block size int32.
-  The reader reconstructs the planning dictionary via `read_index_parquet`.
-  Each reach
+  The reader reconstructs the planning dictionary via `read_index_parquet` and,
+  for `reaches.parquet`, `read_reaches_parquet` (row-group pruning on feature ID;
+  `stream_storage.RangedObject` serves ranged S3 reads; older per-reach
+  `reaches/<id>.parquet` files remain readable). `prepare_streaming_collection`
+  uploads HUC files with a thread pool (`UPLOAD_WORKERS`). The reaches
   table has one row per branch/HydroID, string `huc`/`feature_id`/`branch`,
   int64 `hydroid`, float64-list `discharge_cms`/`stage`, nullable int64-list
   `row_order`, and `blocks` (lists of int32 row/column pairs, union per reach

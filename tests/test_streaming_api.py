@@ -776,5 +776,27 @@ class JobEnvironmentTests(unittest.TestCase):
         self.assertEqual(environment["AWS_SECRET_ACCESS_KEY"], "b")
 
 
+class RangedObjectTests(unittest.TestCase):
+    def test_reads_are_served_from_aligned_range_blocks(self):
+        content = bytes(range(256)) * 20
+        calls = []
+
+        class Client:
+            def get_object(self, Bucket, Key, Range):
+                calls.append(Range)
+                start, end = (int(part) for part in Range.removeprefix("bytes=").split("-"))
+                return {"Body": io.BytesIO(content[start:end + 1])}
+
+        with patch.object(stream_storage, "RANGE_BLOCK_BYTES", 1000):
+            reader = stream_storage.RangedObject(Client(), "bucket", "key", len(content))
+            reader.seek(1500)
+            self.assertEqual(reader.read(600), content[1500:2100])
+            reader.seek(-10, io.SEEK_END)
+            self.assertEqual(reader.read(), content[-10:])
+            reader.seek(1600)
+            self.assertEqual(reader.read(10), content[1600:1610])
+        self.assertEqual(calls, ["bytes=1000-1999", "bytes=2000-2999", "bytes=5000-5119"])
+
+
 if __name__ == "__main__":
     unittest.main()

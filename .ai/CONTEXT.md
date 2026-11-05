@@ -210,12 +210,20 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
   672-hour x 30000-feature int32 chunk per 28 days (scale 0.01, missing
   -999900). Clips to 1979-02-01T01Z..2023-02-01T00Z, caps 92 days, raises
   `RetrospectiveError`; tested in `tests/test_retrospective.py`.
+- **`src/fimbox_api/dataset_preparations.py`** — Authenticated input-dataset
+  preparation submission and Redis run tracking. Stores a short-lived user
+  session/run context, reserves the configured input dataset, queues a Celery
+  coordinator, and tracks selected-HUC progress. It exposes no HydroShare
+  tokens or S3 credentials to the browser or Celery task arguments.
 - **`src/fimbox_api/ui.py`** — `/ui` router, excluded from OpenAPI so it is not
   part of the SDK contract:
   - `GET /ui` serves `static/ui/index.html`. `main.py` mounts `/ui/static`
     and adds CSP, nosniff, and no-referrer headers to `/ui*` responses.
   - JSON helpers for the page:
     - `/ui/config`: auth and streaming modes, plus the input dataset location
+      and the NOAA `source_bucket`. The `/ui/preparations` submit/status/cancel
+      endpoints were removed; the Celery tasks and `dataset_preparations.py`
+      remain but nothing in the API submits them.
     - `/ui/examples`: `settings.examples_dir/*.json`; the API image copies
       `test-data` and sets `EXAMPLES_DIR`
     - `/ui/objects`: one-level S3 listing
@@ -305,6 +313,12 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
     - mandatory create/open workspace gate, per-user/browser last-workspace
       restoration through the API, job submission and log polling; workspace
       switches clear results/maps and ignore stale in-flight responses
+    - Input dataset tab: an "About the input files" explanation (no preparation
+      form), then
+      two scrollable file browsers: the
+      public NOAA source bucket (`storage.source_s3_client`, unsigned, only
+      `hand_fim_*` prefixes via `ui.__s3_client`; `/ui/config` exposes
+      `source_bucket`) and, below it, the prepared input dataset resource.
     - active workspace name and switch control in the top header; workspace
       creation/opening choices appear only when no workspace is active
     - remembered `{name,location}` workspace shortcuts in `localStorage` under
@@ -539,6 +553,17 @@ credentials), Artifact Registry, runtime service accounts and scoped IAM.
 Secret Manager OAuth versions may be populated externally (null inputs, pinned
 oauth_secret_version), or managed using sensitive hydroshare_client_id/secret
 tfvars inputs (values enter state, API pins created versions).
+Preparation always writes to the configured input dataset location
+(`STREAM_INPUT_BUCKET`/`STREAM_INPUT_PREFIX`), independent of HAND-FIM
+workspaces. Preparation is queued through the existing Celery broker and
+worker pool for both local Compose and Cloud Run deployments. The coordinator
+discovers NOAA HAND-FIM HUC coverage, validates a requested set or all HUCs,
+and queues bounded batches. Workers load the session from Redis and use the
+HydroShare S3 credential helper. No S3 key/secret is injected into Terraform or
+task arguments. Per-HUC tasks publish `huc.parquet` last; root
+`dataset-info.txt` keeps stable coverage metadata and
+`preparations/<job-id>.json` stores immutable run provenance. Redis run status
+expires after seven days.
 s3_endpoint_url configures API signing and worker uploads together; it must
 accept HydroShare-issued credentials. Only the API has
 OAuth secret access. API policy always requires HydroShare authentication and
@@ -679,13 +704,14 @@ uploaded tile by tile.
 
 - **`docker/handfim/prepare_streaming_dataset.py`** — Offline tool (not run per
   request): `prepare_huc` converts a downloaded `flood_<huc>/<huc>` directory
-  into `dataset.parquet`, `hucs/<huc>/huc.parquet` (written last), lossless 512-px
-  REM/catchment COGs per branch, and per-reach Snappy-compressed Parquet files
+  into `dataset.parquet`, `hucs/<huc>/huc.parquet` (written last; `rem`/`catchments`
+  are NOAA https raster URLs, no rasters are copied; `stream_storage.raster_path`
+  maps them to `/vsicurl/` and only trusts the NOAA host), and per-reach Snappy-compressed Parquet files
   with HydroID ratings
   (lake rows dropped) and the COG blocks each reach occupies. `download_huc`
-  (run first by the CLI) fetches only those inputs from the public
+  (run first by the CLI) fetches only catchments/hydroTable CSV inputs from the public
   `ciroh-owp-hand-fim` bucket (us-east-2, unsigned, `hand_fim_<version>/`)
-  unless branch 0 rasters already exist; `.part` files make it resumable.
+  unless branch 0 catchments already exist; `.part` files make it resumable.
   Ratings are grouped by (HydroID, feature_id); shared HydroIDs retain optional
   `row_order` arrays. `streamFIM.plan_huc` merges requested features' rows in
   source order and uses the first matching row's forecast, as NOAA does.
@@ -693,6 +719,16 @@ uploaded tile by tile.
   this is supported, not rejected as an ambiguous mapping.
   Dataset version 3 uses Parquet-only metadata and reach indexes. Dataset
   metadata is a single row (`format`, `version`, `block_size`, `fim_version`).
+- **`docker/handfim/prepare_streaming_collection.py`** — Reusable dataset
+  preparation helpers called by Celery worker tasks. Lists HUCs under a NOAA
+  FIM version, validates either a requested HUC set or all HUCs, prepares each
+  in temporary storage, validates or writes root Parquet metadata, and uploads
+  HUC outputs to the configured S3 resource with the completion marker last. Each selected HUC's
+  existing `hucs/<huc>/` objects are deleted just before upload (never skipped); `dataset-info.txt` keeps
+  stable source/version/coverage metadata, while each
+  `preparations/<job-id>.json` records run selection, submitter, and
+  submission time. Celery tasks load the user's session from Redis and obtain
+  HydroShare S3 credentials through `storage.output_s3_client()`.
   HUC metadata has one row per branch: common `huc`, `crs`, six-coefficient
   float64 `transform`, reference `width`/`height`, `block_size`; branch columns
   `branch`, `rem`, `catchments`, `row_off`, `col_off`, `branch_width`/`branch_height`.
@@ -769,10 +805,18 @@ uploaded tile by tile.
   The cloud notebook reloads this helper in its map cell for existing kernels.
   The CLI has
   `--execution-mode`.
-- Terraform: `stream_input_*` variables and an optional `stream_worker` pool
-  (4Gi) consuming the `streaming-2024` queue.
+- Terraform: `stream_input_*` variables and optional `stream_worker` pool
+  consuming the streaming queue. The standard worker pool handles preparation
+  tasks through the same Celery broker as local deployments. The configured input
+  prefix can be initialized as a workspace by conditionally creating its
+  descriptor without replacing existing dataset objects.
 - Tests: `tests/test_streaming_fim.py` (NOAA-reference equality, tile-size
   invariance, range-only HTTP reads) and `tests/test_streaming_api.py`.
+- **`tests/test_prepare_streaming_collection.py`** — HUC sharding, completion
+  marker ordering/resume, HUC-set validation, dataset-version conflict, and
+  provenance persistence for the Celery preparation tasks.
+- **`tests/test_dataset_preparations.py`** — Authenticated submit, destination
+  reservation, secret-safe run models, owner-scoped status, and HUC/task counts.
 - **`tests/test_scenario_parity.py`** — Fast raster-diff regressions plus an
   opt-in real legacy/streaming scenario comparison (`FIMBOX_RUN_PARITY=1` in
   the HAND-FIM image). Runs the checkout's legacy scenario command, prepares

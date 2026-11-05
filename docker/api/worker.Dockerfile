@@ -12,10 +12,11 @@ COPY docker/handfim/patches/streamFIM.py /home/code/FIMServ/src/fimserve/streamF
 COPY docker/handfim/stream_storage.py /home/stream_storage.py
 COPY docker/handfim/noaa_stream_rule.py /home/noaa_stream_rule.py
 COPY docker/handfim/prepare_streaming_dataset.py /home/prepare_streaming_dataset.py
+COPY docker/handfim/prepare_streaming_collection.py /home/prepare_streaming_collection.py
 COPY docker/api/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh \
     && mkdir -p /home/data/inputs /home/output \
     && chown -R "${MAMBA_USER}" /home/data/inputs /home/output
 USER ${MAMBA_USER}
-ENV PYTHONPATH=/app PYTHONUNBUFFERED=1 APP_ROLE=worker
+ENV PYTHONPATH=/app:/home PYTHONUNBUFFERED=1 APP_ROLE=worker
 ENTRYPOINT ["/entrypoint.sh"]

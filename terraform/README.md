@@ -104,6 +104,31 @@ public bucket). Set `stream_worker_instance_count` to add a dedicated pool
 consumes a separate `streaming` queue; otherwise the default worker runs
 streaming jobs too.
 
+### Prepare NOAA HAND-FIM datasets
+
+Set `stream_input_bucket` and `stream_input_prefix` to the HydroShare resource
+and dataset prefix, then deploy the API and worker pool. Preparation
+uses the same Celery broker and worker path as other FIMBox jobs; no separate
+Cloud Run Job, invocation permission, or preparation-only Terraform variables
+are required.
+
+Authenticated users with HydroShare write scope can open the configured input
+prefix as the default workspace. If it has no `workspace.json`, the API creates
+only that descriptor with a conditional write, preserving existing objects.
+Users can also open or create other workspaces. They submit a source version
+and either a HUC8 set or all HUCs from the Input dataset tab. The API stores
+their session and parameters in Redis, then queues one coordinator task; it
+discovers coverage and fans out bounded HUC batches to Celery workers. Workers
+obtain HydroShare S3 credentials from the session at runtime, so credentials
+never enter Terraform or task arguments.
+
+The UI displays source details and HUC progress. Run status is kept
+in Redis for seven days; stable `dataset-info.txt` metadata and per-run
+`preparations/<job-id>.json` provenance remain in the input dataset. Each selected HUC's output prefix is deleted and replaced; its completion marker is uploaded last. Only one preparation may
+write to the input dataset at a time. Configure the worker pool's instance count and
+resources for desired preparation throughput; local Compose and Cloud Run use
+the same Celery tasks.
+
 Validate without applying:
 
 ```bash

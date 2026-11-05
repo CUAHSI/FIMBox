@@ -187,7 +187,9 @@ class LegacyStreamingScenarioParityTests(unittest.TestCase):
                         return str(path)
 
                     manifest = stream.run_scenario(
-                        scenario, read_index, lambda key: str(dataset / key), write_tile,
+                        scenario, read_index,
+                        lambda key: "/vsicurl/" + key if key.startswith("https://") else str(dataset / key),
+                        write_tile,
                     )
                     (folder / "manifest.json").write_bytes(stream.dumps_manifest(manifest))
                     report = compare_scenario_outputs(

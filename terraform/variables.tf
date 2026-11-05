@@ -157,7 +157,7 @@ variable "stream_input_bucket" {
 variable "stream_input_prefix" {
   type        = string
   default     = ""
-  description = "Key prefix of the prepared dataset (the directory containing dataset.json)."
+  description = "Key prefix of the prepared dataset (the directory containing dataset.parquet)."
 }
 
 variable "stream_input_unsigned" {
@@ -186,6 +186,7 @@ variable "stream_worker_memory" {
   default     = "4Gi"
   description = "Streaming jobs range-read inputs and upload tiles directly, so no HUC data is staged in memory."
 }
+
 
 variable "redis_memory_gb" {
   type    = number

@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
+from celery import group
 from boto3.exceptions import S3UploadFailedError
 from botocore.exceptions import BotoCoreError, ClientError
 from redis.exceptions import RedisError
@@ -759,3 +760,88 @@ def hand_fim_compare(
         output_bucket=output_bucket, output_prefix=output_prefix,
         files=files, parity=comparisons, compared=compared,
     ).model_dump(mode="json")
+
+
+@celery_app.task(name="fimbox_api.tasks.prepare_dataset")
+def prepare_dataset(job_id: str) -> None:
+    """Discover and enqueue bounded HUC batches for a prepared workspace."""
+
+    from . import dataset_preparations
+    from .auth import UserSession
+    from .storage import output_s3_client
+
+    import prepare_streaming_collection as collection
+
+    if dataset_preparations.is_cancelled(job_id):
+        return
+    context = dataset_preparations.load_run_context(job_id)
+    try:
+        source = collection.source_s3_client()
+        available_hucs = collection.list_hucs(source, context["source_version"])
+        hucs = collection.select_hucs(available_hucs, context["hucs"], context["all_hucs"])
+        session = UserSession.model_validate(context["session"])
+        output = output_s3_client(session)
+        collection.initialize_collection(
+            output_client=output,
+            output_bucket=context["destination_bucket"],
+            output_prefix=context["destination_prefix"],
+            available_hucs=available_hucs,
+            fim_version=context["source_version"],
+            run_context=context,
+        )
+        if dataset_preparations.is_cancelled(job_id):
+            return
+        dataset_preparations.mark_running(job_id, len(hucs))
+        batches = [hucs[index:index + dataset_preparations.BATCH_SIZE]
+                   for index in range(0, len(hucs), dataset_preparations.BATCH_SIZE)]
+        group(prepare_dataset_batch.s(job_id, batch) for batch in batches).apply_async()
+    except Exception as error:
+        dataset_preparations.mark_failed(job_id, f"Preparation failed ({type(error).__name__})")
+        raise
+
+
+@celery_app.task(name="fimbox_api.tasks.prepare_dataset_batch")
+def prepare_dataset_batch(job_id: str, hucs: list[str]) -> None:
+    """Prepare a batch of HUCs while recording per-HUC completion or failure."""
+
+    from . import dataset_preparations
+    from .auth import UserSession
+    from .storage import output_s3_client
+
+    import prepare_streaming_collection as collection
+
+    if dataset_preparations.is_cancelled(job_id):
+        return
+    context = dataset_preparations.load_run_context(job_id)
+    session = UserSession.model_validate(context["session"])
+    try:
+        source = collection.source_s3_client()
+        output = output_s3_client(session)
+    except Exception as error:
+        for huc in hucs:
+            dataset_preparations.mark_huc_failed(
+                job_id, huc, f"HUC {huc} failed ({type(error).__name__})",
+            )
+        raise
+    failures = []
+    for huc in hucs:
+        if dataset_preparations.is_cancelled(job_id):
+            return
+        try:
+            collection.prepare_single_huc(
+                source_client=source,
+                output_client=output,
+                output_bucket=context["destination_bucket"],
+                output_prefix=context["destination_prefix"],
+                huc=huc,
+                fim_version=context["source_version"],
+            )
+        except Exception as error:
+            dataset_preparations.mark_huc_failed(
+                job_id, huc, f"HUC {huc} failed ({type(error).__name__})",
+            )
+            failures.append(huc)
+        else:
+            dataset_preparations.mark_huc_complete(job_id, huc)
+    if failures:
+        raise RuntimeError(f"Dataset preparation failed for HUCs: {', '.join(failures)}")

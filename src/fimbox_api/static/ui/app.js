@@ -4,6 +4,7 @@
 const TOKEN_KEY = "fimbox_session_token";
 const PREVIEW_SUFFIXES = [".json", ".md", ".txt", ".csv", ".log", ".xml", ".yaml", ".yml", ".geojson"];
 const RASTER_SUFFIXES = [".cog", ".tif", ".tiff"];
+const DEFAULT_SOURCE_VERSION = "4.5.2.11";
 const state = {
   config: null, token: sessionStorage.getItem(TOKEN_KEY), scenarios: [], examples: [], jobPoll: null,
   workspace: null, workspaceVersion: 0, workspaceAction: 0, workspaceLocation: null, userId: null, scope: "",
@@ -217,8 +218,12 @@ function syncWorkspaceGate() {
     $("#workspace-name").textContent = state.workspace.name;
     $("#workspace-name").title = state.workspace.name;
   }
-  $("#main-tabs").hidden = !active;
-  $("#main-content").hidden = !active;
+  $("#main-tabs").hidden = !signedIn;
+  $("#main-content").hidden = !signedIn;
+  for (const tab of $("#main-tabs").querySelectorAll("button")) {
+    tab.disabled = !active && tab.dataset.tab !== "input";
+  }
+  if (signedIn && !active) activateTab("main", "input");
   $("#workspace-create button[type=submit]").disabled = !canWriteWorkspace();
   $("#job-options button[type=submit]").disabled = !active || !canWriteWorkspace();
   $("#compare-results button[type=submit]").disabled = !active || !canWriteWorkspace();
@@ -247,8 +252,9 @@ function clearActiveWorkspace({ removePreference = false } = {}) {
   if ($("#reach-set-editor")) renderReachSet();
   if ($("#json-text")) $("#json-text").value = "";
   if ($("#input-description")) {
-    $("#input-description").textContent = "Sign in and open a workspace before browsing the input dataset or using the reach map.";
+    $("#input-description").textContent = "Sign in before browsing the input dataset.";
     $("#input-browser").replaceChildren();
+    $("#source-browser").replaceChildren();
   }
 
   if ($("#compare-results")) $("#compare-results").reset();
@@ -473,9 +479,9 @@ async function signOut() {
 
 async function refreshAfterAuth() {
   await renderAuth();
-  if (authReady() && state.workspace) {
+  if (authReady()) {
     loadInputDataset();
-    loadJobs();
+    if (state.workspace) loadJobs();
   }
 }
 
@@ -651,7 +657,7 @@ function createBrowser(container, { bucket, root, onRaster, linkHandler }) {
   const table = el("table");
   const more = el("div", { className: "row" });
   const preview = el("div", { className: "preview", hidden: true });
-  container.replaceChildren(crumbs, table, more, preview);
+  container.replaceChildren(crumbs, el("div", { className: "browser-scroll" }, table), more, preview);
   const rootPrefix = root ? joinKey(root) + "/" : "";
 
   function renderCrumbs(prefix) {
@@ -740,8 +746,9 @@ function createBrowser(container, { bucket, root, onRaster, linkHandler }) {
 function loadInputDataset() {
   const description = $("#input-description");
   const container = $("#input-browser");
-  if (!authReady() || !state.workspace) {
-    description.textContent = "Sign in and open a workspace before browsing the input dataset or using the reach map.";
+  loadSourceBrowser();
+  if (!authReady()) {
+    description.textContent = "Sign in with HydroShare to browse input datasets.";
     container.replaceChildren();
     return;
   }
@@ -753,8 +760,8 @@ function loadInputDataset() {
     return;
   }
   description.textContent = `Prepared cloud-optimized HAND hydrofabric read by streaming jobs: `
-    + `s3://${dataset.bucket}/${dataset.prefix}. It holds dataset.parquet, per-HUC metadata (hucs/<huc>/huc.parquet), `
-    + `per-branch REM/catchment COGs, and per-reach rating Parquet files.`;
+    + `s3://${dataset.bucket}/${dataset.prefix} (endpoint ${dataset.endpoint}). It holds dataset.parquet, per-HUC metadata (hucs/<huc>/huc.parquet), `
+    + `and per-reach rating Parquet files. Rasters are read in place from the NOAA source files.`;
   if (!dataset.unsigned && !authReady()) {
     container.replaceChildren(el("p", { className: "hint", text: "Sign in with HydroShare to browse this dataset." }));
     return;
@@ -764,6 +771,18 @@ function loadInputDataset() {
     return;
   }
   createBrowser(container, { bucket: dataset.bucket, root: dataset.prefix });
+}
+
+function loadSourceBrowser() {
+  const container = $("#source-browser");
+  if (!authReady()) {
+    $("#source-description").textContent = "";
+    container.replaceChildren();
+    return;
+  }
+  const bucket = state.config.source_bucket;
+  $("#source-description").textContent = `Public NOAA/OWP HAND-FIM source data in s3://${bucket}/ (endpoint ${state.config.source_endpoint}). The prepared dataset references these rasters in place.`;
+  createBrowser(container, { bucket, root: "" }).open(`hand_fim_${DEFAULT_SOURCE_VERSION.replaceAll(".", "_")}/`);
 }
 
 // ---------- Scenario editor ----------

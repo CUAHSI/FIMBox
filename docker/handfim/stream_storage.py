@@ -1,6 +1,6 @@
 """S3 access for the container's ``stream-scenario`` command.
 
-Prepared hydrofabric COGs are read with GDAL range requests; reach indexes are
+Source HAND rasters (NOAA's bucket, or relative keys in the dataset) are read with GDAL range requests; reach indexes are
 read with small object GETs; output tiles are uploaded one at a time as they
 are produced. Nothing is staged on the local (memory-backed) filesystem except
 the small per-scenario manifests returned to the worker.
@@ -20,6 +20,7 @@ from botocore.exceptions import ClientError
 from rasterio.session import AWSSession
 
 MAX_INDEX_BYTES = 16 * 1024 * 1024
+NOAA_RASTER_BASE = "https://ciroh-owp-hand-fim.s3.us-east-2.amazonaws.com/"
 TILE_CONTENT_TYPE = "image/tiff; application=geotiff; profile=cloud-optimized"
 
 
@@ -151,6 +152,11 @@ def run_streaming(
             ) from error
 
     def raster_path(key: str) -> str:
+        if key.startswith("https://"):
+            # Source rasters are read in place from NOAA's public bucket; no other host is trusted.
+            if not key.startswith(NOAA_RASTER_BASE):
+                raise RuntimeError("Prepared dataset references an untrusted raster location")
+            return "/vsicurl/" + key
         return f"s3://{config.input_bucket}/{join_key(config.input_prefix, key)}"
 
     output_dir.mkdir(parents=True, exist_ok=True)

@@ -119,11 +119,59 @@ branch 0's rasters are already there. Interrupted downloads resume:
 python /home/prepare_streaming_dataset.py 03020201 /data/hand-stream
 ```
 
-This writes `dataset.parquet`, `hucs/<huc>/huc.parquet`, lossless 512-pixel COGs
-(`hucs/<huc>/branches/<b>/rem.tif` and `catchments.tif`), and one
+To publish directly to S3 alongside the other input files (ambient AWS
+credentials; reruns replace each selected HUC), pass the input dataset location
+instead of an output directory:
+
+```bash
+python /home/prepare_streaming_dataset.py 03020201 \
+  --output-bucket INPUT_BUCKET --output-prefix INPUT_PREFIX
+```
+
+### Preparing NOAA datasets on Cloud Run
+
+Deploy the existing Celery worker pool (or run the Compose worker). A user with
+HydroShare write scope submits preparation from the Input
+dataset tab after opening a workspace, selecting a NOAA HAND-FIM source version,
+then entering one or more HUC8s or choosing to prepare all available HUCs.
+The configured input dataset prefix is offered as the default workspace. If it
+does not yet contain `workspace.json`, FIMBox creates only that descriptor
+using a conditional write; it does not require the prefix to be empty or
+replace its existing dataset objects.
+The API stores the submitting user's session and run parameters in Redis, then
+queues a Celery coordinator task. It discovers source coverage and queues
+bounded HUC batches on the same worker queue used by other FIMBox jobs. Tasks
+retrieve the session from Redis and use the existing HydroShare credential
+exchange at runtime; S3 keys are not supplied through Terraform, task
+arguments, or the browser.
+
+The job writes into the active workspace prefix, discovers the eight-digit
+HUCs for that source version, validates requested HUCs against that coverage,
+and shards the selected sorted list across Cloud Run tasks. It publishes
+version-3 Parquet indexes only (rasters are not copied), and uploads
+`huc.parquet` last for each HUC so incomplete uploads are not marked complete.
+Tasks discard local source/prepared files after each HUC; each selected HUC is
+always re-prepared: after the new files are built, everything already under its
+`hucs/<huc>/` prefix is deleted and replaced. `dataset-info.txt` keeps
+stable source/version/coverage metadata; each immutable
+`preparations/<job-id>.json` records the selected HUCs (or all-HUC choice),
+workspace, submitter, and submission time. A source HUC fails rather than
+publishing if any listed branch lacks its required REM or catchment raster.
+
+Run status is retained in Redis for seven days; run
+provenance and dataset metadata remain with the output. Tune
+Celery worker-pool instance count and resources for desired throughput. Only
+one preparation may run against the input dataset at a time. The
+prepared dataset can be consumed by streaming jobs when its prefix is
+configured as `stream_input_prefix`.
+
+This writes `dataset.parquet`, `hucs/<huc>/huc.parquet`, and one
 `hucs/<huc>/reaches/<feature_id>.parquet` per reach holding its rating curves and
-the COG blocks its catchments occupy. Rasters remain COG GeoTIFFs for spatial
-range reads; all prepared metadata and reach indexes use Parquet.
+the 512-pixel blocks its catchments occupy. No rasters are copied: `huc.parquet`
+references NOAA's original tiled GeoTIFFs by https URL
+(`https://ciroh-owp-hand-fim.s3.us-east-2.amazonaws.com/...`), which workers
+range-read in place; only that host is trusted. Older datasets with relative
+COG keys still work.
 
 `dataset.parquet` has one row with `format` (string), `version` (int32),
 `block_size` (int32), and `fim_version` (string).

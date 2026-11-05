@@ -1,17 +1,17 @@
-"""Offline preparation of a cloud-optimized hydrofabric for streaming HAND-FIM.
+"""Offline preparation of a Parquet index for streaming HAND-FIM.
 
 Converts one downloaded FIM HUC directory (``flood_<huc>/<huc>``) into the
 layout read by ``fimserve.streamFIM``::
 
     dataset.parquet
-    hucs/<huc>/huc.parquet
-    hucs/<huc>/branches/<branch>/rem.tif         lossless COG
-    hucs/<huc>/branches/<branch>/catchments.tif  lossless COG
+    hucs/<huc>/huc.parquet                       branch grids and source raster URLs
     hucs/<huc>/reaches/<feature_id>.parquet      ratings and occupied blocks
 
-If the HUC is not available locally, only the files read here are downloaded
-from NOAA's public HAND-FIM bucket first. Publish the output directory to the
-configured HydroShare resource. It is not used during request execution.
+No rasters are copied: huc.parquet references NOAA's original tiled GeoTIFFs in
+the public HAND-FIM bucket, which jobs read with range requests. If the HUC is
+not available locally, only the files read here are downloaded first. Publish
+the output directory to the configured HydroShare resource. It is not used
+during request execution.
 """
 
 import csv
@@ -28,7 +28,6 @@ import pyarrow.parquet as pq
 import rasterio
 from botocore import UNSIGNED
 from botocore.config import Config
-from rasterio.shutil import copy as raster_copy
 from rasterio.windows import Window
 
 DATASET_FORMAT = "fimbox-hand-stream"
@@ -36,9 +35,13 @@ DATASET_VERSION = 3
 LAKE_FREE = -999
 SOURCE_BUCKET = "ciroh-owp-hand-fim"
 SOURCE_REGION = "us-east-2"
+SOURCE_HTTPS_BASE = f"https://{SOURCE_BUCKET}.s3.{SOURCE_REGION}.amazonaws.com/"
+CATCHMENTS_FILE = "gw_catchments_reaches_filtered_addedAttributes_{branch}.tif"
+REM_FILE = "rem_zeroed_masked_{branch}.tif"
+# REMs are read in place from the NOAA bucket, so only catchments are downloaded to build the index.
 SOURCE_FILES = re.compile(
-    r"(branch_ids\.csv|hydrotable\.csv|branches/(\d+)/(rem_zeroed_masked_\2\.tif"
-    r"|gw_catchments_reaches_filtered_addedAttributes_\2\.tif|hydroTable_\2\.csv))"
+    r"(branch_ids\.csv|hydrotable\.csv|branches/(\d+)/(gw_catchments_reaches_filtered_addedAttributes_\2\.tif"
+    r"|hydroTable_\2\.csv))"
 )
 
 
@@ -99,28 +102,6 @@ def __offsets(reference, dataset, branch: str) -> tuple[int, int]:
     if col < 0 or row < 0 or col + dataset.width > reference.width or row + dataset.height > reference.height:
         raise PreparationError(f"Branch {branch} extends beyond branch 0")
     return row, col
-
-
-def __write_cog(source: Path, destination: Path, block_size: int) -> None:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    raster_copy(
-        str(source), str(destination), driver="COG", COMPRESS="DEFLATE", PREDICTOR="YES",
-        BLOCKSIZE=block_size, OVERVIEWS="NONE", BIGTIFF="IF_SAFER",
-    )
-    with rasterio.open(source) as original, rasterio.open(destination) as converted:
-        same = (
-            original.dtypes[0] == converted.dtypes[0]
-            and (original.nodata == converted.nodata or (
-                original.nodata is not None and converted.nodata is not None
-                and math.isnan(original.nodata) and math.isnan(converted.nodata)))
-            and original.crs == converted.crs and original.transform == converted.transform
-            and original.shape == converted.shape
-            and converted.block_shapes[0] == (block_size, block_size)
-            and not converted.overviews(1)
-            and original.checksum(1) == converted.checksum(1)
-        )
-    if not same:
-        raise PreparationError(f"Lossless COG verification failed for {source}")
 
 
 def __occupied_blocks(path: Path, hydroids: np.ndarray, block_size: int) -> dict[int, list[list[int]]]:
@@ -215,6 +196,10 @@ def __source_prefix(huc: str, fim_version: str) -> str:
     return f"hand_fim_{fim_version.replace('.', '_')}/{huc}/"
 
 
+def source_raster_url(huc: str, branch: str, file_template: str, fim_version: str) -> str:
+    return SOURCE_HTTPS_BASE + __source_prefix(huc, fim_version) + f"branches/{branch}/" + file_template.format(branch=branch)
+
+
 def download_huc(
     huc: str,
     huc_dir: Path,
@@ -225,7 +210,8 @@ def download_huc(
     """
     Downloads the hydrofabric files read by prepare_huc unless already present.
 
-    The download is skipped when branch 0 rasters exist in huc_dir. Otherwise
+    REM rasters are not downloaded; the prepared index references them in NOAA's
+    bucket. The download is skipped when branch 0 catchments exist in huc_dir. Otherwise
     missing files are fetched from the public NOAA HAND-FIM bucket; files are
     renamed into place only when complete, so an interrupted run resumes.
 
@@ -240,8 +226,7 @@ def download_huc(
     """
 
     branch0 = huc_dir / "branches" / "0"
-    if (branch0 / "rem_zeroed_masked_0.tif").is_file() \
-            and (branch0 / "gw_catchments_reaches_filtered_addedAttributes_0.tif").is_file():
+    if (branch0 / CATCHMENTS_FILE.format(branch="0")).is_file():
         log(f"HUC {huc} found at {huc_dir}; skipping download")
         return
     prefix = __source_prefix(huc, fim_version)
@@ -279,13 +264,13 @@ def prepare_huc(
     log: Callable[[str], None] = print,
 ) -> dict:
     """
-    Converts one HUC into lossless COGs and per-reach Parquet block/rating tables.
+    Converts one HUC into per-reach Parquet block/rating tables that reference NOAA's source rasters.
 
     Arguments:
         huc: Eight-digit HUC identifier.
         huc_dir: Downloaded hydrofabric directory containing ``branches/``.
         output_dir: Dataset root to create or extend.
-        block_size: COG block size; also the index granularity.
+        block_size: Index granularity in pixels; reads are windowed on this grid.
         fim_version: Source hydrofabric version recorded in dataset.parquet.
         branches_file: Optional HUC,branch CSV; defaults to branch_ids.csv.
         log: Progress output function.
@@ -304,12 +289,15 @@ def prepare_huc(
     branch_sources = {}
     for branch in __branch_ids(huc_dir, branches_file):
         folder = huc_dir / "branches" / branch
-        rem = folder / f"rem_zeroed_masked_{branch}.tif"
-        catchments = folder / f"gw_catchments_reaches_filtered_addedAttributes_{branch}.tif"
-        if rem.is_file() and catchments.is_file():
+        catchments = folder / CATCHMENTS_FILE.format(branch=branch)
+        local_rem = folder / REM_FILE.format(branch=branch)
+        rem = local_rem if local_rem.is_file() else "/vsicurl/" + source_raster_url(
+            huc, branch, REM_FILE, fim_version,
+        )
+        if catchments.is_file():
             branch_sources[branch] = (rem, catchments)
         else:
-            log(f"Skipping branch {branch}: inundation rasters are missing")
+            log(f"Skipping branch {branch}: catchments raster is missing")
     if "0" not in branch_sources:
         raise PreparationError("Branch 0 is required as the HUC reference grid")
 
@@ -321,23 +309,25 @@ def prepare_huc(
             "width": reference.width, "height": reference.height, "block_size": block_size,
         }
         for branch, (rem, catchments) in branch_sources.items():
-            with rasterio.open(rem) as rem_dataset, rasterio.open(catchments) as catchment_dataset:
+            try:
+                rem_dataset = rasterio.open(rem)
+            except rasterio.errors.RasterioIOError as error:
+                raise PreparationError(f"Branch {branch} REM could not be opened: {error}") from error
+            with rem_dataset, rasterio.open(catchments) as catchment_dataset:
                 row_off, col_off = __offsets(reference, rem_dataset, branch)
                 if __offsets(reference, catchment_dataset, branch) != (row_off, col_off) \
                         or rem_dataset.shape != catchment_dataset.shape:
                     raise PreparationError(f"Branch {branch} REM and catchments are not aligned")
                 shape = rem_dataset.shape
-            prefix = f"hucs/{huc}/branches/{branch}"
-            log(f"Converting branch {branch} rasters to COG")
-            __write_cog(rem, output_dir / prefix / "rem.tif", block_size)
-            __write_cog(catchments, output_dir / prefix / "catchments.tif", block_size)
+            log(f"Indexing branch {branch}")
             branches[branch] = {
-                "rem": f"{prefix}/rem.tif", "catchments": f"{prefix}/catchments.tif",
+                "rem": source_raster_url(huc, branch, REM_FILE, fim_version),
+                "catchments": source_raster_url(huc, branch, CATCHMENTS_FILE, fim_version),
                 "row_off": row_off, "col_off": col_off, "height": shape[0], "width": shape[1],
             }
             ratings = __read_ratings(huc_dir, branch)
             blocks = __occupied_blocks(
-                output_dir / prefix / "catchments.tif",
+                catchments,
                 np.array(sorted({hydroid for hydroid, _ in ratings}), dtype=np.int64), block_size,
             )
             per_feature: dict[str, dict] = {}
@@ -369,7 +359,9 @@ if __name__ == "__main__":
 
     def main(
         huc: str = typer.Argument(..., help="Eight-digit HUC identifier."),
-        output_dir: Path = typer.Argument(..., help="Dataset root to create or extend."),
+        output_dir: Optional[Path] = typer.Argument(
+            None, help="Local dataset root to create or extend. Omit when using --output-bucket.",
+        ),
         huc_dir: Optional[Path] = typer.Option(
             None, help="Local flood_<huc>/<huc> directory; downloaded if missing. "
                        "Defaults to output/flood_<huc>/<huc>.",
@@ -377,7 +369,30 @@ if __name__ == "__main__":
         block_size: int = typer.Option(512, help="COG block size and index granularity."),
         fim_version: str = typer.Option("4.5.2.11", help="Source hydrofabric version."),
         branches_file: Optional[Path] = typer.Option(None, help="Optional HUC,branch CSV."),
+        output_bucket: Optional[str] = typer.Option(
+            None, help="Publish to S3 next to the other input files; uses ambient AWS credentials.",
+        ),
+        output_prefix: str = typer.Option("", help="S3 key prefix of the input dataset."),
     ) -> None:
+        if bool(output_dir) == bool(output_bucket):
+            raise typer.BadParameter("Provide exactly one of OUTPUT_DIR or --output-bucket")
+        if output_bucket:
+            import prepare_streaming_collection as collection
+
+            if branches_file or huc_dir:
+                raise typer.BadParameter("--huc-dir and --branches-file apply only to local output")
+            client = boto3.client("s3")
+            source = collection.source_s3_client()
+            collection.initialize_collection(
+                output_client=client, output_bucket=output_bucket, output_prefix=output_prefix,
+                available_hucs=collection.list_hucs(source, fim_version), fim_version=fim_version, block_size=block_size,
+            )
+            collection.prepare_single_huc(
+                source_client=source, output_client=client,
+                output_bucket=output_bucket, output_prefix=output_prefix,
+                huc=huc, fim_version=fim_version, block_size=block_size,
+            )
+            return
         huc_dir = huc_dir or Path("output") / f"flood_{huc}" / huc
         download_huc(huc, huc_dir, fim_version)
         prepare_huc(huc, huc_dir, output_dir, block_size, fim_version, branches_file)

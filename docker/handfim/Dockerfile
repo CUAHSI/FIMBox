@@ -83,10 +83,10 @@ COPY entry.py /home/entry.py
 COPY stream_storage.py /home/stream_storage.py
 COPY noaa_stream_rule.py /home/noaa_stream_rule.py
 COPY prepare_streaming_dataset.py /home/prepare_streaming_dataset.py
+COPY prepare_streaming_collection.py /home/prepare_streaming_collection.py
 RUN mkdir -p /home/data/inputs
 
 # Set bash as the default command
 ENTRYPOINT ["/opt/conda/bin/python", "entry.py"]
 CMD ["--help"]
-
 

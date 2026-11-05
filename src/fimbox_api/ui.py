@@ -17,6 +17,7 @@ import httpx
 import pyarrow as pa
 import pyarrow.parquet as pq
 import zstandard
+from botocore import UNSIGNED
 from botocore.exceptions import ClientError
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, Response
@@ -27,7 +28,7 @@ from .auth import UserSession, get_authenticated_session
 from .config import settings
 from .models import ExecutionMode
 from .rasters import raster_preview
-from .storage import RasterSource, anonymous_s3_client, output_s3_client
+from .storage import SOURCE_BUCKET, SOURCE_ENDPOINT, RasterSource, anonymous_s3_client, output_s3_client, source_s3_client
 
 logger = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).parent / "static" / "ui"
@@ -50,12 +51,15 @@ class InputDataset(BaseModel):
     bucket: str
     prefix: str
     unsigned: bool
+    endpoint: str
 
 
 class UiConfig(BaseModel):
     authentication_enabled: bool
     require_hydroshare_output: bool
     streaming_enabled: bool
+    source_bucket: str
+    source_endpoint: str
     execution_modes: list[ExecutionMode]
     input_dataset: InputDataset | None
 
@@ -135,11 +139,14 @@ def ui_config() -> UiConfig:
         authentication_enabled=settings.authentication_enabled,
         require_hydroshare_output=settings.require_hydroshare_output,
         streaming_enabled=streaming,
+        source_bucket=SOURCE_BUCKET,
+        source_endpoint=SOURCE_ENDPOINT,
         execution_modes=[*(["streaming-2026", "streaming-2024"] if streaming else []), "fimserv-2026", "fimserv-2024"],
         input_dataset=InputDataset(
             bucket=settings.stream_input_bucket,
             prefix=settings.stream_input_prefix.strip("/"),
             unsigned=settings.stream_input_unsigned,
+            endpoint=settings.s3_endpoint_url,
         ) if streaming else None,
     )
 
@@ -172,6 +179,8 @@ def __clean_path(path: str, *, folder: bool) -> str:
 
 def __s3_client(bucket: str, path: str, session: UserSession):
     """Unsigned reads within a public input dataset; otherwise the user's HydroShare permissions."""
+    if bucket == SOURCE_BUCKET and (not path or path.startswith("hand_fim_")):
+        return source_s3_client()
     root = settings.stream_input_prefix.strip("/")
     if (
         settings.streaming_enabled and settings.stream_input_unsigned
@@ -354,14 +363,11 @@ def download_object(bucket: Bucket, key: Key, session: AuthenticatedSession) -> 
     except ClientError as error:
         raise __s3_error(error) from None
     name = key.rsplit("/", 1)[-1]
-    url = client.generate_presigned_url(
-        "get_object",
-        Params={
-            "Bucket": bucket, "Key": key,
-            "ResponseContentDisposition": f"attachment; filename*=UTF-8''{quote(name)}",
-        },
-        ExpiresIn=DOWNLOAD_URL_SECONDS,
-    )
+    params = {"Bucket": bucket, "Key": key}
+    # S3 rejects response-header overrides on anonymous requests.
+    if client.meta.config.signature_version is not UNSIGNED:
+        params["ResponseContentDisposition"] = f"attachment; filename*=UTF-8''{quote(name)}"
+    url = client.generate_presigned_url("get_object", Params=params, ExpiresIn=DOWNLOAD_URL_SECONDS)
     return DownloadLink(url=url, expires_in=DOWNLOAD_URL_SECONDS)
 
 

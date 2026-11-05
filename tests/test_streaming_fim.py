@@ -138,12 +138,16 @@ class StreamingFimTests(unittest.TestCase):
         cls.directory = tempfile.TemporaryDirectory()
         root = Path(cls.directory.name)
         huc_dir, cls.sources, cls.rows = build_hydrofabric(root)
+        cls.huc_dir = huc_dir
         cls.dataset = root / "dataset"
         cls.metadata = prepare.prepare_huc("12090301", huc_dir, cls.dataset, block_size=128, log=lambda _: None)
 
     @classmethod
     def tearDownClass(cls):
         cls.directory.cleanup()
+
+    def source_path(self, key: str) -> str:
+        return str(self.huc_dir / key.removeprefix(prepare.SOURCE_HTTPS_BASE + "hand_fim_4_5_2_11/12090301/"))
 
     def read_prepared(self, key: str):
         return read_index(self.dataset, key)
@@ -157,16 +161,20 @@ class StreamingFimTests(unittest.TestCase):
 
         manifest = stream.run_scenario(
             {"ScenarioID": "s1", "Reaches": reaches}, self.read_prepared,
-            lambda key: str(self.dataset / key), write_tile, log=lambda _: None, **kwargs,
+            self.source_path, write_tile, log=lambda _: None, **kwargs,
         )
         return manifest, written
 
-    def test_prepared_cogs_are_lossless_and_index_branch_offsets(self):
+    def test_prepared_index_references_source_rasters_without_copying_them(self):
         self.assertEqual(set(self.metadata["branches"]), {"0", "1"})
         branch1 = self.metadata["branches"]["1"]
         self.assertEqual((branch1["row_off"], branch1["col_off"]), BRANCH1_OFFSET)
-        with rasterio.open(self.dataset / branch1["rem"]) as dataset:
-            self.assertEqual(dataset.block_shapes[0], (128, 128))
+        self.assertEqual(
+            branch1["rem"],
+            prepare.SOURCE_HTTPS_BASE + "hand_fim_4_5_2_11/12090301/branches/1/rem_zeroed_masked_1.tif",
+        )
+        self.assertFalse(list(self.dataset.rglob("*.tif")))
+        with rasterio.open(self.source_path(branch1["rem"])) as dataset:
             np.testing.assert_array_equal(dataset.read(1), self.sources["1"][0])
         reach = self.read_prepared("hucs/12090301/reaches/12.parquet")
         hydroids = [entry["id"] for entry in reach["branches"][0]["hydroids"]]
@@ -388,7 +396,7 @@ class StreamingFimTests(unittest.TestCase):
         self.assertFalse(mosaic(manifest, tiles).any())
 
     def test_remote_reads_use_ranges_and_fetch_only_needed_blocks(self):
-        root = self.dataset.resolve()
+        root = self.huc_dir.resolve()
         ranges = []
 
         class Handler(BaseHTTPRequestHandler):
@@ -433,7 +441,8 @@ class StreamingFimTests(unittest.TestCase):
             with rasterio.Env(**stream.GDAL_STREAMING_OPTIONS):
                 manifest = stream.run_scenario(
                     {"ScenarioID": "remote", "Reaches": reaches}, self.read_prepared,
-                    lambda key: f"{base}/{key}", lambda name, data: name, log=lambda _: None,
+                    lambda key: f"{base}/{Path(self.source_path(key)).resolve().relative_to(root)}",
+                    lambda name, data: name, log=lambda _: None,
                 )
         finally:
             server.shutdown()
@@ -519,22 +528,22 @@ class DownloadHucTests(unittest.TestCase):
         "branches/0/gw_catchments_reaches_filtered_addedAttributes_0.tif",
         "branches/0/gw_catchments_reaches_filtered_addedAttributes_0.gpkg",
         "branches/0/hydroTable_0.csv", "branches/0/src_full_crosswalked_0.csv",
-        "branches/7/rem_zeroed_masked_7.tif", "branches/7/rem_zeroed_masked_8.tif",
+        "branches/7/hydroTable_7.csv", "branches/7/rem_zeroed_masked_8.tif",
     ]
 
     def test_downloads_only_inputs_and_resumes(self):
         with tempfile.TemporaryDirectory() as directory:
             huc_dir = Path(directory) / "flood_12090301" / "12090301"
             (huc_dir / "branches" / "7").mkdir(parents=True)
-            (huc_dir / "branches" / "7" / "rem_zeroed_masked_7.tif").write_text("existing")
+            (huc_dir / "branches" / "7" / "hydroTable_7.csv").write_text("existing")
             client = FakeS3(self.KEYS)
             prepare.download_huc("12090301", huc_dir, "4.5.2.11", client=client, log=lambda _: None)
             prefix = "hand_fim_4_5_2_11/12090301/"
             self.assertEqual(client.downloads, [(prepare.SOURCE_BUCKET, prefix + key) for key in (
-                "branch_ids.csv", "hydrotable.csv", "branches/0/rem_zeroed_masked_0.tif",
+                "branch_ids.csv", "hydrotable.csv",
                 "branches/0/gw_catchments_reaches_filtered_addedAttributes_0.tif",
             )])
-            self.assertEqual((huc_dir / "branches" / "7" / "rem_zeroed_masked_7.tif").read_text(), "existing")
+            self.assertEqual((huc_dir / "branches" / "7" / "hydroTable_7.csv").read_text(), "existing")
             self.assertFalse(list(huc_dir.rglob("*.part")))
 
             client = FakeS3(self.KEYS)

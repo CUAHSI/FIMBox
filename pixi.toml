@@ -15,6 +15,7 @@ pydantic = ">=2.0,<3"
 pyarrow = "==22.0.0"
 rasterio = ">=1.4,<2"
 attrs = ">=25.3,<26"
+h5py = ">=3.12,<4"
 
 [pypi-dependencies]
 fimbox = { path = ".", editable = true }

@@ -1096,6 +1096,10 @@ const NWPS_SERIES = [
 ];
 const FT3_TO_M3 = 0.0283168466;
 const RETROSPECTIVE_RANGE = { min: "1979-02-01", max: "2023-02-01" };
+const HISTORICAL_SOURCE_LABELS = {
+  nwm_v3_retrospective: "NWM v3.0 retrospective",
+  nwm_archived_analysis: "NWM archived analysis",
+};
 
 function roundFlow(flow) { return Number(flow.toFixed(3)); }
 
@@ -1112,6 +1116,8 @@ function nwpsPoints(section) {
 const MAX_TIMESTEP_SCENARIOS = 240;
 const TIMESTEP_ID = /^\d{8}T\d{4}Z$/;
 const HOUR_MS = 3600 * 1000;
+const HISTORICAL_MAX_RANGE_HOURS = 96;
+const HISTORICAL_REQUEST_HOURS = 24;
 
 // datetime-local inputs are read and written as UTC.
 function utcInputValue(time) { return new Date(time).toISOString().slice(0, 16); }
@@ -1139,6 +1145,7 @@ function sharedTimesteps(reaches, series) {
     .sort((a, b) => a - b)
     .map((time) => ({
       time: new Date(time).toISOString(),
+      sources: [...new Set(reaches.map((reach, index) => pointMaps[index].get(time).source).filter(Boolean))],
       reaches: reaches.map((reach, index) => ({ target: reach, point: pointMaps[index].get(time) })),
     }));
 }
@@ -1164,6 +1171,13 @@ function renderTimestepBatch(selected, series, isCurrent) {
     [1, 3, 6, 12, 24].map((hours) => el("option", { value: hours, text: `every ${hours} h` })));
   const count = el("span", { className: "hint" });
   const create = el("button", { type: "button", className: "small", text: "Build timestep scenarios" });
+  const labeledTimes = available.some((item) => item.sources.length)
+    ? el("ul", {}, available.map((item) => el("li", {
+      text: `${item.time}${item.sources.length
+        ? ` — ${item.sources.map((source) => HISTORICAL_SOURCE_LABELS[source] || source).join(", ")}`
+        : ""}`,
+    })))
+    : null;
   const chosen = () => {
     const first = parseUtcInput(start.value);
     const last = parseUtcInput(end.value);
@@ -1191,6 +1205,7 @@ function renderTimestepBatch(selected, series, isCurrent) {
   return el("fieldset", { className: "timestep-batch" },
     el("legend", { text: "Build scenarios from reach timesteps" }),
     el("p", { className: "hint", text: "Only exact UTC timestamps present for every reach in the set are used; missing samples are not interpolated." }),
+    ...(labeledTimes ? [labeledTimes] : []),
     el("div", { className: "row" },
       el("label", { text: "From (UTC) " }, start), el("label", { text: "to " }, end), every, create, count));
 }
@@ -1266,14 +1281,19 @@ function addScenarioFromReachSet() {
 function flowCoverage(points) {
   const times = points.map((point) => Date.parse(point.time));
   const intervals = [...new Set(times.slice(1).map((time, index) => (time - times[index]) / 60000))];
+  const products = [...new Set(points.map((point) => point.source).filter(Boolean))]
+    .map((product) => HISTORICAL_SOURCE_LABELS[product] || product);
   const resolution = !intervals.length ? "One sample; time resolution unavailable"
     : intervals.length === 1 ? `${intervals[0]} minutes between samples`
       : `Variable spacing (${Math.min(...intervals)}–${Math.max(...intervals)} minutes between samples)`;
-  return el("dl", { className: "summary" },
+  const summary = [
     el("dt", { text: "Available times (UTC)" }),
     el("dd", { text: `${utcInputValue(times[0]).replace("T", " ")} to ${utcInputValue(times[times.length - 1]).replace("T", " ")}` }),
     el("dt", { text: "Returned time resolution" }),
-    el("dd", { text: `${resolution}; ${points.length} sample(s). Missing samples are not interpolated.` }));
+    el("dd", { text: `${resolution}; ${points.length} sample(s). Missing samples are not interpolated.` }),
+  ];
+  if (products.length) summary.push(el("dt", { text: "Products" }), el("dd", { text: products.join(", ") }));
+  return el("dl", { className: "summary" }, ...summary);
 }
 
 function groupedFlowCoverage(reaches, series) {
@@ -1286,8 +1306,35 @@ function groupedFlowCoverage(reaches, series) {
   }
   return [...groups.values()].map((group, index) => el("div", {},
     el("h4", { text: `Sample set ${index + 1} (${group.reaches.length} reach${group.reaches.length === 1 ? "" : "es"})` }),
-    flowCoverage(group.times.map((time) => ({ time: new Date(time).toISOString() }))),
+    group.times.length
+      ? flowCoverage(group.times.map((time) => ({ time: new Date(time).toISOString() })))
+      : el("p", { className: "hint", text: "No valid samples are available for this reach set." }),
     el("p", { text: group.reaches.map((reach) => `Reach ${reach.ReachID} (HUC ${reach.HUC})`).join(", ") })));
+}
+
+function showHistoricalCoverage(samples, reaches) {
+  const products = [...new Set(samples.map((sample) => sample.source))]
+    .map((product) => HISTORICAL_SOURCE_LABELS[product] || product);
+  const missingHours = samples.filter((sample) => sample.hour_issue === "archive_hour_unavailable");
+  const missingPairs = samples.reduce((count, sample) => count + (sample.hour_issue ? 0
+    : reaches.filter((reach) => sample.flows_cms[canonicalReachId(reach)] == null).length), 0);
+  const rows = samples.map((sample) => {
+    const missing = sample.hour_issue ? [] : reaches
+      .filter((reach) => sample.flows_cms[canonicalReachId(reach)] == null)
+      .map((reach) => String(reach.ReachID));
+    const issue = sample.hour_issue === "archive_hour_unavailable" ? "; archive hour unavailable"
+      : missing.length ? `; missing reaches: ${missing.join(", ")}` : "";
+    return el("li", { text: `${sample.time} — ${HISTORICAL_SOURCE_LABELS[sample.source] || sample.source}${issue}` });
+  });
+  return el("section", { className: "historical-coverage" },
+    el("h4", { text: "Coverage for this lookup" }),
+    el("p", { text: `Returned ${samples[0].time} through ${samples.at(-1).time}. Products: ${products.join(", ")}.` }),
+    el("p", { text: `${missingHours.length} unavailable archive hour(s); ${missingPairs} missing reach sample(s).` }),
+    el("ul", {}, rows));
+}
+
+function canonicalReachId(reach) {
+  return String(reach.ReachID).trim().replace(/^0+(?=\d)/, "");
 }
 
 async function fetchReachFlows(reach, source, start, end) {
@@ -1330,7 +1377,10 @@ function renderScenarioFlowTimes(scenario, reaches, series, isCurrent) {
   const times = sharedTimesteps(reaches, series);
   if (!times.length) return el("p", { className: "hint", text: "No exact UTC timestamps are shared by every reach in this scenario. Choose another source or date range. No flows were changed." });
   const select = el("select", { "aria-label": "Scenario streamflow time (UTC)" },
-    times.map((item) => el("option", { value: item.time, text: item.time })));
+    times.map((item) => el("option", {
+      value: item.time,
+      text: `${item.time}${item.sources.length ? ` — ${item.sources.map((itemSource) => HISTORICAL_SOURCE_LABELS[itemSource] || itemSource).join(", ")}` : ""}`,
+    })));
   return el("div", { className: "row" },
     el("label", { text: "Time (UTC) " }, select),
     el("button", { type: "button", text: "Apply to whole scenario",
@@ -1340,7 +1390,8 @@ function renderScenarioFlowTimes(scenario, reaches, series, isCurrent) {
 function showStreamflows(scenario, reaches, box, isCurrent) {
   const source = el("select", { "aria-label": "Streamflow source" },
     NWPS_SERIES.map((series) => el("option", { value: series.key, text: series.label })),
-    el("option", { value: "retrospective", text: "Historic — NWM v3.0 retrospective" }));
+    el("option", { value: "retrospective", text: "Historic — NWM v3.0 retrospective" }),
+    el("option", { value: "historicalNwm", text: "Historical NWM (retrospective + archived analysis)" }));
   const description = el("div");
   const controls = el("div", { "aria-live": "polite" });
   let version = 0;
@@ -1348,29 +1399,48 @@ function showStreamflows(scenario, reaches, box, isCurrent) {
     const selectedVersion = ++version;
     const current = () => isCurrent() && selectedVersion === version;
     const historic = source.value === "retrospective";
+    const historical = source.value === "historicalNwm";
+    const dated = historic || historical;
     const series = NWPS_SERIES.find((item) => item.key === source.value);
     description.replaceChildren(
-      el("p", { text: historic
+      el("p", { text: historical
+        ? "Hourly modeled NWM discharge for CONUS reaches in m³/s. Uses NWM v3.0 retrospective through 2023-02-01 00:00 UTC, then standard Analysis and Assimilation archived by hour. The forcing and assimilation differ across the cutoff, and the operational model version may change over time."
+        : historic
         ? "NOAA National Water Model v3.0 CONUS retrospective simulation, read from NOAA's public AWS Zarr archive. "
           + "Driven by Analysis of Record for Calibration (AORC) weather data, without streamflow assimilation. "
           + "These are modeled historical flows, not stream-gauge observations."
         : series.description }),
       el("dl", { className: "summary" },
         el("dt", { text: "Time window" }),
-        el("dd", { text: historic
+        el("dd", { text: historical
+          ? "1979-02-01 01:00 UTC onward, through the current whole UTC hour; select a range of up to 96 hours."
+          : historic
           ? `${RETROSPECTIVE_RANGE.min} to ${RETROSPECTIVE_RANGE.max} (UTC); select up to 92 days per lookup.`
           : series.window }),
         el("dt", { text: "Resolution" }),
-        el("dd", { text: historic ? "Hourly streamflow for an individual NWM river reach."
+        el("dd", { text: historic || historical ? "Hourly streamflow for CONUS NWM reaches."
           : "Streamflow for an individual NWM river reach. Time spacing is measured from the returned samples below, not the forecast update frequency." })),
-      el("p", { className: "hint", text: "Values are displayed in m³/s. Reach-based streamflow is not a gridded flood-depth product." }),
+      el("p", { className: "hint", text: historical
+        ? "Select at most 100 distinct reaches. Missing hours and reach samples are shown; only exact UTC timestamps with valid flows for every reach can be applied."
+        : "Values are displayed in m³/s. Reach-based streamflow is not a gridded flood-depth product." }),
       el("a", {
-        href: historic ? "https://registry.opendata.aws/nwm-archive/" : "https://water.noaa.gov/about/nwm",
+        href: historic || historical ? "https://registry.opendata.aws/nwm-archive/" : "https://water.noaa.gov/about/nwm",
         target: "_blank", rel: "noopener noreferrer", text: "Source documentation",
       }));
     controls.replaceChildren();
-    const start = el("input", { type: "date", ...RETROSPECTIVE_RANGE, value: "2023-01-01", required: true });
-    const end = el("input", { type: "date", ...RETROSPECTIVE_RANGE, value: "2023-01-31", required: true });
+    const previousHour = Math.floor(Date.now() / HOUR_MS) * HOUR_MS - HOUR_MS;
+    const start = historical
+      ? el("input", {
+        type: "datetime-local", step: 3600, min: utcInputValue(Date.parse(`${RETROSPECTIVE_RANGE.min}T01:00:00Z`)),
+        max: utcInputValue(previousHour + HOUR_MS), value: utcInputValue(previousHour), required: true,
+      })
+      : el("input", { type: "date", ...RETROSPECTIVE_RANGE, value: "2023-01-01", required: true });
+    const end = historical
+      ? el("input", {
+        type: "datetime-local", step: 3600, min: utcInputValue(Date.parse(`${RETROSPECTIVE_RANGE.min}T01:00:00Z`)),
+        max: utcInputValue(previousHour + HOUR_MS), value: utcInputValue(previousHour), required: true,
+      })
+      : el("input", { type: "date", ...RETROSPECTIVE_RANGE, value: "2023-01-31", required: true });
     const output = el("div");
     const button = el("button", { type: "button", text: "Load streamflow" });
     let request = 0;
@@ -1378,14 +1448,63 @@ function showStreamflows(scenario, reaches, box, isCurrent) {
       const selectedRequest = ++request;
       const active = () => current() && selectedRequest === request;
       button.disabled = true;
-      output.replaceChildren(el("p", { className: "hint", text: historic
+      output.replaceChildren(el("p", { className: "hint", text: historical
+        ? "Loading the selected UTC hours for all reaches…"
+        : historic
         ? "Reading the NWM retrospective for every reach; each lookup can take 10–30 seconds…"
         : `Loading ${series.label.toLowerCase()} for every reach…` }));
       try {
         if (historic && (!start.value || !end.value || start.value > end.value)) {
           throw new Error("Choose a valid UTC date range.");
         }
-        const loaded = new Map();
+        if (historical && reaches.length > 100) {
+          throw new Error("Historical NWM supports at most 100 reaches per lookup.");
+        }
+        let loaded;
+        if (historical) {
+          const first = parseUtcInput(start.value);
+          const last = parseUtcInput(end.value);
+          if (!Number.isFinite(first) || !Number.isFinite(last) || first > last) {
+            throw new Error("Choose a valid From (UTC) and To (UTC) hour.");
+          }
+          if (first % HOUR_MS !== 0 || last % HOUR_MS !== 0) {
+            throw new Error("Choose UTC times on the hour.");
+          }
+          if (last - first > HISTORICAL_MAX_RANGE_HOURS * HOUR_MS) {
+            throw new Error(`Choose a range of at most 96 hours; this range spans ${(last - first) / HOUR_MS} hours.`);
+          }
+          const samples = [];
+          const reachIds = reaches.map(canonicalReachId);
+          const totalRequests = Math.ceil(((last - first) / HOUR_MS + 1) / HISTORICAL_REQUEST_HOURS);
+          for (let chunkStart = first, chunkNumber = 1; chunkStart <= last;
+            chunkStart += HISTORICAL_REQUEST_HOURS * HOUR_MS, chunkNumber++) {
+            const chunkEnd = Math.min(last, chunkStart + (HISTORICAL_REQUEST_HOURS - 1) * HOUR_MS);
+            output.replaceChildren(el("p", { className: "hint",
+              text: `Loading historical streamflow (request ${chunkNumber} of ${totalRequests})…` }));
+            const body = await api("/ui/streamflow/historical", {
+              method: "POST",
+              json: {
+                reach_ids: reachIds,
+                start: new Date(chunkStart).toISOString(),
+                end: new Date(chunkEnd).toISOString(),
+              },
+            });
+            if (!active()) return;
+            samples.push(...body.samples);
+          }
+          loaded = new Map(reaches.map((reach) => [reach, samples.map((sample) => ({
+            time: sample.time,
+            flow: sample.flows_cms[canonicalReachId(reach)],
+            source: sample.source,
+          }))]));
+          output.replaceChildren(
+            showHistoricalCoverage(samples, reaches),
+            ...groupedFlowCoverage(reaches, loaded),
+            scenario ? renderScenarioFlowTimes(scenario, reaches, loaded, active)
+              : renderTimestepBatch(reaches, loaded, active));
+          return;
+        }
+        loaded = new Map();
         for (const reach of reaches) {
           let points;
           try { points = await fetchReachFlows(reach, source.value, start.value, end.value); }
@@ -1399,7 +1518,7 @@ function showStreamflows(scenario, reaches, box, isCurrent) {
             : renderTimestepBatch(reaches, loaded, active));
       } catch (error) {
         if (active()) output.replaceChildren(el("p", {
-          className: "error", text: `Streamflow lookup failed: ${error.message} No flows were changed.`,
+          className: "error", text: `Streamflow lookup failed: ${error.message}${historical ? " Retry the lookup." : ""} No flows were changed.`,
         }));
       } finally {
         if (active()) button.disabled = false;
@@ -1412,10 +1531,13 @@ function showStreamflows(scenario, reaches, box, isCurrent) {
       output.replaceChildren(el("p", { className: "hint", text: "Date range changed. Load streamflow again." }));
     };
     [start, end].forEach((input) => input.addEventListener("input", invalidate));
-    if (historic) controls.append(el("div", { className: "row" },
+    if (historical) controls.append(el("p", {
+      className: "hint", text: "From and To are UTC hours. The range can span up to 96 hours; both endpoints are included (up to 97 hourly samples).",
+    }));
+    if (dated) controls.append(el("div", { className: "row" },
       el("label", { text: "From (UTC) " }, start), el("label", { text: "to " }, end)), button);
     controls.append(output);
-    if (!historic) load();
+    if (!dated) load();
   };
   source.addEventListener("change", update);
   box.replaceChildren(

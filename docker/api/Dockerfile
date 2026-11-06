@@ -7,7 +7,7 @@ RUN apt-get update \
 WORKDIR /app
 COPY docker/api/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
-    && python -c "import rasterio; import rio_tiler"
+    && python -c "import rasterio; import rio_tiler; import h5py"
 COPY src/fimbox_api /app/fimbox_api
 COPY src/schemas /app/schemas
 COPY test-data/*.json /app/test-data/

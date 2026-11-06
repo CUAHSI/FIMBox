@@ -503,6 +503,225 @@ test("retrospective group lookup excludes missing samples and applies each reach
   assert.deepEqual(ui.json("scenario.Reaches.map((reach) => reach.Streamflow)"), [4, 8]);
 });
 
+test("historical NWM loads reaches in one request, labels products, and only applies complete samples", async () => {
+  const ui = flowPanel();
+  ui.run(`
+    scenario.Reaches.push({ HUC: "05060708", ReachID: "67890", Streamflow: "" });
+    const historicalRequests = [];
+    api = async (url, options) => {
+      historicalRequests.push({ url, options });
+      return { units: "m3/s", samples: [
+        { time: "2023-02-01T00:00:00Z", source: "nwm_v3_retrospective", hour_issue: null,
+          flows_cms: { "12345": 2, "67890": 0 } },
+        { time: "2023-02-01T01:00:00Z", source: "nwm_archived_analysis", hour_issue: null,
+          flows_cms: { "12345": 3, "67890": null } },
+        { time: "2023-02-01T02:00:00Z", source: "nwm_archived_analysis",
+          hour_issue: "archive_hour_unavailable", flows_cms: { "12345": null, "67890": null } },
+      ] };
+    };
+    showStreamflows(scenario, scenario.Reaches, box, () => panelCurrent);
+    selectSource("historicalNwm");
+  `);
+  const inputs = ui.json('visit(box).filter((node) => node.type === "datetime-local").map((node) => node.value)');
+  assert.equal(inputs.length, 2);
+  assert.equal(inputs[0], inputs[1]);
+  assert.match(ui.run("textOf(box.children[2])"), /up to 96 hours/);
+  assert.match(ui.run("textOf(box.children[2])"), /100 distinct reaches/);
+  ui.run("visit(box).find((node) => node.text === 'Load streamflow').listeners.click();");
+  for (let i = 0; i < 8; i++) await ui.run("Promise.resolve()");
+  assert.equal(ui.run("historicalRequests.length"), 1);
+  assert.equal(ui.run("historicalRequests[0].url"), "/ui/streamflow/historical");
+  assert.deepEqual(ui.json("historicalRequests[0].options.json"), {
+    reach_ids: ["12345", "67890"],
+    start: new Date(inputs[0] + ":00Z").toISOString(),
+    end: new Date(inputs[1] + ":00Z").toISOString(),
+  });
+  const display = ui.run("textOf(box.children[3])");
+  assert.match(display, /Coverage for this lookup/);
+  assert.match(display, /NWM v3.0 retrospective/);
+  assert.match(display, /NWM archived analysis/);
+  assert.match(display, /1 unavailable archive hour\(s\); 1 missing reach sample\(s\)/);
+  assert.match(display, /2023-02-01T00:00:00Z — NWM v3.0 retrospective/);
+  const options = ui.json('visit(box).find((node) => node["aria-label"] === "Scenario streamflow time (UTC)").children.map((node) => node.text)');
+  assert.deepEqual(options, ["2023-02-01T00:00:00.000Z — NWM v3.0 retrospective"]);
+  ui.run(`
+    const batch = renderTimestepBatch([scenario.Reaches[0]], new Map([[scenario.Reaches[0], [
+      { time: "2023-02-01T01:00:00Z", flow: 3, source: "nwm_archived_analysis" },
+    ]]]), () => true);
+  `);
+  assert.match(ui.run("textOf(batch)"), /2023-02-01T01:00:00\.000Z — NWM archived analysis/);
+  ui.run('visit(box).find((node) => node.text === "Apply to whole scenario").onclick()');
+  assert.deepEqual(ui.json("scenario.Reaches.map((reach) => reach.Streamflow)"), [2, 0]);
+});
+
+test("historical ranges through 96 hours are merged from non-overlapping 24-sample requests", async () => {
+  for (const hours of [0, 23, 24, 72, 96]) {
+    const ui = flowPanel();
+    ui.run(`
+      const historicalRequests = [];
+      api = async (url, options) => {
+        historicalRequests.push(options.json);
+        const first = Date.parse(options.json.start), last = Date.parse(options.json.end);
+        return { samples: Array.from({ length: (last - first) / HOUR_MS + 1 }, (_, index) => {
+          const time = new Date(first + index * HOUR_MS).toISOString();
+          return {
+            time, source: time < "2023-02-01T01:00:00.000Z" ? "nwm_v3_retrospective" : "nwm_archived_analysis",
+            hour_issue: null, flows_cms: { "12345": time === "2023-02-01T01:00:00.000Z" ? null : index },
+          };
+        }) };
+      };
+      showStreamflows(scenario, scenario.Reaches, box, () => panelCurrent);
+      selectSource("historicalNwm");
+      const inputs = visit(box).filter((node) => node.type === "datetime-local");
+      inputs[0].value = "2023-01-31T01:00";
+      inputs[1].value = utcInputValue(Date.parse(inputs[0].value + ":00Z") + ${hours} * HOUR_MS);
+    `);
+    await ui.run('visit(box).find((node) => node.text === "Load streamflow").listeners.click()');
+    const requests = ui.json("historicalRequests");
+    const first = Date.parse("2023-01-31T01:00:00Z");
+    assert.equal(requests.length, Math.ceil((hours + 1) / 24));
+    for (let index = 0; index < requests.length; index++) {
+      assert.deepEqual(requests[index], {
+        reach_ids: ["12345"],
+        start: new Date(first + index * 24 * 3600000).toISOString(),
+        end: new Date(first + Math.min(hours, index * 24 + 23) * 3600000).toISOString(),
+      });
+    }
+    const options = ui.json('visit(box).find((node) => node["aria-label"] === "Scenario streamflow time (UTC)").children.map((node) => node.value)');
+    assert.equal(options.length, hours + 1 - (hours >= 24 ? 1 : 0));
+    assert.equal(options[0], new Date(first).toISOString());
+    assert.equal(options.at(-1), new Date(first + hours * 3600000 - (hours === 24 ? 3600000 : 0)).toISOString());
+    if (hours >= 24) {
+      assert.match(ui.run("textOf(box.children[3])"), /1 missing reach sample/);
+      assert.ok(!options.includes("2023-02-01T01:00:00.000Z"));
+    }
+  }
+});
+
+test("historical ranges exceeding 96 hours or not on the hour are rejected before requests", async () => {
+  const ui = flowPanel();
+  ui.run(`
+    const historicalRequests = [];
+    api = async (url, options) => { historicalRequests.push(options.json); };
+    showStreamflows(scenario, scenario.Reaches, box, () => panelCurrent);
+    selectSource("historicalNwm");
+    const inputs = visit(box).filter((node) => node.type === "datetime-local");
+    inputs[0].value = "2025-07-04T00:00";
+    inputs[1].value = "2025-07-08T01:00";
+  `);
+  await ui.run('visit(box).find((node) => node.text === "Load streamflow").listeners.click()');
+  assert.match(ui.run("textOf(box.children[3])"), /at most 96 hours.*97 hours/);
+  ui.run('inputs[1].value = "2025-07-04T01:30"');
+  await ui.run('visit(box).find((node) => node.text === "Load streamflow").listeners.click()');
+  assert.match(ui.run("textOf(box.children[3])"), /times on the hour/);
+  assert.equal(ui.run("historicalRequests.length"), 0);
+});
+
+test("historical chunks preserve coverage and shared timestamps for the reach set builder", async () => {
+  const ui = flowPanel();
+  ui.run(`
+    const second = { HUC: "05060708", ReachID: "67890" };
+    const selected = [reach, second];
+    api = async (url, options) => {
+      const start = Date.parse(options.json.start), end = Date.parse(options.json.end);
+      return { samples: Array.from({ length: (end - start) / HOUR_MS + 1 }, (_, index) => {
+        const time = new Date(start + index * HOUR_MS).toISOString();
+        const missing = time === "2023-02-01T01:00:00.000Z";
+        return { time, source: time < "2023-02-01T01:00:00.000Z"
+          ? "nwm_v3_retrospective" : "nwm_archived_analysis",
+          hour_issue: missing ? "archive_hour_unavailable" : null,
+          flows_cms: { "12345": missing ? null : 1, "67890": missing ? null : 2 } };
+      }) };
+    };
+    showStreamflows(null, selected, box, () => panelCurrent);
+    selectSource("historicalNwm");
+    const inputs = visit(box).filter((node) => node.type === "datetime-local");
+    inputs[0].value = "2023-01-31T01:00";
+    inputs[1].value = "2023-02-01T02:00";
+  `);
+  await ui.run('visit(box).find((node) => node.text === "Load streamflow").listeners.click()');
+  const text = ui.run("textOf(box.children[3])");
+  assert.match(text, /1 unavailable archive hour\(s\); 0 missing reach sample\(s\)/);
+  assert.match(text, /2023-02-01T00:00:00.000Z — NWM v3.0 retrospective/);
+  assert.match(text, /2023-02-01T02:00:00.000Z — NWM archived analysis/);
+  const batchTimes = ui.json('visit(box).filter((node) => node.tag === "li").map((node) => node.text)');
+  assert.ok(batchTimes.includes("2023-02-01T01:00:00.000Z — NWM archived analysis; archive hour unavailable"));
+  assert.ok(!batchTimes.includes("2023-02-01T01:00:00.000Z — NWM archived analysis"));
+  assert.equal(ui.run("scenario.Reaches[0].Streamflow"), "");
+});
+
+test("a failed historical chunk discards earlier results and leaves scenario flows unchanged", async () => {
+  const ui = flowPanel();
+  ui.run(`
+    reach.Streamflow = 42;
+    let requestCount = 0;
+    api = async () => {
+      if (++requestCount === 2) throw new Error("archive unavailable");
+      return { samples: [{ time: "2025-07-04T00:00:00Z", source: "nwm_archived_analysis",
+        hour_issue: null, flows_cms: { "12345": 9 } }] };
+    };
+    showStreamflows(scenario, scenario.Reaches, box, () => panelCurrent);
+    selectSource("historicalNwm");
+    const inputs = visit(box).filter((node) => node.type === "datetime-local");
+    inputs[0].value = "2025-07-04T00:00";
+    inputs[1].value = "2025-07-07T00:00";
+  `);
+  await ui.run('visit(box).find((node) => node.text === "Load streamflow").listeners.click()');
+  assert.equal(ui.run("requestCount"), 2);
+  assert.match(ui.run("textOf(box.children[3])"), /archive unavailable.*No flows were changed/);
+  assert.equal(ui.run("reach.Streamflow"), 42);
+  assert.equal(ui.run('visit(box).some((node) => node["aria-label"] === "Scenario streamflow time (UTC)")'), false);
+  assert.equal(ui.run('visit(box).find((node) => node.text === "Load streamflow").disabled'), false);
+});
+
+test("changing a historical range during a later chunk stops further requests and discards results", async () => {
+  const ui = flowPanel();
+  ui.run(`
+    let finishChunk;
+    let requestCount = 0;
+    api = async () => {
+      if (++requestCount === 2) return new Promise((resolve) => { finishChunk = resolve; });
+      return { samples: [] };
+    };
+    showStreamflows(scenario, scenario.Reaches, box, () => panelCurrent);
+    selectSource("historicalNwm");
+    const inputs = visit(box).filter((node) => node.type === "datetime-local");
+    inputs[0].value = "2025-07-04T00:00";
+    inputs[1].value = "2025-07-07T00:00";
+    const pending = visit(box).find((node) => node.text === "Load streamflow").listeners.click();
+  `);
+  await ui.run("Promise.resolve()");
+  assert.equal(ui.run("requestCount"), 2);
+  assert.match(ui.run("textOf(box.children[3])"), /request 2 of 4/);
+  ui.run(`
+    inputs[0].value = "2025-07-04T01:00";
+    inputs[0].listeners.input();
+    finishChunk({ samples: [] });
+  `);
+  await ui.run("pending");
+  assert.equal(ui.run("requestCount"), 2);
+  assert.match(ui.run("textOf(box.children[3])"), /Date range changed/);
+  assert.equal(ui.run('visit(box).find((node) => node.text === "Load streamflow").disabled'), false);
+});
+
+test("changing a historical UTC hour invalidates the pending response", async () => {
+  const ui = flowPanel();
+  ui.run(`
+    let finishHistorical;
+    api = () => new Promise((resolve) => { finishHistorical = resolve; });
+    showStreamflows(scenario, scenario.Reaches, box, () => panelCurrent);
+    selectSource("historicalNwm");
+    visit(box).find((node) => node.text === "Load streamflow").listeners.click();
+    const input = visit(box).find((node) => node.type === "datetime-local");
+    input.value = "2023-02-01T01:00";
+    input.listeners.input();
+    finishHistorical({ units: "m3/s", samples: [] });
+  `);
+  for (let i = 0; i < 4; i++) await ui.run("Promise.resolve()");
+  assert.match(ui.run("textOf(box.children[3])"), /Date range changed/);
+  assert.equal(ui.run('visit(box).some((node) => node["aria-label"] === "Scenario streamflow time (UTC)")'), false);
+});
+
 test("timestep limit disables generation above 240 shared timestamps", () => {
   const ui = flowPanel();
   ui.run(`

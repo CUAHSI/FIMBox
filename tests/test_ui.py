@@ -92,7 +92,7 @@ class UiTests(unittest.TestCase):
         self.assertNotIn('name="candidate_prefix"', page)
         self.assertNotIn("Your jobs", page)
         self.assertIn('href="/ui/static/app.css?v=cam-1531-scrollable-reaches"', page)
-        self.assertIn('src="/ui/static/app.js?v=cam-1527-reaches"', page)
+        self.assertIn('src="/ui/static/app.js?v=historical-nwm-96h"', page)
         self.assertNotIn('id="json-file"', page)
         self.assertNotIn('id="json-url-form"', page)
         self.assertNotIn('id="json-url"', page)
@@ -455,6 +455,63 @@ class UiTests(unittest.TestCase):
                 response = self.client.get("/ui/streamflow/retrospective", params=params)
             self.assertEqual(response.status_code, status)
         self.assertEqual(self.client.get("/ui/streamflow/retrospective", params={**params, "reach_id": 0}).status_code, 422)
+
+    def test_historical_streamflow_validates_and_canonicalizes_before_lookup(self):
+        body = {
+            "reach_ids": ["0007", "8"],
+            "start": "2023-02-01T00:00:00Z",
+            "end": "2023-02-01T01:00:00+00:00",
+        }
+        result = {
+            "units": "m3/s",
+            "samples": [{
+                "time": ui.datetime(2023, 2, 1, tzinfo=ui.UTC),
+                "source": "nwm_v3_retrospective",
+                "hour_issue": None,
+                "flows_cms": {"7": 0.0, "8": 2.5},
+            }],
+        }
+        with patch.object(historical_streamflow := ui.historical_streamflow, "lookup", return_value=result) as lookup:
+            response = self.client.post("/ui/streamflow/historical", json=body)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["samples"][0]["flows_cms"], {"7": 0.0, "8": 2.5})
+        lookup.assert_called_once_with(
+            ["7", "8"], ui.datetime(2023, 2, 1, tzinfo=ui.UTC), ui.datetime(2023, 2, 1, 1, tzinfo=ui.UTC),
+        )
+
+        invalid = (
+            {**body, "reach_ids": []},
+            {**body, "reach_ids": ["0"]},
+            {**body, "reach_ids": ["a"]},
+            {**body, "reach_ids": ["01", "1"]},
+            {**body, "reach_ids": [str(index + 1) for index in range(101)]},
+            {**body, "start": "2023-02-01T00:30:00Z"},
+            {**body, "start": "2023-02-01T00:00:00-05:00"},
+            {**body, "start": "2023-02-01"},
+            {**body, "start": "2023-02-01T00:00:00Z", "end": "2023-02-02T00:00:00Z"},
+            {**body, "start": "2023-02-01T02:00:00Z", "end": "2023-02-01T01:00:00Z"},
+            {**body, "start": "1979-02-01T00:00:00Z"},
+            {**body, "end": "2999-02-01T00:00:00Z"},
+        )
+        for invalid_body in invalid:
+            with self.subTest(body=invalid_body):
+                response = self.client.post("/ui/streamflow/historical", json=invalid_body)
+                self.assertEqual(response.status_code, 422)
+        lookup.assert_called_once()
+
+    def test_historical_streamflow_maps_capacity_deadline_and_source_failures(self):
+        body = {
+            "reach_ids": ["7"], "start": "2023-02-01T01:00:00Z", "end": "2023-02-01T01:00:00Z",
+        }
+        for error, status in (
+            (ui.historical_streamflow.LookupBusy(), 503),
+            (ui.historical_streamflow.LookupDeadlineExceeded(), 504),
+            (ui.historical_streamflow.HistoricalStreamflowError("upstream timeout"), 502),
+        ):
+            with patch.object(ui.historical_streamflow, "lookup", side_effect=error):
+                response = self.client.post("/ui/streamflow/historical", json=body)
+            self.assertEqual(response.status_code, status)
+            self.assertIn("retry", response.text.lower())
 
     def test_storage_errors_are_mapped(self):
         for code, status in (("NoSuchKey", 404), ("AccessDenied", 403), ("SlowDown", 503)):

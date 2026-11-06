@@ -208,8 +208,24 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
   (`chrtout.zarr` on `noaa-nwm-retrospective-3-0-pds`) with plain GETs and
   `zstandard`: a process-cached sorted `feature_id` index, then one
   672-hour x 30000-feature int32 chunk per 28 days (scale 0.01, missing
-  -999900). Clips to 1979-02-01T01Z..2023-02-01T00Z, caps 92 days, raises
-  `RetrospectiveError`; tested in `tests/test_retrospective.py`.
+  -999900). `streamflows()` batches multiple reaches while reusing each shared
+  feature chunk. Clips to 1979-02-01T01Z..2023-02-01T00Z, caps the single-reach
+  route at 92 days, raises `RetrospectiveError`; tested in
+  `tests/test_retrospective.py`.
+- **`src/fimbox_api/historical_streamflow.py`** — Batched hourly source joining
+  the v3 retrospective to public archived NWM analysis after its cutoff.
+  Calls `archive_reader.read_hour` once per archive hour, logs indexed/range/
+  missing hour counts, requests, bytes and elapsed time, and bounds
+  per-process concurrency and lookup duration.
+- **`src/fimbox_api/archive_reader.py`** — Selective reads of one NOAA
+  `analysis_assim.channel_rt.tm00.conus` object per hour. Fetches the CIROH
+  Kerchunk index first and range-reads only `feature_id`/`streamflow` chunks
+  (own zarr v2 shuffle+zlib decoder; references must resolve to the exact NOAA
+  URL). On index 404 it reads the NOAA object through `h5py` over a block-cached
+  HTTPS range file. `RangeSource` enforces 206/`Content-Range`/length, ETag
+  pinning, byte caps and deadlines; a 404 NOAA object yields `None`
+  (`archive_hour_unavailable`). Tested in `tests/test_archive_reader.py`
+  (HDF5 fixtures + mock range transport).
 - **`src/fimbox_api/dataset_preparations.py`** — Authenticated input-dataset
   preparation submission and Redis run tracking. Stores a short-lived user
   session/run context, reserves the configured input dataset, queues a Celery
@@ -238,6 +254,9 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
     - `/ui/streamflow/retrospective?reach_id=&start=&end=`: hourly NWM v3.0
       retrospective flows over whole UTC days via `retrospective.py`
       (`RetrospectiveError` → 400, HTTP/zstd errors → 502).
+    - `POST /ui/streamflow/historical`: validated batched hourly flow samples
+      across the NWM v3 retrospective and archived analysis products, with
+      per-hour product labels and explicit unavailable archive hours.
   - Paths reject empty, `.`, and `..` segments. S3 errors map to 404, 403, or
     503.
   - Reads use the user's HydroShare S3 client, or `anonymous_s3_client()`
@@ -284,8 +303,11 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
       rows once (HUC/ReachID only), then either add a single scenario with
       blank flows or open a group source lookup to build up to 240 timestep
       scenarios from exact UTC timestamps shared by every reach in the set
-      (no interpolation). Each generated scenario contains the full
-      reach set, and the set remains available for additional scenarios.
+      (no interpolation). Historical NWM accepts up to a 96-hour elapsed
+      range (97 inclusive samples), sequentially combines API requests of at
+      most 24 samples, and discards results on failure or invalidation. Each
+      generated scenario contains the full reach set, and the set remains
+      available for additional scenarios.
       The reach list is a keyboard-focusable scrolling region capped at
       60vh; Add reach stays outside the scrolling region and scrolls the
       list to the newly added row without changing ordinary render scrolling.

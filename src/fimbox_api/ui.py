@@ -8,7 +8,8 @@ public API routes.
 import io
 import json
 import logging
-from datetime import UTC, date, datetime, time
+import re
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import quote
@@ -21,9 +22,9 @@ from botocore import UNSIGNED
 from botocore.exceptions import ClientError
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictStr, field_validator, model_validator
 
-from . import retrospective
+from . import historical_streamflow, retrospective
 from .auth import UserSession, get_authenticated_session
 from .config import settings
 from .models import ExecutionMode
@@ -120,6 +121,70 @@ class RetrospectiveFlows(BaseModel):
     mean: float
     max: float
     max_time: datetime
+
+
+class HistoricalStreamflowRequest(BaseModel):
+    reach_ids: list[StrictStr]
+    start: datetime
+    end: datetime
+
+    @field_validator("reach_ids")
+    @classmethod
+    def canonicalize_reach_ids(cls, values: list[str]) -> list[str]:
+        if not values or len(values) > historical_streamflow.MAX_REACHES:
+            raise ValueError(f"Choose between 1 and {historical_streamflow.MAX_REACHES} reaches")
+        canonical = []
+        for value in values:
+            if not re.fullmatch(r"[0-9]+", value):
+                raise ValueError("Reach IDs must be positive decimal strings")
+            reach_id = value.lstrip("0") or "0"
+            if reach_id == "0":
+                raise ValueError("Reach IDs must be positive decimal strings")
+            canonical.append(reach_id)
+        if len(set(canonical)) != len(canonical):
+            raise ValueError("Reach IDs must be unique")
+        return canonical
+
+    @field_validator("start", "end", mode="before")
+    @classmethod
+    def parse_utc_timestamp(cls, value: Any) -> datetime:
+        if not isinstance(value, str) or "T" not in value:
+            raise ValueError("Use an ISO 8601 UTC timestamp")
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise ValueError("Use an ISO 8601 UTC timestamp") from error
+        if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+            raise ValueError("Timestamps must be in UTC")
+        return parsed.astimezone(UTC)
+
+    @model_validator(mode="after")
+    def validate_window(self):
+        if any(
+            value.minute or value.second or value.microsecond
+            for value in (self.start, self.end)
+        ):
+            raise ValueError("Timestamps must be on the hour")
+        if self.end < self.start:
+            raise ValueError("End must be at or after start")
+        if self.end - self.start >= timedelta(hours=historical_streamflow.MAX_HOURS):
+            raise ValueError(f"Choose at most {historical_streamflow.MAX_HOURS} inclusive hourly samples")
+        latest = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        if self.start < retrospective.FIRST_TIME or self.end > latest:
+            raise ValueError("Choose hours within the supported historical range through the current UTC hour")
+        return self
+
+
+class HistoricalStreamflowSample(BaseModel):
+    time: datetime
+    source: str
+    hour_issue: str | None
+    flows_cms: dict[str, float | None]
+
+
+class HistoricalStreamflowResponse(BaseModel):
+    units: str
+    samples: list[HistoricalStreamflowSample]
 
 
 class DownloadLink(BaseModel):
@@ -351,6 +416,23 @@ def retrospective_streamflow(
         logger.warning("NWM retrospective read failed: %s", error)
         raise HTTPException(status_code=502, detail="Could not read the NWM retrospective dataset") from None
     return RetrospectiveFlows(**flows)
+
+
+@router.post("/streamflow/historical", response_model=HistoricalStreamflowResponse)
+def historical_streamflow_lookup(
+    request: HistoricalStreamflowRequest, session: AuthenticatedSession,
+) -> HistoricalStreamflowResponse:
+    """Return one batched hourly lookup across the retrospective/archive cutoff."""
+    try:
+        result = historical_streamflow.lookup(request.reach_ids, request.start, request.end)
+    except historical_streamflow.LookupBusy:
+        raise HTTPException(status_code=503, detail="Historical streamflow lookup capacity is busy; retry shortly") from None
+    except historical_streamflow.LookupDeadlineExceeded:
+        raise HTTPException(status_code=504, detail="Historical streamflow lookup timed out; retry the lookup") from None
+    except historical_streamflow.HistoricalStreamflowError as error:
+        logger.warning("Historical NWM streamflow lookup failed: %s", error)
+        raise HTTPException(status_code=502, detail="Could not read historical NWM streamflow; retry the lookup") from None
+    return HistoricalStreamflowResponse(**result)
 
 
 @router.get("/objects/download", response_model=DownloadLink)

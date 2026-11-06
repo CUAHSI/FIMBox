@@ -57,6 +57,13 @@ class RetrospectiveTests(unittest.TestCase):
         self.assertEqual((result["min"], result["mean"], result["max"]), (2.0, 3.75, 6.0))
         self.assertEqual(result["max_time"], self.hours(6))
 
+    def test_group_lookup_reuses_a_chunk_and_keeps_unavailable_reaches(self):
+        rows = retrospective.streamflows(["7", "9", "8"], self.hours(2), self.hours(3))
+        self.assertEqual(self.requests, ["feature_id/0", "streamflow/0.0"])
+        self.assertEqual(rows[0]["flows_cms"], {"7": 2.0, "9": 0.0, "8": None})
+        self.assertEqual(rows[1]["flows_cms"], {"7": 3.0, "9": 0.0, "8": None})
+        self.assertEqual([row["time"] for row in rows], [self.hours(2), self.hours(3)])
+
     def test_clips_to_dataset_bounds(self):
         result = retrospective.streamflow(7, self.hours(-5), self.hours(1))
         self.assertEqual(result["start"], retrospective.FIRST_TIME)

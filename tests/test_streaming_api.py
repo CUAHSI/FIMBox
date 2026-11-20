@@ -21,7 +21,7 @@ from pydantic import SecretStr, ValidationError
 from rasterio.crs import CRS
 from rasterio.transform import Affine
 
-from fimbox_api import auth, main, rasters, storage, tasks
+from fimbox_api import auth, main, rasters, reach_geometry, storage, tasks
 from fimbox_api.models import HandFimJobOptions, ScenarioManifest
 
 HANDFIM = Path(__file__).resolve().parents[1] / "docker" / "handfim"
@@ -114,6 +114,10 @@ class StreamingWorkerTests(unittest.TestCase):
             patch.object(tasks, "job_s3_environment", return_value=dict(SECRETS)),
             patch.object(tasks, "clear_job_logs"),
             patch.object(tasks, "append_job_log"),
+            patch.object(
+                reach_geometry, "__lookup",
+                return_value=({"type": "LineString", "coordinates": [[-79, 36], [-78, 36]]}, None),
+            ),
         ]
         for patcher in patches:
             patcher.start()
@@ -143,6 +147,11 @@ class StreamingWorkerTests(unittest.TestCase):
             if key.endswith("/README.md"):
                 self.assertEqual(kwargs["ExtraArgs"], {"ContentType": "text/markdown"})
                 return
+            if key.endswith(".reaches.geojson"):
+                self.assertEqual(key, "data/output/s1/s1.reaches.geojson")
+                uploaded["reaches"] = json.loads(Path(path).read_bytes())
+                self.assertEqual(kwargs["ExtraArgs"], {"ContentType": "application/geo+json"})
+                return
             uploaded["body"] = Path(path).read_bytes()
             self.assertEqual(bucket, "fim-output")
             self.assertEqual(key, "data/output/scenarios.json")
@@ -162,13 +171,16 @@ class StreamingWorkerTests(unittest.TestCase):
         self.client.put_object.assert_called_once()
         self.assertEqual(self.client.put_object.call_args.kwargs["Key"], "data/output/s1/manifest.json")
         self.assertEqual(result["execution_mode"], "streaming-2024")
-        self.assertEqual(self.client.upload_file.call_count, 2)
+        self.assertEqual(self.client.upload_file.call_count, 3)
         self.assertEqual(json.loads(uploaded["body"]), PAYLOAD)
         self.assertIn({
             "path": "scenarios.json", "key": "data/output/scenarios.json",
             "size_bytes": len(uploaded["body"]),
         }, result["files"])
-        self.assertEqual({file["path"] for file in result["files"]}, {"scenarios.json", "README.md"})
+        self.assertEqual({file["path"] for file in result["files"]}, {"scenarios.json", "README.md", "s1/s1.reaches.geojson"})
+        feature = uploaded["reaches"]["features"][0]
+        self.assertEqual(feature["properties"]["ReachID"], "8780625")
+        self.assertEqual(feature["properties"]["processing_status"], "not_reported_missing")
         self.assertEqual(result["scenario_manifests"][0]["key"], "data/output/s1/manifest.json")
         self.assertEqual(result["scenario_manifests"][0]["tile_count"], 1)
         self.client.delete_objects.assert_not_called()
@@ -182,6 +194,45 @@ class StreamingWorkerTests(unittest.TestCase):
         with patch.object(tasks.subprocess, "Popen", side_effect=self.spawn()):
             tasks.hand_fim.run(str(uuid4()), PAYLOAD, **DESTINATION, execution_mode="streaming-2024")
         self.assertNotIn("--updated", self.command)
+
+    def test_missing_reach_and_lookup_failure_are_reported_without_failing_job(self):
+        uploaded = {}
+
+        def run(command, **kwargs):
+            document = manifest_document("s1", ["data/output/s1/03020201/0_0.cog"])
+            document["missing_reaches"] = ["03020201:8780625"]
+            Path(command[4], "s1.manifest.json").write_text(json.dumps(document))
+            return Mock(stdout=io.StringIO(), wait=Mock(return_value=0))
+
+        def upload(path, bucket, key, **kwargs):
+            if key.endswith(".reaches.geojson"):
+                uploaded["layer"] = json.loads(Path(path).read_text())
+
+        self.client.upload_file.side_effect = upload
+        with patch.object(reach_geometry, "__lookup", return_value=(None, "NLDI request failed")), \
+                patch.object(tasks.subprocess, "Popen", side_effect=run):
+            result = tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION, execution_mode="streaming-2024")
+        feature = uploaded["layer"]["features"][0]
+        self.assertIsNone(feature["geometry"])
+        self.assertEqual(feature["properties"]["geometry_error"], "NLDI request failed")
+        self.assertEqual(feature["properties"]["processing_status"], "skipped")
+        self.assertIn("s1/s1.reaches.geojson", {item["path"] for item in result["files"]})
+        tasks.append_job_log.assert_any_call(
+            self.job_id, "Reach geometry warning: Reach 8780625: NLDI request failed\n",
+        )
+
+    def test_existing_reach_layer_is_rejected_before_computing(self):
+        def head(**kwargs):
+            if kwargs["Key"].endswith("/s1/s1.reaches.geojson"):
+                return {}
+            raise missing("HeadObject")
+
+        self.client.head_object.side_effect = head
+        with patch.object(tasks.subprocess, "Popen") as run:
+            with self.assertRaisesRegex(RuntimeError, "s1.reaches.geojson.*already exists"):
+                tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION, execution_mode="streaming-2024")
+        run.assert_not_called()
+        self.client.upload_file.assert_not_called()
 
     def test_existing_scenarios_json_is_rejected_before_computing(self):
         def head(**kwargs):
@@ -247,6 +298,10 @@ class StreamingWorkerTests(unittest.TestCase):
                 for sid in ("s1", "s2"):
                     suffix = f"{sid}/manifest.json" if mode == "streaming-2024" else f"{sid}.cog"
                     self.assertIn(f"s3://fim-output/{suffix}", readme)
+                    reach_path = f"{sid}/{sid}.reaches.geojson" if mode == "streaming-2024" else f"{sid}.reaches.geojson"
+                    reach_file = next(file for file in result["files"] if file["path"] == reach_path)
+                    self.assertEqual(reach_file["key"], reach_path)
+                    self.assertIn(f"`{reach_path}`", readme)
                 if mode == "streaming-2024":
                     self.assertIn("s3://hydrofabric/hand/v1", readme)
                     self.assertIn("Processing tile size:", readme)
@@ -280,6 +335,20 @@ class StreamingWorkerTests(unittest.TestCase):
                 tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION, execution_mode="streaming-2024")
         self.client.delete_object.assert_called_once_with(Bucket="fim-output", Key="data/output/s1/manifest.json")
         self.assertFalse((self.root / "output" / "scenarios" / self.job_id).exists())
+
+    def test_reach_layer_upload_failure_rolls_back_published_manifest(self):
+        def upload(path, bucket, key, **kwargs):
+            if key.endswith(".reaches.geojson"):
+                raise ClientError({"Error": {"Code": "AccessDenied"}}, "PutObject")
+
+        self.client.upload_file.side_effect = upload
+        self.client.get_object.side_effect = lambda **kwargs: {
+            "Body": io.BytesIO(self.client.put_object.call_args.kwargs["Body"]),
+        }
+        with patch.object(tasks.subprocess, "Popen", side_effect=self.spawn()):
+            with self.assertRaises(ClientError):
+                tasks.hand_fim.run(self.job_id, PAYLOAD, **DESTINATION, execution_mode="streaming-2024")
+        self.client.delete_object.assert_called_once_with(Bucket="fim-output", Key="data/output/s1/manifest.json")
 
     def test_scenarios_upload_failure_fails_job_and_rolls_back_published_manifest(self):
         self.client.upload_file.side_effect = ClientError({"Error": {"Code": "AccessDenied"}}, "PutObject")

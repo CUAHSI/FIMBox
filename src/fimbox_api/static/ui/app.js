@@ -269,7 +269,9 @@ function clearActiveWorkspace({ removePreference = false } = {}) {
   if (state.jobPoll) { clearTimeout(state.jobPoll); state.jobPoll = null; }
   state.viewId = (state.viewId || 0) + 1;
   const list = $("#job-list");
-  if (list) list.replaceChildren(el("li", { className: "hint", text: "Open a workspace to list jobs." }));
+  if (list) list.replaceChildren(workspaceJobsPrompt());
+  const jobsLoading = $("#jobs-loading");
+  if (jobsLoading) jobsLoading.hidden = true;
   const view = $("#result-view");
   if (view) {
     const blank = view.cloneNode(false);
@@ -650,7 +652,7 @@ async function previewRaster(container, bucket, key) {
   }
 }
 
-function createBrowser(container, { bucket, root, onRaster, linkHandler }) {
+function createBrowser(container, { bucket, root, onRaster, onGeoJSON, linkHandler }) {
   const workspaceVersion = state.workspaceVersion;
   let listingRequest = 0;
   const crumbs = el("div", { className: "breadcrumb" });
@@ -692,6 +694,9 @@ function createBrowser(container, { bucket, root, onRaster, linkHandler }) {
     }
     if (onRaster && (hasSuffix(file.name, RASTER_SUFFIXES) || file.name === "manifest.json")) {
       actions.append(el("button", { type: "button", className: "small", text: "Map", onclick: () => onRaster(file.key) }), " ");
+    }
+    if (onGeoJSON && hasSuffix(file.name, [".geojson"])) {
+      actions.append(el("button", { type: "button", className: "small", text: "Map", onclick: () => onGeoJSON(file.key) }), " ");
     }
     actions.append(el("button", { type: "button", className: "small", text: "Download", onclick: () => downloadObject(bucket, file.key) }));
     return el("tr", {},
@@ -1757,19 +1762,32 @@ async function submitJob(event) {
 
 // ---------- Results ----------
 
+let jobListRequest = 0;
+
+function workspaceJobsPrompt() {
+  const prompt = el("li", { className: "hint", text: "Open a workspace to list jobs." });
+  prompt.dataset.workspaceRequired = "true";
+  return prompt;
+}
+
 async function loadJobs() {
   const list = $("#job-list");
+  const loading = $("#jobs-loading");
+  const request = ++jobListRequest;
   if (!authReady() || !state.workspace) {
+    loading.hidden = true;
     updateCompareJobOptions([]);
-    list.replaceChildren(el("li", { className: "hint", text: "Open a workspace to list jobs." }));
+    list.replaceChildren(workspaceJobsPrompt());
     return;
   }
   const workspaceVersion = state.workspaceVersion;
+  if (list.firstElementChild?.dataset.workspaceRequired === "true") list.replaceChildren();
+  loading.hidden = false;
   try {
     const { jobs } = await api("/jobs");
-    if (workspaceVersion !== state.workspaceVersion) return;
+    if (workspaceVersion !== state.workspaceVersion || request !== jobListRequest) return;
     updateCompareJobOptions(jobs);
-    list.replaceChildren(...jobs.slice().reverse().map((job) => {
+    list.replaceChildren(...jobs.map((job) => {
       const stateLabel = job.execution_state_known === false ? `${job.status} · stale` : job.status;
       const item = el("li", { onclick: () => openJob(job.job_id) },
         el("span", { text: job.display_name || job.job_id.slice(0, 8) + "…", title: job.display_name || job.job_id }),
@@ -1781,9 +1799,11 @@ async function loadJobs() {
     }));
     if (!jobs.length) list.append(el("li", { className: "hint", text: "No jobs in this workspace." }));
   } catch (error) {
-    if (workspaceVersion !== state.workspaceVersion || error.stale) return;
+    if (workspaceVersion !== state.workspaceVersion || request !== jobListRequest || error.stale) return;
     updateCompareJobOptions([]);
     list.replaceChildren(el("li", { className: "hint", text: `Could not list jobs: ${error.message}` }));
+  } finally {
+    if (workspaceVersion === state.workspaceVersion && request === jobListRequest) loading.hidden = true;
   }
 }
 
@@ -1943,6 +1963,12 @@ function authTileLayer(bucket, key, info) {
 const MAX_VISIBLE_SCENARIOS = 12;
 const LAYER_OPACITY = 0.8;
 
+function reachLayerName(path) {
+  const filename = path.slice(path.lastIndexOf("/") + 1);
+  const suffix = ".reaches.geojson";
+  return hasSuffix(filename, [suffix]) ? filename.slice(0, -suffix.length) : path;
+}
+
 function createResultMap(view, bucket, legend = "Flooded cells are shown in blue; toggle scenarios with the layer control.") {
   const status = $(".map-status", view);
   const container = $(".map", view);
@@ -1955,27 +1981,64 @@ function createResultMap(view, bucket, legend = "Flooded cells are shown in blue
   const map = L.map(container, { minZoom: 2 });
   osmLayer().addTo(map);
   map.setView([39, -98], 4);
-  const control = L.control.layers(null, null, { collapsed: false }).addTo(map);
+  let rasterControl = null, vectorControl = null, vectorList = null;
+  function layerControl(title) {
+    const control = L.control.layers(null, null, { collapsed: false }).addTo(map);
+    const element = control.getContainer();
+    element.classList.add("result-layer-control");
+    element.prepend(el("div", { className: "result-layer-title", text: title }));
+    return control;
+  }
   const overlays = new Map();
+  const vectors = new Map();
   const ready = new Map();
   const notes = new Set();
+  const vectorNotes = new Map();
+  const invisibleFrames = new Set();
+  function updateReachHighlights() {
+    const active = new Set();
+    for (const [key, entry] of ready) {
+      if (entry.scenario && map.hasLayer(entry.overlay) && !invisibleFrames.has(key)) active.add(entry.scenario);
+    }
+    for (const entry of vectors.values()) {
+      const matching = entry.scenario && active.has(entry.scenario);
+      entry.label.classList.toggle("matching-flood", Boolean(matching));
+      entry.badge.hidden = !matching;
+      entry.checkbox.checked = map.hasLayer(entry.overlay);
+    }
+  }
+  map.on("layeradd layerremove", (event) => {
+    if (event.type === "layerremove") {
+      for (const [key, entry] of ready) {
+        if (entry.overlay === event.layer && invisibleFrames.delete(key)) entry.overlay.setOpacity(LAYER_OPACITY);
+      }
+    }
+    updateReachHighlights();
+  });
   let player = null;
   status.textContent = legend;
+  const updateStatus = () => { status.textContent = [legend, ...notes, ...vectorNotes.values()].join(" "); };
   view.addEventListener("tabchange", (event) => { if (event.detail.name === "map") map.invalidateSize(); });
 
   // Resolves to { overlay, info } (or null on error), registering the layer once.
   function overlayFor(layer) {
+    if (overlays.has(layer.key) && layer.scenario) {
+      overlays.get(layer.key).then((entry) => {
+        if (entry) { entry.scenario = layer.scenario; updateReachHighlights(); }
+      });
+    }
     if (!overlays.has(layer.key)) {
       overlays.set(layer.key, api(`/outputs/info?${query({ bucket, key: layer.key })}`).then((info) => {
-        const entry = { overlay: authTileLayer(bucket, layer.key, info), info };
-        control.addOverlay(entry.overlay, layer.name);
+        const entry = { overlay: authTileLayer(bucket, layer.key, info), info, scenario: layer.scenario };
+        if (!rasterControl) rasterControl = layerControl("Flood extents");
+        rasterControl.addOverlay(entry.overlay, layer.name);
         if (info.minzoom > 2) notes.add(`Layers appear at zoom ≥ ${info.minzoom}.`);
         ready.set(layer.key, entry);
         return entry;
       }).catch((error) => {
         notes.add(`${layer.name}: ${error.message}`);
         return null;
-      }).finally(() => { status.textContent = [legend, ...notes].join(" "); }));
+      }).finally(updateStatus));
     }
     return overlays.get(layer.key);
   }
@@ -1990,14 +2053,105 @@ function createResultMap(view, bucket, legend = "Flooded cells are shown in blue
   async function add(layer, fit) {
     const entry = await overlayFor(layer);
     if (!entry) return;
+    invisibleFrames.delete(layer.key);
     entry.overlay.setOpacity(LAYER_OPACITY);
     if (!map.hasLayer(entry.overlay)) entry.overlay.addTo(map);
+    updateReachHighlights();
     if (fit) fitTo(entry.info);
+  }
+
+  function registerVector(layer) {
+    if (vectors.has(layer.key)) return vectors.get(layer.key);
+    const workspaceVersion = state.workspaceVersion;
+    const overlay = L.layerGroup();
+    const checkbox = el("input", { type: "checkbox", "aria-label": `Show reach layer ${layer.name}` });
+    const badge = el("span", { className: "result-reach-match", text: "Active flood extent", hidden: true });
+    const label = el("label", { className: "result-reach-layer" }, checkbox, el("span", { text: layer.name }), badge);
+    const entry = { overlay, checkbox, label, badge, scenario: layer.scenario, promise: null, loaded: false, bounds: null };
+    vectors.set(layer.key, entry);
+    if (!vectorControl) {
+      vectorControl = L.control({ position: "topright" });
+      vectorControl.onAdd = () => {
+        vectorList = el("div", { className: "result-reach-list" });
+        const element = el("div", { className: "leaflet-control-layers result-layer-control" },
+          el("div", { className: "result-layer-title", text: "Reach layers" }), vectorList);
+        L.DomEvent.disableClickPropagation(element);
+        L.DomEvent.disableScrollPropagation(element);
+        return element;
+      };
+      vectorControl.addTo(map);
+    }
+    vectorList.append(label);
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) overlay.addTo(map);
+      else map.removeLayer(overlay);
+    });
+    const load = () => {
+      if (entry.loaded) return Promise.resolve(entry);
+      if (!entry.promise) {
+        entry.promise = api(`/ui/objects/geojson?${query({ bucket, key: layer.key })}`).then((document) => {
+          if (workspaceVersion !== state.workspaceVersion || !container.isConnected) return null;
+          if (!document || document.type !== "FeatureCollection" || !Array.isArray(document.features)) {
+            throw new Error("Invalid GeoJSON feature collection");
+          }
+          const features = L.geoJSON(document, {
+            style: { color: "#d62728", weight: 4 },
+            onEachFeature: (feature, item) => {
+              const properties = feature.properties || {};
+              const text = [
+                properties.ReachID != null ? `Reach ${properties.ReachID}` : null,
+                properties.HUC != null ? `HUC ${properties.HUC}` : null,
+                properties.Streamflow != null ? `${properties.Streamflow} m³/s` : null,
+                properties.processing_status === "skipped" ? "Skipped by streaming" : null,
+              ].filter(Boolean).join(" · ");
+              if (text) item.bindTooltip(el("span", { text }));
+            },
+          });
+          overlay.addLayer(features);
+          entry.bounds = features.getBounds();
+          entry.loaded = true;
+          const missing = document.features.filter((feature) => !feature.geometry).length;
+          const warnings = [];
+          if (!entry.bounds.isValid()) warnings.push("no mapped geometry available");
+          if (missing) warnings.push(`${missing} feature(s) have no geometry`);
+          if (warnings.length) vectorNotes.set(layer.key, `${layer.name}: ${warnings.join("; ")}.`);
+          else vectorNotes.delete(layer.key);
+          updateStatus();
+          return entry;
+        }).catch((error) => {
+          if (workspaceVersion === state.workspaceVersion && container.isConnected) {
+            vectorNotes.set(layer.key, `${layer.name}: ${error.message}`);
+            updateStatus();
+          }
+          return null;
+        }).finally(() => { entry.promise = null; });
+      }
+      return entry.promise;
+    };
+    entry.load = load;
+    overlay.on("add", load);
+    updateReachHighlights();
+    return entry;
+  }
+
+  async function addVector(layer) {
+    const entry = registerVector(layer);
+    if (!map.hasLayer(entry.overlay)) entry.overlay.addTo(map);
+    const loaded = await entry.load();
+    if (loaded && loaded.bounds.isValid()) {
+      map.invalidateSize();
+      map.fitBounds(loaded.bounds);
+    }
   }
 
   function hide(overlay) {
     map.removeLayer(overlay);
     overlay.setOpacity(LAYER_OPACITY);
+  }
+
+  function report(message) {
+    notes.add(message);
+    updateStatus();
   }
 
   function whenLoaded(overlay) {
@@ -2032,16 +2186,22 @@ function createResultMap(view, bucket, legend = "Flooded cells are shown in blue
       if (current !== index) return;
       for (const frame of frames) {
         const other = ready.get(frame.key);
-        if (other && frame !== frames[index] && frame !== next && map.hasLayer(other.overlay)) hide(other.overlay);
+        if (other && frame !== frames[index] && map.hasLayer(other.overlay)
+            && (frame !== next || !invisibleFrames.has(frame.key))) hide(other.overlay);
       }
       if (entry) {
+        invisibleFrames.delete(frames[index].key);
         if (!map.hasLayer(entry.overlay)) entry.overlay.addTo(map);
         entry.overlay.setOpacity(LAYER_OPACITY);
         entry.overlay.bringToFront();
+        updateReachHighlights();
       }
       const preload = await overlayFor(next);
       if (current !== index || !preload || preload === entry) return;
-      if (!map.hasLayer(preload.overlay)) preload.overlay.setOpacity(0).addTo(map);
+      if (!map.hasLayer(preload.overlay)) {
+        invisibleFrames.add(next.key);
+        preload.overlay.setOpacity(0).addTo(map);
+      }
     }
 
     async function loop(token) {
@@ -2068,7 +2228,7 @@ function createResultMap(view, bucket, legend = "Flooded cells are shown in blue
     label.textContent = `1/${frames.length} ${frames[0].name}${describe(frames[0].name)}`;
   }
 
-  return { add, animate };
+  return { add, addVector, registerVector, animate, report };
 }
 
 async function loadOutputDetails(view, bucket, prefix, result) {
@@ -2095,6 +2255,8 @@ async function loadOutputDetails(view, bucket, prefix, result) {
   };
   let map;
   let layers = [];
+  let vectorLayers = [];
+  let discoveryErrors = [];
   let scenarios = [];
   const describe = (id) => {
     const reaches = scenarios.find((scenario) => scenario.ScenarioID === id)?.Reaches || [];
@@ -2109,6 +2271,8 @@ async function loadOutputDetails(view, bucket, prefix, result) {
       if (eager || layer.diff || layer === frames[0]) map.add(layer, index === 0);
     });
     map.animate(frames, describe);
+    vectorLayers.forEach((layer) => map.registerVector(layer));
+    discoveryErrors.forEach((message) => map.report(message));
   };
   const ensureMap = () => {
     if (map === undefined) {
@@ -2126,8 +2290,18 @@ async function loadOutputDetails(view, bucket, prefix, result) {
     const current = ensureMap();
     if (current) current.add(layer, true);
   };
-  const showRaster = (key) => showLayer({ name: key.slice(root.length).replace(/^\//, ""), key });
-  browser = createBrowser($(".files", view), { bucket, root, linkHandler, onRaster: showRaster });
+  const showRaster = (key) => showLayer(layers.find((layer) => layer.key === key)
+    || { name: key.slice(root.length).replace(/^\//, ""), key });
+  const showGeoJSON = (key) => {
+    activateTab("result", "map", view);
+    const current = ensureMap();
+    const name = key.slice(root.length).replace(/^\//, "");
+    if (current) current.addVector({
+      name: reachLayerName(name), key,
+      scenario: hasSuffix(name, [".reaches.geojson"]) ? reachLayerName(name) : null,
+    });
+  };
+  browser = createBrowser($(".files", view), { bucket, root, linkHandler, onRaster: showRaster, onGeoJSON: showGeoJSON });
   view.addEventListener("tabchange", (event) => { if (event.detail.name === "map") ensureMap(); });
   renderParity($(".parity", view), parity, compared, showLayer);
 
@@ -2151,23 +2325,68 @@ async function loadOutputDetails(view, bucket, prefix, result) {
   }
 
   if (result) {
+    vectorLayers = (result.files || [])
+      .filter((file) => file.key && hasSuffix(file.path || file.key, [".reaches.geojson"]))
+      .map((file) => {
+        const name = reachLayerName(file.path || file.key.slice(root.length).replace(/^\//, ""));
+        return { name, scenario: name, key: file.key };
+      });
     if (result.scenario_manifests && result.scenario_manifests.length) {
-      layers = result.scenario_manifests.map((item) => ({ name: item.ScenarioID, key: item.key }));
+      layers = result.scenario_manifests.map((item) => ({ name: item.ScenarioID, scenario: item.ScenarioID, key: item.key }));
     } else {
       const ids = (result.outputs || []).map((output) => output.ScenarioID);
-      layers = ids.map((id) => ({ name: id, key: joinKey(root, `${id}.cog`) }))
+      layers = ids.map((id) => ({ name: id, scenario: id, key: joinKey(root, `${id}.cog`) }))
         .filter((layer) => (result.files || []).some((file) => file.key === layer.key));
     }
   } else if (scenarios.length) {
     try {
-      const listing = await api(`/ui/objects?${query({ bucket, prefix: root })}`);
-      const files = new Set(listing.files.map((file) => file.key));
-      const folders = new Set(listing.folders.map((folder) => folder.name));
+      const files = new Set(), folders = new Set();
+      let token = null;
+      do {
+        const listing = await api(`/ui/objects?${query({ bucket, prefix: root, token })}`);
+        for (const file of listing.files) {
+          files.add(file.key);
+          if (hasSuffix(file.name, [".reaches.geojson"])) {
+            const name = reachLayerName(file.name);
+            vectorLayers.push({ name, scenario: name, key: file.key });
+          }
+        }
+        for (const folder of listing.folders) folders.add(folder.name);
+        token = listing.next_token;
+      } while (token);
       for (const { ScenarioID: id } of scenarios) {
-        if (files.has(joinKey(root, `${id}.cog`))) layers.push({ name: id, key: joinKey(root, `${id}.cog`) });
-        else if (folders.has(id)) layers.push({ name: id, key: joinKey(root, id, "manifest.json") });
+        if (files.has(joinKey(root, `${id}.cog`))) layers.push({ name: id, scenario: id, key: joinKey(root, `${id}.cog`) });
+        else if (folders.has(id)) layers.push({ name: id, scenario: id, key: joinKey(root, id, "manifest.json") });
       }
-    } catch { /* the Files tab reports listing errors */ }
+      const directories = scenarios.map(({ ScenarioID }) => ScenarioID).filter((id) => folders.has(id));
+      const discovered = Array.from({ length: directories.length }, () => []);
+      let next = 0;
+      async function findVectors() {
+        while (next < directories.length) {
+          const index = next++;
+          const id = directories[index];
+          let token = null;
+          try {
+            do {
+              const listing = await api(`/ui/objects?${query({ bucket, prefix: joinKey(root, id), token })}`);
+              for (const file of listing.files) {
+                if (hasSuffix(file.name, [".reaches.geojson"])) {
+                  const name = reachLayerName(file.name);
+                  discovered[index].push({ name, scenario: name, key: file.key });
+                }
+              }
+              token = listing.next_token;
+            } while (token);
+          } catch (error) {
+            discoveryErrors.push(`Could not list reach layers for ${id}: ${error.message}`);
+          }
+        }
+      }
+      await Promise.all(Array.from({ length: Math.min(8, directories.length) }, findVectors));
+      vectorLayers.push(...discovered.flat());
+    } catch (error) {
+      discoveryErrors.push(`Could not discover result layers: ${error.message}`);
+    }
   }
   const diffLayers = parity.map((item) => ({ name: `${item.ScenarioID} differences`, key: item.diff_key, diff: true }));
   // Comparison jobs write no scenario rasters of their own; their map shows only differences.

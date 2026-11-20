@@ -6,10 +6,10 @@
   <title>FIMBox HAND-FIM</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
-  <link rel="stylesheet" href="/ui/static/app.css?v=cam-1531-scrollable-reaches">
+  <link rel="stylesheet" href="/ui/static/app.css?v=workspace-jobs-loading">
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
           integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="" defer></script>
-  <script src="/ui/static/app.js?v=historical-nwm-96h" defer></script>
+  <script src="/ui/static/app.js?v=workspace-jobs-prompt" defer></script>
 </head>
 <body>
   <header>
@@ -183,6 +183,9 @@
       <div class="split">
         <aside>
           <h3>Workspace jobs <button type="button" id="jobs-refresh" class="small">Refresh</button></h3>
+          <div id="jobs-loading" class="jobs-loading hint" role="status" hidden>
+            <span class="loading-icon" aria-hidden="true"></span> Loading jobs…
+          </div>
           <ul id="job-list" class="list"></ul>
         </aside>
         <div id="result-view">

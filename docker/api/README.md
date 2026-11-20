@@ -97,6 +97,28 @@ and streamflows in the same format accepted as input. It is included in the
 result's `files` list and retained alongside the S3 outputs. Each new job gets
 its own prefix, including reruns and comparisons.
 
+Each scenario also has a WGS84 GeoJSON vector layer in `files`: legacy jobs
+place `<ScenarioID>.reaches.geojson` next to `<ScenarioID>.cog`; streaming
+jobs place `<ScenarioID>/<ScenarioID>.reaches.geojson` next to that scenario's
+manifest. It includes all requested reach entries, with `HUC`, `ReachID`,
+and `Streamflow` (m³/s) properties. Geometries are NHDPlus COMID lines
+retrieved from public USGS NLDI, using the same source as the reach picker.
+Repeated ReachIDs are looked up once per job. If a lookup fails, the job still
+completes: the feature has null geometry and a `geometry_error`, and the job
+log reports the error. In streaming mode, `processing_status` is `skipped`
+when the manifest reports the HUC and reach missing, otherwise
+`not_reported_missing` (which does not imply the reach flooded). Legacy runs
+use `unknown`. Download the GeoJSON for use in GIS software.
+The Results Map lists flood extents and reach GeoJSON files in separate
+toggleable controls. Reach layers start off and load when enabled; reach
+entries matching visible flood extents are highlighted, including during
+animation. In Results → Files, **Map**
+also adds any GeoJSON file and zooms to its geometry. Hover over a reach to see its ID, HUC,
+streamflow, and streaming skipped status when present. Null geometries cannot
+be drawn and are counted in the map status. The authenticated map reader
+accepts complete GeoJSON feature collections up to 16 MiB; larger files can
+still be downloaded. Reach layers are not included in scenario animation.
+
 Both modes also retain `<prefix>/README.md` (`text/markdown`), listed in `files`.
 It describes the HAND-FIM outputs and input units, records the job ID, UTC
 worker start time, execution mode, effective process limit, overwrite setting,

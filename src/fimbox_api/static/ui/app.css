@@ -56,12 +56,23 @@ fieldset input.num { width: 120px; }
 .list { list-style: none; padding: 0; margin: 0; max-height: 360px; overflow: auto; }
 .list li { padding: 4px 6px; border-radius: 4px; cursor: pointer; display: flex; justify-content: space-between; gap: 6px; font-family: ui-monospace, monospace; font-size: 12px; }
 .list li:hover, .list li.active { background: #ddf4ff; }
+.jobs-loading { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; font-size: 12px; }
+.loading-icon { width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: loading-spin .8s linear infinite; }
+@keyframes loading-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .loading-icon { animation: none; } }
 .status { font-family: system-ui, sans-serif; font-weight: 600; }
 .status.success { color: #1a7f37; } .status.failure, .status.revoked { color: #cf222e; } .status.started, .status.queued { color: #9a6700; }
 .status.stale { color: var(--muted); }
 dl.summary { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; }
 dl.summary dt { font-weight: 600; } dl.summary dd { margin: 0; word-break: break-all; }
 .map { height: 520px; border: 1px solid var(--border); border-radius: 4px; }
+.result-layer-control .leaflet-control-layers-list { max-height: 180px; overflow-y: auto; }
+.result-layer-title { padding: 6px 10px 0; font-weight: 600; }
+.result-reach-list { max-height: 180px; overflow-y: auto; padding: 6px 10px; }
+.result-reach-layer { display: block; border-radius: 3px; padding: 2px 4px; }
+.result-reach-layer.matching-flood { background: #d7efff; color: #075985; font-weight: 700; }
+.result-reach-match { display: block; margin-left: 20px; font-size: 0.75em; }
+.result-reach-match[hidden] { display: none; }
 .picker { margin: 12px 0; padding: 8px; border: 1px solid var(--border); border-radius: 4px; }
 #picker-map { height: 420px; cursor: crosshair; }
 .picker .error { color: #cf222e; }

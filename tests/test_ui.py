@@ -91,8 +91,8 @@ class UiTests(unittest.TestCase):
         self.assertNotIn('name="base_prefix"', page)
         self.assertNotIn('name="candidate_prefix"', page)
         self.assertNotIn("Your jobs", page)
-        self.assertIn('href="/ui/static/app.css?v=cam-1531-scrollable-reaches"', page)
-        self.assertIn('src="/ui/static/app.js?v=historical-nwm-96h"', page)
+        self.assertIn('href="/ui/static/app.css?v=workspace-jobs-loading"', page)
+        self.assertIn('src="/ui/static/app.js?v=workspace-jobs-prompt"', page)
         self.assertNotIn('id="json-file"', page)
         self.assertNotIn('id="json-url-form"', page)
         self.assertNotIn('id="json-url"', page)
@@ -190,6 +190,7 @@ class UiTests(unittest.TestCase):
         scripts = [
             Path(__file__).with_name("ui_workspaces.test.cjs"),
             Path(__file__).with_name("ui_streamflow.test.cjs"),
+            Path(__file__).with_name("ui_result_map.test.cjs"),
         ]
         completed = subprocess.run(
             [shutil.which("node"), "--test", *(str(script) for script in scripts)],
@@ -316,6 +317,39 @@ class UiTests(unittest.TestCase):
         response = self.client.get("/ui/objects/preview", params={"bucket": "fim", "key": "out/a.cog"})
         self.assertEqual(response.status_code, 400)
         self.s3.get_object.assert_not_called()
+
+    def test_geojson_map_reads_complete_collection_with_user_credentials(self):
+        document = {"type": "FeatureCollection", "features": [], "padding": "x" * (ui.PREVIEW_MAX_BYTES + 1)}
+        content = json.dumps(document).encode()
+        body = io.BytesIO(content)
+        self.s3.get_object.return_value = {"Body": body}
+        response = self.client.get("/ui/objects/geojson", params={"bucket": "fim", "key": "out/s1.reaches.geojson"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), document)
+        self.assertTrue(body.closed)
+        self.s3.get_object.assert_called_once_with(
+            Bucket="fim", Key="out/s1.reaches.geojson", Range=f"bytes=0-{ui.GEOJSON_MAX_BYTES}",
+        )
+        self.output_client.assert_called_once()
+
+    def test_geojson_map_rejects_invalid_oversized_and_inaccessible_objects(self):
+        params = {"bucket": "fim", "key": "out/s1.geojson"}
+        for key in ("out/file.json", "out/../s1.geojson"):
+            self.assertEqual(self.client.get("/ui/objects/geojson", params={**params, "key": key}).status_code, 400)
+        self.s3.get_object.assert_not_called()
+        for content in (b"not json", b'{"type":"FeatureCollection","features":{}}',
+                        b'{"type":"FeatureCollection","features":[],"value":NaN}',
+                        b'{"type":"FeatureCollection","features":[],"value":1e999}'):
+            self.s3.get_object.return_value = {"Body": io.BytesIO(content)}
+            self.assertEqual(self.client.get("/ui/objects/geojson", params=params).status_code, 422)
+        with patch.object(ui, "GEOJSON_MAX_BYTES", 10):
+            self.s3.get_object.return_value = {"Body": io.BytesIO(b"x" * 11)}
+            self.assertEqual(self.client.get("/ui/objects/geojson", params=params).status_code, 413)
+        for code, status in (("AccessDenied", 403), ("NoSuchKey", 404)):
+            self.s3.get_object.side_effect = client_error(code)
+            self.assertEqual(self.client.get("/ui/objects/geojson", params=params).status_code, status)
+        self.patch_settings(hydroshare_client_id="", hydroshare_client_secret=None)
+        self.assertEqual(self.client.get("/ui/objects/geojson", params=params).status_code, 409)
 
     def test_raster_preview_returns_png_without_exposing_signed_url(self):
         self.s3.generate_presigned_url.return_value = "https://storage.test/input.tif?signature=secret"

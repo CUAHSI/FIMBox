@@ -8,6 +8,7 @@ public API routes.
 import io
 import json
 import logging
+import math
 import re
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
@@ -35,6 +36,7 @@ logger = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).parent / "static" / "ui"
 PREVIEW_SUFFIXES = (".json", ".md", ".txt", ".csv", ".log", ".xml", ".yaml", ".yml", ".geojson")
 PREVIEW_MAX_BYTES = 512 * 1024
+GEOJSON_MAX_BYTES = 16 * 1024 * 1024
 DOWNLOAD_URL_SECONDS = 300
 LIST_MAX_KEYS = 1000
 PARQUET_MAX_ROWS = 200
@@ -319,6 +321,40 @@ def preview_object(bucket: Bucket, key: Key, session: AuthenticatedSession) -> O
     return ObjectPreview(
         key=key, size_bytes=size, text=content.decode("utf-8", errors="replace"), truncated=size > len(content),
     )
+
+
+@router.get("/objects/geojson")
+def read_geojson(bucket: Bucket, key: Key, session: AuthenticatedSession) -> dict[str, Any]:
+    """Read a complete, bounded GeoJSON feature collection for the results map."""
+    key = __clean_path(key, folder=False)
+    if not key.lower().endswith(".geojson"):
+        raise HTTPException(status_code=400, detail="Map layer must be a GeoJSON file")
+    client = __s3_client(bucket, key, session)
+    try:
+        response = client.get_object(Bucket=bucket, Key=key, Range=f"bytes=0-{GEOJSON_MAX_BYTES}")
+        with response["Body"] as body:
+            content = body.read(GEOJSON_MAX_BYTES + 1)
+    except ClientError as error:
+        raise __s3_error(error) from None
+    if len(content) > GEOJSON_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="GeoJSON layer exceeds the 16 MiB map limit; download instead")
+    try:
+        def reject_nonfinite(value: str) -> None:
+            raise ValueError(f"Invalid JSON number {value}")
+
+        def finite_float(value: str) -> float:
+            number = float(value)
+            if not math.isfinite(number):
+                raise ValueError(f"Invalid JSON number {value}")
+            return number
+
+        document = json.loads(content, parse_constant=reject_nonfinite, parse_float=finite_float)
+        if not isinstance(document, dict) or document.get("type") != "FeatureCollection" \
+                or not isinstance(document.get("features"), list):
+            raise ValueError("Expected a feature collection")
+    except (ValueError, UnicodeDecodeError):
+        raise HTTPException(status_code=422, detail="GeoJSON layer is not a valid feature collection") from None
+    return document
 
 
 class __RangeReader(io.RawIOBase):

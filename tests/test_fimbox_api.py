@@ -18,7 +18,7 @@ from kombu.exceptions import OperationalError
 from pydantic import SecretStr, ValidationError
 from redis.exceptions import ConnectionError as RedisConnectionError
 
-from fimbox_api import auth, history, job_logs, job_timing, main, storage, tasks, workspaces
+from fimbox_api import auth, history, job_logs, job_timing, main, reach_geometry, storage, tasks, workspaces
 from fimbox_api.models import HandFimParameters, OutputDestination
 
 
@@ -449,6 +449,12 @@ class WorkerTests(unittest.TestCase):
             mock = patcher.start()
             setattr(self, name, mock)
             self.addCleanup(patcher.stop)
+        patcher = patch.object(
+            reach_geometry, "__lookup",
+            return_value=({"type": "LineString", "coordinates": [[-79, 36], [-78, 36]]}, None),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def __write_output(self, command, **kwargs):
         source = Path(command[3])
@@ -482,7 +488,7 @@ class WorkerTests(unittest.TestCase):
             "fim-output", f"data/output/{PAYLOAD[0]['ScenarioID']}.cog",
             ExtraArgs={"ContentType": "image/tiff"},
         )
-        self.assertEqual(self.storage_client.upload_file.call_count, 3)
+        self.assertEqual(self.storage_client.upload_file.call_count, 4)
         self.assertEqual(run.call_args.args[0][-3:], [
             str(self.root / "input" / "jobs" / self.job_id / "scenario.json"), "1", self.job_id,
         ])
@@ -521,9 +527,9 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(
             {file["path"] for file in result["files"]},
             {f"{PAYLOAD[0]['ScenarioID']}.cog", f"{PAYLOAD[0]['ScenarioID']}.tif",
-             "logs/run.txt", "scenarios.json", "README.md"},
+             f"{PAYLOAD[0]['ScenarioID']}.reaches.geojson", "logs/run.txt", "scenarios.json", "README.md"},
         )
-        self.assertEqual(self.storage_client.upload_file.call_count, 5)
+        self.assertEqual(self.storage_client.upload_file.call_count, 6)
         for file in result["files"]:
             self.assertEqual(file["key"], f"data/output/{file['path']}")
             self.assertNotIn("download_url", file)
@@ -549,7 +555,7 @@ class WorkerTests(unittest.TestCase):
                 self.job_id, PAYLOAD, **DESTINATION, overwrite=True,
             )
         self.storage_client.head_object.assert_not_called()
-        self.assertEqual(self.storage_client.upload_file.call_count, 3)
+        self.assertEqual(self.storage_client.upload_file.call_count, 4)
         self.assertEqual(result["output_bucket"], "fim-output")
         self.assertNotIn("overwrite", result)
 
@@ -652,6 +658,8 @@ class WorkerTests(unittest.TestCase):
                 self.assertEqual(json.loads(Path(filename).read_text()), PAYLOAD)
             elif Path(filename).name == "README.md":
                 self.assertIn("# HAND-FIM scenario outputs", Path(filename).read_text())
+            elif filename.endswith(".reaches.geojson"):
+                self.assertEqual(json.loads(Path(filename).read_text())["features"][0]["properties"]["processing_status"], "unknown")
             else:
                 self.assertEqual(Path(filename).read_bytes(), b"test-cog")
 

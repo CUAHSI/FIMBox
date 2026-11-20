@@ -189,6 +189,10 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
 `authentication` branch at `5da02c2171aca24ab69a0687be64b730e4d0272c`.
 
 - **`src/fimbox_api/__init__.py`** — Package marker and template attribution.
+- **`src/fimbox_api/reach_geometry.py`** — Fetches USGS NLDI NHDPlus COMID
+  lines once per distinct input ReachID and writes per-scenario GeoJSON layers
+  containing every requested reach, flow, lookup errors, and streaming missing
+  status. Null geometry and job-log warnings preserve lookup failures.
 - **`src/fimbox_api/config.py`** — Environment-based API/worker settings,
   Redis URLs, metadata TTL, visibility timeout, HAND-FIM runtime paths,
   S3-compatible endpoint/signing settings, and HydroShare OAuth configuration.
@@ -244,6 +248,8 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
       `test-data` and sets `EXAMPLES_DIR`
     - `/ui/objects`: one-level S3 listing
     - `/ui/objects/preview`: the first 512 KiB of a text file
+    - `/ui/objects/geojson`: complete GeoJSON feature collection, bounded to
+      16 MiB, via the user's S3 permissions for on-demand result-map overlays
     - `/ui/objects/raster`: TIFF/COG first-band PNG preview, max 1024 pixels per
       side, sampled percentile grayscale stretch and transparent nodata. Uses a
       permission-scoped short-lived GET URL only inside the API; browser fetches
@@ -334,7 +340,8 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
       invalidate pending lookups and application controls.
     - mandatory create/open workspace gate, per-user/browser last-workspace
       restoration through the API, job submission and log polling; workspace
-      switches clear results/maps and ignore stale in-flight responses
+      switches clear results/maps and ignore stale in-flight responses. The
+      jobs list preserves the API's newest-submitted-first history order.
     - Input dataset tab: an "About the input files" explanation (no preparation
       form), then
       two scrollable file browsers: the
@@ -357,7 +364,15 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
       `animate(frames)` player shows one scenario layer at a time
       (play/step/slider/delay), preloading the next frame at opacity 0 and
       waiting for its tiles. Over 12 scenarios, only the first is added
-      up front.
+      up front. Separate titled controls list flood/difference rasters and
+      reach GeoJSON outputs, which are registered as toggleable vector
+      layers; all start off and load when enabled. Reach entries corresponding
+      to visible scenario rasters are highlighted, including during animation.
+      Reach-layer control labels use scenario IDs rather than object paths.
+      The Files tab also maps GeoJSON and fits it to view. Retained result
+      discovery lists scenario folders for nested streaming reach layers.
+      Vector layers have
+      reach tooltips and are not part of scenario animation.
     - a "Compare two results" form (`POST /jobs/compare`) that selects two
       successful jobs from the active workspace; comparison jobs show
       base/candidate links, a parity table with "Map diff", and diff layers
@@ -470,6 +485,10 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
   `<prefix>/scenarios.json` with application/json content type and a `files`
   entry. It follows the output overwrite policy; streaming checks for conflicts
   before computation and rolls back published manifests if that upload fails.
+  Both publish reach GeoJSON and include it in `files`; legacy uses
+  `<ScenarioID>.reaches.geojson`, while streaming uses
+  `<ScenarioID>/<ScenarioID>.reaches.geojson` next to the scenario manifest.
+  Streaming checks conflicts before computation and records skipped reaches.
   A generated `README.md` accompanies the JSON in both modes and is listed in
   `files`, with output interpretation, UTC worker start time/job ID, effective
   process limit, mode/overwrite, counts, streaming source/tile size when relevant,

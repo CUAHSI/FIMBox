@@ -30,6 +30,7 @@ from .models import (
 from .job_logs import append_job_log, clear_job_logs
 from .history import HistoryTask
 from .parity import compare_scenario_outputs
+from .reach_geometry import write_layers
 from .storage import StorageCredentialsError, job_s3_environment, output_file_key, s3_client
 
 logger = logging.getLogger(__name__)
@@ -98,11 +99,20 @@ def __write_output_readme(
         "`ScenarioID` names each scenario; `Reaches` contains eight-digit `HUC` codes, NWM `ReachID` "
         "identifiers, and `Streamflow` in cubic meters per second (m^3/s).\n",
         "- [README.md](README.md): this run description.\n\n",
+        ("Each `<ScenarioID>/<ScenarioID>.reaches.geojson` is an RFC 7946 WGS84 vector layer of all requested "
+         if streamed else
+         "Each `<ScenarioID>.reaches.geojson` is an RFC 7946 WGS84 vector layer of all requested ")
+        +
+        "reaches, using USGS NLDI NHDPlus COMID geometry. Properties include HUC, ReachID, "
+        "Streamflow (m^3/s), geometry_error and processing_status. A null geometry and non-null "
+        "geometry_error mean lookup failed; see job logs. Streaming marks reaches reported missing "
+        "as skipped; not_reported_missing is not proof of flooding. Legacy status is unknown.\n\n",
         layout,
         "\nScenario outputs relative to this directory:\n\n",
     ])
     lines.extend(
-        f"- `{sid}/manifest.json`\n" if streamed else f"- `{sid}.cog`\n" for sid in scenario_ids
+        f"- `{sid}/manifest.json`, `{sid}/{sid}.reaches.geojson`\n" if streamed
+        else f"- `{sid}.cog`, `{sid}.reaches.geojson`\n" for sid in scenario_ids
     )
     lines.extend([
         "\n## Rerun\n\n",
@@ -145,6 +155,17 @@ def __output_files(output_dir: Path) -> list[Path]:
         elif not path.is_dir():
             raise RuntimeError("Job output directory contains an unsupported file")
     return files
+
+
+def __write_reach_layers(
+    job_id: str, scenarios: HandFimParameters, output_dir: Path,
+    missing_reaches: dict[str, set[str]] | None = None,
+) -> list[Path]:
+    paths, warnings = write_layers(scenarios, output_dir, missing_reaches)
+    for warning in warnings:
+        logger.warning("Job %s reach geometry: %s", job_id, warning)
+        append_job_log(job_id, f"Reach geometry warning: {warning}\n")
+    return paths
 
 
 def __run_scenario(command: list[str], job_id: str, extra_env: dict[str, str] | None = None) -> None:
@@ -306,11 +327,14 @@ def __hand_fim_streaming(
     scenarios_key = output_file_key(destination.output_prefix, scenarios_path.name)
     readme_path = output_dir / "README.md"
     readme_key = output_file_key(destination.output_prefix, readme_path.name)
+    reach_keys = {
+        sid: output_file_key(destination.output_prefix, f"{sid}/{sid}.reaches.geojson") for sid in scenario_ids
+    }
     previous = {}
     if destination.overwrite:
         previous = {sid: __load_manifest(client, bucket, key) for sid, key in manifest_keys.items()}
     else:
-        __reject_existing_s3_keys(client, bucket, [*manifest_keys.values(), scenarios_key, readme_key])
+        __reject_existing_s3_keys(client, bucket, [*manifest_keys.values(), *reach_keys.values(), scenarios_key, readme_key])
     published = []
     try:
         __run_scenario(
@@ -333,6 +357,10 @@ def __hand_fim_streaming(
             sid: __validated_manifest(output_dir / f"{sid}.manifest.json", sid, scenario_prefixes[sid])
             for sid in scenario_ids
         }
+        reach_paths = __write_reach_layers(
+            job_id, scenarios, output_dir,
+            {sid: set(manifest.get("missing_reaches", [])) for sid, (_, manifest) in manifests.items()},
+        )
         refs = []
         # Publish manifests only after all tiles finish; existing tiles may already be overwritten.
         for sid, (content, manifest) in manifests.items():
@@ -353,6 +381,11 @@ def __hand_fim_streaming(
             str(readme_path), bucket, readme_key,
             ExtraArgs={"ContentType": "text/markdown"},
         )
+        for sid, path in zip(scenario_ids, reach_paths):
+            client.upload_file(
+                str(path), bucket, reach_keys[sid],
+                ExtraArgs={"ContentType": "application/geo+json"},
+            )
     except BaseException:
         for sid in published:
             key = manifest_keys[sid]
@@ -391,8 +424,12 @@ def __hand_fim_streaming(
     return StoredHandFimResult(
         outputs=[HandFimOutput(ScenarioID=sid) for sid in scenario_ids],
         files=[
-            OutputFile(path=path.name, key=key, size_bytes=path.stat().st_size)
-            for path, key in ((scenarios_path, scenarios_key), (readme_path, readme_key))
+            OutputFile(path=relative, key=key, size_bytes=path.stat().st_size)
+            for path, relative, key in (
+                (scenarios_path, scenarios_path.name, scenarios_key),
+                (readme_path, readme_path.name, readme_key),
+                *((path, f"{sid}/{path.name}", reach_keys[sid]) for sid, path in zip(scenario_ids, reach_paths)),
+            )
         ],
         execution_mode=destination.execution_mode, scenario_manifests=refs, local_output_dir=None,
         **destination.model_dump(include={"output_bucket", "output_prefix"}),
@@ -459,6 +496,7 @@ def hand_fim(
                     ScenarioID=scenario.ScenarioID,
                 )
             )
+        __write_reach_layers(job_id, scenarios, output_dir)
         files = []
         client = s3_client(UUID(job_id)) if destination.output_bucket is not None else None
         output_paths = __output_files(output_dir)
@@ -482,6 +520,7 @@ def hand_fim(
             )
             content_type = (
                 "image/tiff" if path.suffix.lower() in (".tif", ".tiff", ".cog")
+                else "application/geo+json" if path.suffix.lower() == ".geojson"
                 else mimetypes.guess_type(path.name)[0] or "application/octet-stream"
             )
             if client is not None:

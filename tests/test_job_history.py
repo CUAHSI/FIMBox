@@ -329,6 +329,18 @@ class HistoryTests(unittest.TestCase):
         history.persist(self.storage("alice"), self.workspace, record)
         self.assertEqual(self.api.get(f"/jobs/{self.job_id}", headers=self.headers).json()["error"], "failed")
 
+    def test_workspace_jobs_are_listed_newest_submission_first(self):
+        ids = [str(uuid4()) for _ in range(3)]
+        for job_id, submitted in zip(ids, (NOW - timedelta(days=2), NOW, NOW - timedelta(days=1))):
+            archive = self.prepare(job_id)
+            record = history.ArchivedJob.model_validate(archive["history_archive"]["record"])
+            record.submitted_at = submitted
+            record.status = "success"
+            history.persist(self.storage("alice"), self.workspace, record)
+        response = self.api.get("/jobs", headers=self.headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual([job["job_id"] for job in response.json()["jobs"]], [ids[1], ids[2], ids[0]])
+
     def test_read_only_storage_denies_submission_without_enqueue(self):
         self.as_bob()
         self.write_users.remove("bob")

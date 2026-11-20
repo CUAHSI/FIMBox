@@ -103,9 +103,16 @@ making structural changes to the project, so future sessions can rely on it.
 
 ### Issue tracker
 
-Issues and specs live in Jira CAM under Objective CAM-1059, labelled FIMBox.
+Issues and specs live in Jira CAM under Research Project CAM-1034 (Objectives
+CAM-1058, CAM-1059, CAM-1060), labelled FIMBox.
 GitHub CUAHSI/FIMBox is for source code and pull requests only.
 See [issue-tracker guidance](docs/agents/issue-tracker.md).
+
+### Triage labels
+
+Default five-role vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`,
+`ready-for-human`, `wontfix`), applied as Jira labels.
+See [triage-label guidance](docs/agents/triage-labels.md).
 
 ### Domain docs
 

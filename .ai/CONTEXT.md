@@ -875,3 +875,8 @@ uploaded tile by tile.
 - Most of `fimserve`'s original functionality (streamflow retrieval, plotting,
   evaluation, ML enhancement) is disabled in the patched `__init__.py`; only
   download + core HAND-FIM compute are active.
+
+## Agent workflow docs
+
+- `docs/agents/` holds the issue-tracker (Jira `CAM`, Research Project `CAM-1034`), triage-label, and domain-doc config read by the engineering skills.
+- `.github/pull_request_template.md` is the PR template (Jira link, summary, testing, checklist).

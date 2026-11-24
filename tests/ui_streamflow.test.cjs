@@ -525,7 +525,7 @@ test("historical NWM loads reaches in one request, labels products, and only app
   const inputs = ui.json('visit(box).filter((node) => node.type === "datetime-local").map((node) => node.value)');
   assert.equal(inputs.length, 2);
   assert.equal(inputs[0], inputs[1]);
-  assert.match(ui.run("textOf(box.children[2])"), /up to 96 hours/);
+  assert.match(ui.run("textOf(box.children[2])"), /through the current whole UTC hour/);
   assert.match(ui.run("textOf(box.children[2])"), /100 distinct reaches/);
   ui.run("visit(box).find((node) => node.text === 'Load streamflow').listeners.click();");
   for (let i = 0; i < 8; i++) await ui.run("Promise.resolve()");
@@ -554,8 +554,8 @@ test("historical NWM loads reaches in one request, labels products, and only app
   assert.deepEqual(ui.json("scenario.Reaches.map((reach) => reach.Streamflow)"), [2, 0]);
 });
 
-test("historical ranges through 96 hours are merged from non-overlapping 24-sample requests", async () => {
-  for (const hours of [0, 23, 24, 72, 96]) {
+test("historical ranges longer than 96 hours are merged from non-overlapping 24-sample requests", async () => {
+  for (const hours of [0, 23, 24, 72, 96, 120]) {
     const ui = flowPanel();
     ui.run(`
       const historicalRequests = [];
@@ -598,7 +598,7 @@ test("historical ranges through 96 hours are merged from non-overlapping 24-samp
   }
 });
 
-test("historical ranges exceeding 96 hours or not on the hour are rejected before requests", async () => {
+test("historical ranges not on the hour are rejected before requests", async () => {
   const ui = flowPanel();
   ui.run(`
     const historicalRequests = [];
@@ -607,11 +607,8 @@ test("historical ranges exceeding 96 hours or not on the hour are rejected befor
     selectSource("historicalNwm");
     const inputs = visit(box).filter((node) => node.type === "datetime-local");
     inputs[0].value = "2025-07-04T00:00";
-    inputs[1].value = "2025-07-08T01:00";
+    inputs[1].value = "2025-07-04T01:30";
   `);
-  await ui.run('visit(box).find((node) => node.text === "Load streamflow").listeners.click()');
-  assert.match(ui.run("textOf(box.children[3])"), /at most 96 hours.*97 hours/);
-  ui.run('inputs[1].value = "2025-07-04T01:30"');
   await ui.run('visit(box).find((node) => node.text === "Load streamflow").listeners.click()');
   assert.match(ui.run("textOf(box.children[3])"), /times on the hour/);
   assert.equal(ui.run("historicalRequests.length"), 0);

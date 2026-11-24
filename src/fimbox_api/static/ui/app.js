@@ -1121,7 +1121,6 @@ function nwpsPoints(section) {
 const MAX_TIMESTEP_SCENARIOS = 240;
 const TIMESTEP_ID = /^\d{8}T\d{4}Z$/;
 const HOUR_MS = 3600 * 1000;
-const HISTORICAL_MAX_RANGE_HOURS = 96;
 const HISTORICAL_REQUEST_HOURS = 24;
 
 // datetime-local inputs are read and written as UTC.
@@ -1418,7 +1417,7 @@ function showStreamflows(scenario, reaches, box, isCurrent) {
       el("dl", { className: "summary" },
         el("dt", { text: "Time window" }),
         el("dd", { text: historical
-          ? "1979-02-01 01:00 UTC onward, through the current whole UTC hour; select a range of up to 96 hours."
+          ? "1979-02-01 01:00 UTC onward, through the current whole UTC hour."
           : historic
           ? `${RETROSPECTIVE_RANGE.min} to ${RETROSPECTIVE_RANGE.max} (UTC); select up to 92 days per lookup.`
           : series.window }),
@@ -1474,9 +1473,6 @@ function showStreamflows(scenario, reaches, box, isCurrent) {
           }
           if (first % HOUR_MS !== 0 || last % HOUR_MS !== 0) {
             throw new Error("Choose UTC times on the hour.");
-          }
-          if (last - first > HISTORICAL_MAX_RANGE_HOURS * HOUR_MS) {
-            throw new Error(`Choose a range of at most 96 hours; this range spans ${(last - first) / HOUR_MS} hours.`);
           }
           const samples = [];
           const reachIds = reaches.map(canonicalReachId);
@@ -1537,7 +1533,7 @@ function showStreamflows(scenario, reaches, box, isCurrent) {
     };
     [start, end].forEach((input) => input.addEventListener("input", invalidate));
     if (historical) controls.append(el("p", {
-      className: "hint", text: "From and To are UTC hours. The range can span up to 96 hours; both endpoints are included (up to 97 hourly samples).",
+      className: "hint", text: "From and To are UTC hours. Both endpoints are included; long ranges are loaded in batches.",
     }));
     if (dated) controls.append(el("div", { className: "row" },
       el("label", { text: "From (UTC) " }, start), el("label", { text: "to " }, end)), button);

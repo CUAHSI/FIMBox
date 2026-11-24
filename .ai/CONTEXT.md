@@ -309,9 +309,9 @@ is adapted in `terraform/` for Cloud Run. OAuth/session/job-ownership behavior i
       rows once (HUC/ReachID only), then either add a single scenario with
       blank flows or open a group source lookup to build up to 240 timestep
       scenarios from exact UTC timestamps shared by every reach in the set
-      (no interpolation). Historical NWM accepts up to a 96-hour elapsed
-      range (97 inclusive samples), sequentially combines API requests of at
-      most 24 samples, and discards results on failure or invalidation. Each
+      (no interpolation). Historical NWM has no overall range cap and
+      sequentially combines API requests of at most 24 samples, discarding
+      results on failure or invalidation. Each
       generated scenario contains the full reach set, and the set remains
       available for additional scenarios.
       The reach list is a keyboard-focusable scrolling region capped at
